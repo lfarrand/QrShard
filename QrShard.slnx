@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/QrShard/QrShard.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/QrShard.Benchmarks/QrShard.Benchmarks.csproj" />
+    <Project Path="tests/QrShard.Tests/QrShard.Tests.csproj" />
+  </Folder>
+</Solution>

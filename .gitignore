@@ -1,0 +1,15 @@
+# Build output
+bin/
+obj/
+
+# Test & benchmark output
+TestResults/
+BenchmarkDotNet.Artifacts/
+tests/QrShard.Benchmarks/bench-*.log
+
+# IDE / local settings
+.idea/
+.vs/
+*.DotSettings.user
+*.user
+.claude/settings.local.json

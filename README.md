@@ -1,0 +1,191 @@
+# QrShard
+
+Encodes any file into a series of high-density, QR-style PNG images that can be captured by
+screenshot on another device and reconstituted back into the original file, bit-for-bit.
+
+The format is custom (not QR-standard) and tuned for screen-to-screenshot transfer rather than
+camera capture, which allows far higher data density than a real QR code.
+
+## Usage
+
+```
+dotnet run --project src/QrShard -c Release -- <command> ...
+```
+
+```
+qrshard encode <file> [options]     Split a file into shard images.
+  -o, --out <dir>          Output folder (default: <file>.shards next to the input)
+  -r, --resolution <px>    Image size: one number (square) or WxH, 700-16384
+                           (default: 2160; try 3840x2160 for a 4K display)
+  -c, --cell <px>          Data cell size in pixels, 1-64 (default: 3)
+  -b, --bits <n>           Bits per cell / color density, 1-8 (default: 4)
+  -e, --ecc <n>            Reed-Solomon parity per 255-byte block, even, 0-64
+                           (default: 16 ≈ 6% overhead, fixes 8 bad bytes per block)
+  -R, --recovery <pct>     Add parity IMAGES so whole missing/damaged images can be rebuilt
+                           without recapture; pct% extra images, 0-100 (default: 0)
+  --no-compress            Skip deflate compression of the payload
+
+qrshard decode <folder|images...> [-o <file>]
+                           Reconstitute the original file from captured images.
+qrshard info <image>       Show and validate a single shard image.
+qrshard test               Round-trip self-test, including simulated screenshots.
+```
+
+## Capacity and throughput
+
+Per image (with the default ECC): `bytes ≈ grid cells × bits/cell / 8 × 239/255 − ~100`
+
+| Resolution  | Cell | Bits | Payload/image | Capture tolerance |
+|------------:|-----:|-----:|--------------:|-------------------|
+| 2160²       | 3 px | 4    | ~212 KB       | robust — padding, 1.25-1.5x rescaling, cursors/overlays (default) |
+| 2160²       | 2 px | 6    | ~716 KB       | pixel-perfect captures (100% zoom & display scaling) |
+| 3840x2160   | 1 px | 6    | ~4.9 MB       | pixel-perfect; fits a 4K display exactly |
+| 3840x2160   | 1 px | 8    | ~6.5 MB       | pixel-perfect, ideal conditions |
+| 4096²       | 1 px | 8    | ~14.1 MB      | pixel-perfect; needs a >4K display to show at 100% |
+
+Measured on a desktop CPU (parallel codec):
+
+- **300 MB file @ 3840x2160 / cell 1 / 6 bits / 10% recovery → 72 images** (65 data + 7 parity),
+  encoded in **54 s**, decoded in **6 s**. Deleting 3 whole images before decoding still produced a
+  byte-identical, SHA-256-verified file (rebuilt from parity). Codec throughput ≈ 6 MB/s encode,
+  ≈ 50 MB/s decode; on disk ≈ 543 MB of PNGs.
+- 20 MB @ defaults → 95 images, ≈ 10 MB/s encode, ≈ 20 MB/s decode.
+
+**Can you transfer a 300 MB zip? Yes.** At 4K density it is ~65 images; with `-R 10` you also get 7
+parity images so any 7 can be lost. The codec itself is never the bottleneck (≈1 minute total for
+300 MB). End-to-end time is dominated by *capture cadence*: at a manual ~3 s per screenshot, ~72
+images ≈ **3-4 minutes** of capturing (~1 MB/s effective). An automated capture loop (a script
+paging through the images and screenshotting each) pushes that several-fold. At the robust default
+density (~212 KB/image) the same 300 MB would instead be ~1,450 images — fine for an automated
+loop, tedious by hand — which is why a dense config on a 4K display is the right choice for large
+files. Hard limits: ≤ 1.5 GB per file (in-memory codec); display size caps per-image resolution
+(the code must be shown at 100% zoom to be pixel-perfect).
+
+Deflate compression is applied automatically when a fast mid-file sample suggests it will help,
+so compressible files transfer in correspondingly fewer images (already-compressed archives skip
+straight to encoding).
+
+## Resilience
+
+Four independent layers, from within-image to whole-image:
+
+1. **Reed-Solomon error correction** (`--ecc`, default parity 16): each image's cell stream is
+   split into RS codewords whose symbols are interleaved across the image, so localized damage —
+   a mouse cursor, a notification toast, mild JPEG re-encoding artifacts — spreads thinly over
+   many codewords and is corrected transparently. Default tolerance ≈ 8 damaged bytes per
+   255-byte block ≈ a contiguous blob of several thousand cells on a default image.
+2. **Cross-shard parity** (`--recovery`, opt-in): extra *parity images* let you lose, delete, or
+   fail to capture whole images and rebuild them without recapture. Images are grouped into
+   stripes; a stripe of *S* data images gets *P* parity images (a systematic Cauchy Reed-Solomon
+   erasure code over GF(2⁸)), and **any** *S* of the *S+P* reconstruct the stripe — there are no
+   unlucky loss patterns. `-R 10` tolerates losing ~10% of the images. This is the layer that
+   matters for large multi-image transfers, where finding and recapturing one bad screenshot out
+   of hundreds is the real pain point.
+3. **Detection**: a CRC-32 of each image's payload plus a CRC-32-protected header. Damage beyond
+   ECC capacity makes an image unreadable — it is then treated as a missing image and recovered by
+   layer 2 if parity allows, otherwise reported by exact part number. A SHA-256 of the whole file,
+   carried in every image, is verified after reassembly — a successful decode is a cryptographic
+   guarantee of a bit-identical file.
+4. **Structural redundancy**: the self-describing metadata strip (grid geometry, density, ECC
+   level; CRC-16) and the palette calibration strip are both duplicated top and bottom, so an
+   overlay across either edge cannot brick an image. The decoder auto-selects the healthier
+   palette copy and falls back between metadata copies.
+
+Parity images are self-labelling (`…qrs-parity003of007.png`) and carry the stripe geometry in
+every header, so the decoder discovers the recovery layout from any surviving image.
+
+The decoder locates the black locator frame anywhere in the screenshot (multiple ring candidates
+are tried until one's metadata validates, so dark desktop surroundings don't confuse it),
+measures its inner edge with subpixel precision, and tolerates cropping, padding, and uniform
+rescaling. Shards are order-independent, duplicate-tolerant, filename-agnostic, and multiple
+files' shards can be mixed in one folder (grouped by random 64-bit file ID).
+
+## Image format
+
+```
+┌──────────────────────────────────────┐
+│ white quiet zone                     │
+│ ┌──────────────────────────────────┐ │
+│ │ solid black locator frame        │ │  ← found automatically in the screenshot
+│ │ ┌──────────────────────────────┐ │ │
+│ │ │ metadata strip (128 modules) │ │ │  ← geometry + density + ECC level; CRC-16
+│ │ │ palette calibration strip    │ │ │  ← decoder classifies vs measured colors
+│ │ │                              │ │ │
+│ │ │ data grid: W x H cells,      │ │ │  ← RS-protected interleaved bitstream:
+│ │ │ 2^bits palette colors        │ │ │    header + payload + RS parity
+│ │ │                              │ │ │
+│ │ │ palette calibration strip    │ │ │  ← redundant bottom copies
+│ │ │ metadata strip (copy)        │ │ │
+│ │ └──────────────────────────────┘ │ │
+│ └──────────────────────────────────┘ │
+└──────────────────────────────────────┘
+```
+
+## Capture tips
+
+- Display the PNG at **100% zoom** and screenshot it (a cropped region capture is fine — just
+  include the whole black frame with a little margin).
+- On a 4K display, encode with `-r 3840x2160` and view fullscreen for maximum per-image payload.
+- For cell sizes below 3 px the capture must be pixel-perfect: avoid fractional display scaling
+  (125%/150%) and browser zoom.
+- Cursors, small overlays, and high-quality JPEG re-encoding are absorbed by ECC; raise
+  `--ecc` (e.g. 32) for hostile conditions, or lower it toward 0 for maximum capacity.
+- Rotation/perspective is not supported — this is a screenshot format, not a camera format.
+
+## Building and testing
+
+Requires the .NET 10 SDK. `dotnet build -c Release` at the solution root.
+Uses SixLabors.ImageSharp 3.1.x (pinned below 4.0, which requires a commercial license key at
+build time; 3.1 is free under the Six Labors Split License for open source and small business).
+
+- `dotnet test` — 217 xUnit tests, ~2 s, **97% line / 92% branch coverage** of the codec
+  (`dotnet test --collect:"XPlat Code Coverage"` to reproduce). Covers: CRC check-vectors,
+  GF(2⁸) field laws and matrix inversion, Reed-Solomon (max-error correction, beyond-capacity
+  detection, shortened codewords), FEC interleaving (burst and scatter damage), cross-shard
+  erasure coding (exhaustive loss-pattern MDS verification, mixed data/parity loss, degenerate
+  and max-size stripes), palette construction/classification, bit packing, layout geometry incl.
+  non-square, metadata strip (every-single-bit-flip rejection), header robustness
+  (corruption/truncation/unicode/parity), full round trips across density and ECC configs,
+  simulated captures (padded/rescaled/cropped/dark-background/JPEG), damage recovery (cursor,
+  banner, dead strips, excessive damage fails cleanly), whole-image recovery (deleted and
+  destroyed images rebuilt from parity, loss-beyond-budget fails cleanly), shard-set handling
+  (missing, duplicate, corrupt-among-good, multi-file folders, overwrite protection), and the CLI.
+- `qrshard test` — end-to-end self-test at real resolutions (up to a 14 MB single image),
+  including simulated screenshots with cursor damage and a cross-shard recovery scenario.
+
+## Benchmarks
+
+`tests/QrShard.Benchmarks` is a [BenchmarkDotNet](https://benchmarkdotnet.org/) suite measuring
+encode (file → shard PNGs on disk) and decode (PNGs → SHA-verified file) across file sizes
+**1 KB, 10 KB, 100 KB, 500 KB, 1 MB, 10 MB, 100 MB, 250 MB, 500 MB, 1 GB** and four config
+presets: `Default` (2160², cell 3, 4 bits), `Dense` (2160², cell 2, 6 bits), `Max4K`
+(3840x2160, cell 1, 6 bits), and `Max4K-R10` (Max4K + 10% cross-shard parity). Payloads are
+generated deterministically (incompressible, zip-like) and every decode iteration is verified
+byte-identical via SHA-256 outside the timed region.
+
+```
+cd tests/QrShard.Benchmarks
+dotnet run -c Release                      # full matrix — takes ~2 hours, needs ~5 GB temp disk
+                                           #   and ~8 GB free RAM for the 1 GB cases
+
+# Trim either axis without editing code:
+QRSHARD_BENCH_SIZES=1KB,1MB,100MB QRSHARD_BENCH_PRESETS=Default,Max4K dotnet run -c Release
+
+dotnet run -c Release -- --graphs-only     # regenerate graphs from persisted results, no runs
+```
+
+Long-running macro-benchmarks use the Monitoring run strategy (1 warmup + 3 measured iterations
+per case) rather than BenchmarkDotNet's micro-benchmark defaults, which would take days at 1 GB.
+Results persist in `results/transfer-results.json` and **merge across runs** — benchmark the
+small sizes now and the 1 GB cases overnight, and the graphs always show everything measured
+so far (latest measurement of a case wins).
+
+Results land in `BenchmarkDotNet.Artifacts/results/`:
+
+- the standard BenchmarkDotNet table (console + GitHub-markdown + CSV);
+- **`transfer-graphs.html`** — self-contained SVG charts generated from the run: codec time vs
+  file size (log-log), estimated end-to-end transfer time including screenshot cadence (manual
+  3 s/image and automated 0.5 s/image), codec throughput, and the full numbers table;
+- `[RPlotExporter]` boxplot/density `.png` graphs as described on the BenchmarkDotNet homepage —
+  these require [R](https://www.r-project.org/) with `Rscript` on `PATH`; without R the exporter
+  is skipped (the HTML graphs are produced regardless).
