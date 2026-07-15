@@ -16,7 +16,11 @@ internal static class Fec
 
     public static int DataLength(int parity) => CodewordLength - parity;
 
-    /// <summary>Encodes and interleaves the stream into a cwCount*255-byte cell buffer.</summary>
+    /// <summary>
+    /// Encodes and interleaves the stream into a cwCount*255-byte cell buffer.
+    /// Sequential by design: callers already parallelize per image, and nested
+    /// Parallel.For loops only add scheduler contention.
+    /// </summary>
     public static byte[] Protect(byte[] stream, int parity, int cwCount)
     {
         int dataLen = DataLength(parity);
@@ -24,9 +28,9 @@ internal static class Fec
             throw new ArgumentException("Stream exceeds the protected capacity.");
 
         var buffer = new byte[cwCount * CodewordLength];
-        Parallel.For(0, cwCount, j =>
+        Span<byte> cw = stackalloc byte[CodewordLength];
+        for (int j = 0; j < cwCount; j++)
         {
-            Span<byte> cw = stackalloc byte[CodewordLength];
             for (int i = 0; i < dataLen; i++)
             {
                 int src = j * dataLen + i;
@@ -35,7 +39,7 @@ internal static class Fec
             ReedSolomon.Encode(cw[..dataLen], cw[dataLen..]);
             for (int i = 0; i < CodewordLength; i++)
                 buffer[i * cwCount + j] = cw[i];
-        });
+        }
         return buffer;
     }
 
@@ -49,22 +53,22 @@ internal static class Fec
         var result = new byte[cwCount * dataLen];
         int corrected = 0, failures = 0;
 
-        Parallel.For(0, cwCount, j =>
+        Span<byte> cw = stackalloc byte[CodewordLength];
+        for (int j = 0; j < cwCount; j++)
         {
-            Span<byte> cw = stackalloc byte[CodewordLength];
             for (int i = 0; i < CodewordLength; i++)
                 cw[i] = buffer[i * cwCount + j];
 
             if (ReedSolomon.TryDecode(cw, parity, out int errors))
             {
                 cw[..dataLen].CopyTo(result.AsSpan(j * dataLen));
-                Interlocked.Add(ref corrected, errors);
+                corrected += errors;
             }
             else
             {
-                Interlocked.Increment(ref failures);
+                failures++;
             }
-        });
+        }
 
         stream = result;
         correctedBytes = corrected;

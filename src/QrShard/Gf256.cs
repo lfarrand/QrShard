@@ -1,3 +1,5 @@
+using System.Runtime.Intrinsics;
+
 namespace QrShard;
 
 /// <summary>
@@ -45,13 +47,42 @@ internal static class Gf256
     /// <summary>
     /// Multiply-accumulate a whole shard: dst[i] ^= coef * src[i] over GF(2^8).
     /// This is the inner loop of both encoding and reconstruction.
+    ///
+    /// Vectorized via the classic nibble-shuffle technique: a GF product by a fixed coefficient
+    /// splits as coef*b = coef*(b_hi·16) ^ coef*b_lo, so two 16-entry product tables used as
+    /// byte-shuffle sources multiply 16 bytes per step.
     /// </summary>
     public static void MulAdd(byte coef, ReadOnlySpan<byte> src, Span<byte> dst)
     {
         if (coef == 0)
             return;
+
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && src.Length >= 16)
+        {
+            Span<byte> lo = stackalloc byte[16];
+            Span<byte> hi = stackalloc byte[16];
+            for (int n = 0; n < 16; n++)
+            {
+                lo[n] = Mul(coef, (byte)n);
+                hi[n] = Mul(coef, (byte)(n << 4));
+            }
+            var tableLo = Vector128.Create<byte>(lo);
+            var tableHi = Vector128.Create<byte>(hi);
+            var nibble = Vector128.Create((byte)0x0F);
+
+            for (; i <= src.Length - 16; i += 16)
+            {
+                var v = Vector128.Create<byte>(src.Slice(i, 16));
+                var idxLo = v & nibble;
+                var idxHi = Vector128.ShiftRightLogical(v.AsUInt16(), 4).AsByte() & nibble;
+                var product = Vector128.ShuffleNative(tableLo, idxLo) ^ Vector128.ShuffleNative(tableHi, idxHi);
+                (Vector128.Create<byte>(dst.Slice(i, 16)) ^ product).CopyTo(dst.Slice(i, 16));
+            }
+        }
+
         int logC = Log[coef];
-        for (int i = 0; i < src.Length; i++)
+        for (; i < src.Length; i++)
         {
             byte s = src[i];
             if (s != 0)

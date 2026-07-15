@@ -20,19 +20,24 @@ internal static class Decoder
         var ordered = imagePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
         var results = new (DecodedShard? Shard, string? Error)[ordered.Count];
 
+        // One reusable scratch (pixel + visited buffers, the two large per-image allocations)
+        // per worker: decoding N images then costs ~2 buffers per worker instead of 2N GC'd arrays.
         Parallel.For(0, ordered.Count,
-            new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, 8) },
-            i =>
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, 16) },
+            () => new DecodeScratch(),
+            (i, _, scratch) =>
             {
                 try
                 {
-                    results[i] = (DecodeImage(ordered[i]), null);
+                    results[i] = (DecodeImage(ordered[i], scratch), null);
                 }
                 catch (ShardDecodeException ex)
                 {
                     results[i] = (null, ex.Message);
                 }
-            });
+                return scratch;
+            },
+            _ => { });
 
         var shards = new List<DecodedShard>();
         for (int i = 0; i < ordered.Count; i++)
@@ -234,7 +239,32 @@ internal static class Decoder
 
     // ---------- Single-image decode ----------
 
-    public static DecodedShard DecodeImage(string path)
+    /// <summary>Reusable per-worker buffers for the two large per-image allocations.</summary>
+    internal sealed class DecodeScratch
+    {
+        private Rgb24[]? _pixels;
+        private bool[]? _visited;
+
+        public Rgb24[] Pixels(int length)
+        {
+            if (_pixels is null || _pixels.Length < length)
+                _pixels = new Rgb24[length];
+            return _pixels;
+        }
+
+        public bool[] ClearedVisited(int length)
+        {
+            if (_visited is null || _visited.Length < length)
+                _visited = new bool[length];
+            else
+                Array.Clear(_visited, 0, length);
+            return _visited;
+        }
+    }
+
+    public static DecodedShard DecodeImage(string path) => DecodeImage(path, new DecodeScratch());
+
+    internal static DecodedShard DecodeImage(string path, DecodeScratch scratch)
     {
         Image<Rgb24> image;
         try
@@ -249,14 +279,14 @@ internal static class Decoder
         Bitmap bmp;
         using (image)
         {
-            var px = new Rgb24[image.Width * image.Height];
-            image.CopyPixelDataTo(px);
+            var px = scratch.Pixels(image.Width * image.Height);
+            image.CopyPixelDataTo(px.AsSpan(0, image.Width * image.Height));
             bmp = new Bitmap(px, image.Width, image.Height);
         }
 
         // Several dark rings can plausibly be the locator frame (e.g. a dark desktop border around
         // the capture also forms a ring); try candidates largest-first until the metadata validates.
-        var candidates = FindFrameCandidates(bmp);
+        var candidates = FindFrameCandidates(bmp, scratch.ClearedVisited(bmp.Width * bmp.Height));
         if (candidates.Count == 0)
             throw new ShardDecodeException("Could not locate the black frame. Crop the screenshot to the code (keep some white margin) and try again.");
 
@@ -343,10 +373,9 @@ internal static class Decoder
     /// square, ring-shaped (low fill density), and covers its own bounding-box edges.
     /// Returned largest-first; the caller validates each against the metadata strip.
     /// </summary>
-    private static List<Rect> FindFrameCandidates(Bitmap bmp)
+    private static List<Rect> FindFrameCandidates(Bitmap bmp, bool[] visited)
     {
         int w = bmp.Width, h = bmp.Height;
-        var visited = new bool[w * h];
         var stack = new Stack<int>();
         var candidates = new List<Rect>();
 

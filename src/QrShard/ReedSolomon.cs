@@ -11,6 +11,8 @@ internal static class ReedSolomon
     private static readonly byte[] Exp = new byte[512];
     private static readonly byte[] Log = new byte[256];
     private static readonly ConcurrentDictionary<int, byte[]> Generators = new();
+    private static readonly ConcurrentDictionary<int, byte[][]> EncodeTables = new();
+    private static readonly byte[][] AlphaMul; // AlphaMul[i][x] = x * α^i — hot path of syndrome computation
 
     static ReedSolomon()
     {
@@ -25,6 +27,14 @@ internal static class ReedSolomon
         }
         for (int i = 255; i < 512; i++)
             Exp[i] = Exp[i - 255];
+
+        AlphaMul = new byte[Fec.MaxParity][];
+        for (int i = 0; i < Fec.MaxParity; i++)
+        {
+            AlphaMul[i] = new byte[256];
+            for (int v = 0; v < 256; v++)
+                AlphaMul[i][v] = Mul((byte)v, Exp[i]);
+        }
     }
 
     private static byte Mul(byte a, byte b) => a == 0 || b == 0 ? (byte)0 : Exp[Log[a] + Log[b]];
@@ -48,24 +58,42 @@ internal static class ReedSolomon
         return g;
     });
 
+    /// <summary>
+    /// Per-nsym table: row c holds coefficient c multiplied through the generator tail, so the
+    /// LFSR inner loop is a straight XOR of a precomputed row instead of nsym field multiplies.
+    /// </summary>
+    private static byte[][] EncodeTable(int nsym) => EncodeTables.GetOrAdd(nsym, n =>
+    {
+        byte[] gen = Generator(n);
+        var table = new byte[256][];
+        for (int c = 0; c < 256; c++)
+        {
+            var row = new byte[n];
+            for (int i = 0; i < n; i++)
+                row[i] = Mul(gen[i + 1], (byte)c);
+            table[c] = row;
+        }
+        return table;
+    });
+
     /// <summary>Computes parity symbols for the data (systematic encoding, LFSR division).</summary>
     public static void Encode(ReadOnlySpan<byte> data, Span<byte> parity)
     {
         int nsym = parity.Length;
         if (nsym == 0)
             return;
-        byte[] gen = Generator(nsym);
+        byte[][] table = EncodeTable(nsym);
         parity.Clear();
         foreach (byte d in data)
         {
             byte coef = (byte)(d ^ parity[0]);
-            for (int i = 0; i < nsym - 1; i++)
-                parity[i] = parity[i + 1];
+            parity[1..].CopyTo(parity); // shift the register left one symbol
             parity[nsym - 1] = 0;
             if (coef != 0)
             {
+                byte[] row = table[coef];
                 for (int i = 0; i < nsym; i++)
-                    parity[i] ^= Mul(gen[i + 1], coef);
+                    parity[i] ^= row[i];
             }
         }
     }
@@ -82,13 +110,16 @@ internal static class ReedSolomon
         int n = codeword.Length;
 
         // Syndromes S_i = C(α^i); codeword[0] is the highest-degree coefficient.
+        // Horner evaluation via the per-α multiplication tables — the no-error case (the vast
+        // majority of codewords) spends all its time here.
         Span<byte> synd = stackalloc byte[nsym];
         bool clean = true;
         for (int i = 0; i < nsym; i++)
         {
-            byte a = Exp[i], s = 0;
+            byte[] mulA = AlphaMul[i];
+            byte s = 0;
             foreach (byte c in codeword)
-                s = (byte)(Mul(s, a) ^ c);
+                s = (byte)(mulA[s] ^ c);
             synd[i] = s;
             clean &= s == 0;
         }
@@ -171,9 +202,10 @@ internal static class ReedSolomon
         // Verify: all syndromes of the corrected codeword must vanish.
         for (int i = 0; i < nsym; i++)
         {
-            byte a = Exp[i], s = 0;
+            byte[] mulA = AlphaMul[i];
+            byte s = 0;
             foreach (byte c in codeword)
-                s = (byte)(Mul(s, a) ^ c);
+                s = (byte)(mulA[s] ^ c);
             if (s != 0)
                 return false;
         }

@@ -43,16 +43,15 @@ Per image (with the default ECC): `bytes ≈ grid cells × bits/cell / 8 × 239/
 | 3840x2160   | 1 px | 8    | ~6.5 MB       | pixel-perfect, ideal conditions |
 | 4096²       | 1 px | 8    | ~14.1 MB      | pixel-perfect; needs a >4K display to show at 100% |
 
-Measured on a desktop CPU (parallel codec):
+Measured on a desktop CPU (32 logical cores, parallel codec):
 
-- **300 MB file @ 3840x2160 / cell 1 / 6 bits / 10% recovery → 72 images** (65 data + 7 parity),
-  encoded in **54 s**, decoded in **6 s**. Deleting 3 whole images before decoding still produced a
-  byte-identical, SHA-256-verified file (rebuilt from parity). Codec throughput ≈ 6 MB/s encode,
-  ≈ 50 MB/s decode; on disk ≈ 543 MB of PNGs.
-- 20 MB @ defaults → 95 images, ≈ 10 MB/s encode, ≈ 20 MB/s decode.
+- **100 MB @ 3840x2160 / cell 1 / 6 bits / 10% recovery → 24 images, encoded in ~1 s, decoded
+  in ~1.2 s** — roughly 100 MB/s encode, 85 MB/s decode. Deleting whole images before decoding
+  still produces a byte-identical, SHA-256-verified file (rebuilt from parity).
+- 100 MB @ robust defaults → 485 images, ~2.8 s encode / ~2.4 s decode.
 
 **Can you transfer a 300 MB zip? Yes.** At 4K density it is ~65 images; with `-R 10` you also get 7
-parity images so any 7 can be lost. The codec itself is never the bottleneck (≈1 minute total for
+parity images so any 7 can be lost. The codec itself is never the bottleneck (a few seconds for
 300 MB). End-to-end time is dominated by *capture cadence*: at a manual ~3 s per screenshot, ~72
 images ≈ **3-4 minutes** of capturing (~1 MB/s effective). An automated capture loop (a script
 paging through the images and screenshotting each) pushes that several-fold. At the robust default
@@ -60,6 +59,29 @@ density (~212 KB/image) the same 300 MB would instead be ~1,450 images — fine 
 loop, tedious by hand — which is why a dense config on a 4K display is the right choice for large
 files. Hard limits: ≤ 1.5 GB per file (in-memory codec); display size caps per-image resolution
 (the code must be shown at 100% zoom to be pixel-perfect).
+
+### Codec performance design
+
+- **One flat parallel loop over all images** (data + parity together, no phase barrier), with a
+  **thread-local pixel canvas** per worker — reused across images instead of a fresh 15-50 MB
+  allocation each. Worker count adapts to a ~2 GB pixel-buffer budget, so normal resolutions use
+  every core while 16K images cap themselves.
+- **PNG settings tuned to shard content**: level-1 deflate (dense cell data is nearly
+  incompressible; ImageSharp's default level-6 adaptive filtering cost ~3x the encode time and
+  *hurt* compression of noise-like data), with the "Up" filter only where cell rows repeat.
+- **Decode workers reuse scratch buffers** (pixels + flood-fill visited map) — decoding 100 MB
+  previously allocated ~9.5 GB of garbage; now ~2 buffers per worker, and the folder decode uses
+  up to 16 workers.
+- **Table-driven Reed-Solomon**: the encoder's LFSR inner loop XORs a precomputed 256-row
+  generator table instead of doing per-symbol field multiplies; syndrome computation (the
+  every-codeword hot path on decode) uses per-α multiplication tables.
+- **SIMD GF(2⁸) for cross-shard parity**: `MulAdd` uses the nibble-shuffle technique
+  (two 16-entry product tables as byte-shuffle sources, 16 bytes per step) via `Vector128`.
+- **No nested parallelism**: per-image FEC is sequential inside the already-parallel per-image
+  loops, avoiding scheduler contention.
+
+Result (100 MB, 32 cores): Max4K encode went from 18.2 s to ~0.9 s, Max4K-R10 from 24.4 s to
+~1.0 s; default-preset encode 6.5 → 2.8 s, decode 4.3 → 2.4 s. All presets remain byte-verified.
 
 Deflate compression is applied automatically when a fast mid-file sample suggests it will help,
 so compressible files transfer in correspondingly fewer images (already-compressed archives skip

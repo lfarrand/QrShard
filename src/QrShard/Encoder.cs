@@ -92,78 +92,97 @@ internal static class Encoder
             }
         }
 
-        var dataFiles = new string[count];
-        var parityFiles = new string[parityTotal];
+        var files = new string[count + parityTotal];
         int done = 0, totalImages = count + parityTotal;
 
-        int degree = (long)layout.Width * layout.Height > 8_000_000
-            ? Math.Min(4, Environment.ProcessorCount)
-            : Environment.ProcessorCount;
+        // Parallelism is bounded by pixel-buffer memory (one reusable buffer per worker),
+        // budgeting ~2 GB of buffers: plenty of workers at normal resolutions, few at 16K.
+        long pixelBytes = (long)layout.Width * layout.Height * 3;
+        int degree = (int)Math.Clamp(2_000_000_000 / Math.Max(1, pixelBytes), 1, Environment.ProcessorCount);
         var po = new ParallelOptions { MaxDegreeOfParallelism = degree };
+        var pngEncoder = ShardPngEncoder(layout);
 
-        // Data images.
-        Parallel.For(0, count, po, i =>
-        {
-            long offset = (long)i * capacity;
-            int payloadLen = (int)Math.Min(capacity, data.LongLength - offset);
-            var payload = data.AsSpan((int)offset, payloadLen);
-
-            var header = new ShardHeader
+        // Data and parity images in ONE parallel loop (no barrier between the phases), with a
+        // thread-local pixel buffer so each worker allocates its ~15-50 MB canvas exactly once.
+        Parallel.For(0, totalImages, po,
+            () => new Rgb24[layout.Width * layout.Height],
+            (i, _, px) =>
             {
-                FileId = fileId,
-                Index = i,
-                Count = count,
-                PayloadLength = payloadLen,
-                PayloadCrc32 = Crc.Crc32(payload),
-                TotalLength = data.LongLength,
-                OriginalLength = original.LongLength,
-                Flags = flags,
-                Sha256 = sha,
-                FileName = fileName,
-                StripeData = stripeData,
-                StripeParity = stripeParity,
-            };
+                ShardHeader header;
+                ReadOnlySpan<byte> payload;
+                string outPath;
+                if (i < count)
+                {
+                    long offset = (long)i * capacity;
+                    int payloadLen = (int)Math.Min(capacity, data.LongLength - offset);
+                    payload = data.AsSpan((int)offset, payloadLen);
+                    header = new ShardHeader
+                    {
+                        FileId = fileId,
+                        Index = i,
+                        Count = count,
+                        PayloadLength = payloadLen,
+                        PayloadCrc32 = Crc.Crc32(payload),
+                        TotalLength = data.LongLength,
+                        OriginalLength = original.LongLength,
+                        Flags = flags,
+                        Sha256 = sha,
+                        FileName = fileName,
+                        StripeData = stripeData,
+                        StripeParity = stripeParity,
+                    };
+                    outPath = Path.Combine(outDir, $"{fileName}.qrs{(i + 1).ToString().PadLeft(dataPad, '0')}of{count.ToString().PadLeft(dataPad, '0')}.png");
+                }
+                else
+                {
+                    int ord = i - count;
+                    byte[] parity = parityChunks[ord];
+                    payload = parity;
+                    header = new ShardHeader
+                    {
+                        FileId = fileId,
+                        Index = ord,
+                        Count = count,
+                        PayloadLength = parity.Length,
+                        PayloadCrc32 = Crc.Crc32(parity),
+                        TotalLength = data.LongLength,
+                        OriginalLength = original.LongLength,
+                        Flags = (byte)(flags | ShardHeader.FlagParity),
+                        Sha256 = sha,
+                        FileName = fileName,
+                        StripeData = stripeData,
+                        StripeParity = stripeParity,
+                    };
+                    outPath = Path.Combine(outDir, $"{fileName}.qrs-parity{(ord + 1).ToString().PadLeft(3, '0')}of{parityTotal.ToString().PadLeft(3, '0')}.png");
+                }
 
-            string outPath = Path.Combine(outDir, $"{fileName}.qrs{(i + 1).ToString().PadLeft(dataPad, '0')}of{count.ToString().PadLeft(dataPad, '0')}.png");
-            RenderShard(layout, palette, metaModules, header, payload, outPath);
-            dataFiles[i] = outPath;
-            int finished = Interlocked.Increment(ref done);
-            log?.Invoke($"  [{finished}/{totalImages}] {Path.GetFileName(outPath)} ({payloadLen:N0} bytes)");
-        });
+                RenderShard(layout, palette, metaModules, header, payload, outPath, px, pngEncoder);
+                files[i] = outPath;
+                int finished = Interlocked.Increment(ref done);
+                log?.Invoke($"  [{finished}/{totalImages}] {Path.GetFileName(outPath)}" +
+                            (i < count ? $" ({header.PayloadLength:N0} bytes)" : " (parity)"));
+                return px;
+            },
+            _ => { });
 
-        // Parity images.
-        Parallel.For(0, parityTotal, po, ord =>
-        {
-            byte[] parity = parityChunks[ord];
-            var header = new ShardHeader
-            {
-                FileId = fileId,
-                Index = ord,
-                Count = count,
-                PayloadLength = parity.Length,
-                PayloadCrc32 = Crc.Crc32(parity),
-                TotalLength = data.LongLength,
-                OriginalLength = original.LongLength,
-                Flags = (byte)(flags | ShardHeader.FlagParity),
-                Sha256 = sha,
-                FileName = fileName,
-                StripeData = stripeData,
-                StripeParity = stripeParity,
-            };
-
-            string outPath = Path.Combine(outDir, $"{fileName}.qrs-parity{(ord + 1).ToString().PadLeft(3, '0')}of{parityTotal.ToString().PadLeft(3, '0')}.png");
-            RenderShard(layout, palette, metaModules, header, parity, outPath);
-            parityFiles[ord] = outPath;
-            int finished = Interlocked.Increment(ref done);
-            log?.Invoke($"  [{finished}/{totalImages}] {Path.GetFileName(outPath)} (parity)");
-        });
-
-        var files = new List<string>(count + parityTotal);
-        files.AddRange(dataFiles);
-        files.AddRange(parityFiles);
-        return new EncodeResult(totalImages, capacity, layout.Width, layout.Height, files,
+        return new EncodeResult(totalImages, capacity, layout.Width, layout.Height, [.. files],
             count, parityTotal, stripeData, stripeParity);
     }
+
+    /// <summary>
+    /// PNG settings tuned for shard content: level-1 deflate (dense cell data is nearly
+    /// incompressible, so higher effort buys little) and, for cells of 2+ px, the "Up" filter
+    /// (rows repeat CellPx times, which Up turns into runs of zeros). Level 6 adaptive — the
+    /// ImageSharp default — costs ~3x the encode time for a marginal size difference here.
+    /// </summary>
+    private static SixLabors.ImageSharp.Formats.Png.PngEncoder ShardPngEncoder(Layout layout) => new()
+    {
+        CompressionLevel = SixLabors.ImageSharp.Formats.Png.PngCompressionLevel.Level1,
+        FilterMethod = layout.CellPx >= 2
+            ? SixLabors.ImageSharp.Formats.Png.PngFilterMethod.Up
+            : SixLabors.ImageSharp.Formats.Png.PngFilterMethod.None,
+        ColorType = SixLabors.ImageSharp.Formats.Png.PngColorType.Rgb,
+    };
 
     /// <summary>
     /// Chooses stripe geometry for a given recovery target. Parity is a percentage of the data
@@ -183,7 +202,8 @@ internal static class Encoder
         return (stripeData, stripeParity);
     }
 
-    private static void RenderShard(Layout layout, Rgb24[] palette, byte[] metaModules, ShardHeader header, ReadOnlySpan<byte> payload, string outPath)
+    private static void RenderShard(Layout layout, Rgb24[] palette, byte[] metaModules, ShardHeader header,
+        ReadOnlySpan<byte> payload, string outPath, Rgb24[] px, SixLabors.ImageSharp.Formats.Png.PngEncoder pngEncoder)
     {
         byte[] headerBytes = header.Serialize();
         byte[] stream = new byte[headerBytes.Length + payload.Length];
@@ -193,13 +213,13 @@ internal static class Encoder
         byte[] cellBuffer = layout.EccParity > 0
             ? Fec.Protect(stream, layout.EccParity, layout.CodewordCount)
             : stream;
-        Render(layout, palette, metaModules, cellBuffer, outPath);
+        Render(layout, palette, metaModules, cellBuffer, outPath, px, pngEncoder);
     }
 
-    private static void Render(Layout layout, Rgb24[] palette, byte[] metaModules, byte[] cellBuffer, string outPath)
+    private static void Render(Layout layout, Rgb24[] palette, byte[] metaModules, byte[] cellBuffer, string outPath,
+        Rgb24[] px, SixLabors.ImageSharp.Formats.Png.PngEncoder pngEncoder)
     {
         int w = layout.Width, h = layout.Height;
-        var px = new Rgb24[w * h];
         var white = new Rgb24(255, 255, 255);
         var black = new Rgb24(0, 0, 0);
         Array.Fill(px, white);
@@ -233,8 +253,8 @@ internal static class Encoder
             }
         }
 
-        using var image = Image.LoadPixelData<Rgb24>(px, w, h);
-        image.SaveAsPng(outPath);
+        using var image = Image.LoadPixelData<Rgb24>(px.AsSpan(0, w * h), w, h);
+        image.SaveAsPng(outPath, pngEncoder);
     }
 
     private static void DrawMetaStrip(Rgb24[] px, int stride, Layout layout, byte[] metaModules, int ix, int yTop)
