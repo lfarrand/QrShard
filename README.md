@@ -33,6 +33,13 @@ qrshard info <image>       Show and validate a single shard image.
 qrshard test               Round-trip self-test, including simulated screenshots.
 ```
 
+An optional `appsettings.json` next to the executable holds settings that aren't per-run flags
+(comments are allowed in it, as in standard .NET appsettings files). Currently:
+`PngCompressionLevel` — the deflate level for the built-in PNG writer where compression pays off
+(cell sizes >= 2 px): `Optimal` (default), `Fastest` (~25% quicker encode, ~45% larger files),
+`SmallestSize`, or `NoCompression`. 1 px cells always use `Fastest` (noise-like content is
+incompressible by construction). Invalid values fail loudly rather than silently defaulting.
+
 ## Capacity and throughput
 
 Per image (with the default ECC): `bytes ≈ grid cells × bits/cell / 8 × 239/255 − ~100`

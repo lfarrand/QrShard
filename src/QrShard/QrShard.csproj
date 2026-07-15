@@ -18,6 +18,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="QrShard.Tests" />
     <InternalsVisibleTo Include="QrShard.Benchmarks" />
   </ItemGroup>

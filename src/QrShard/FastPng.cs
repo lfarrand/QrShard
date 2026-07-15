@@ -21,11 +21,13 @@ internal static class FastPng
 
     /// <param name="upFilter">
     /// True to apply the PNG "Up" filter to every row (ideal when rows repeat, i.e. cell size
-    /// >= 2 px); false for no filtering (ideal for noise-like 1 px cells). The deflate level
-    /// follows the same logic: filtered repetitive content compresses well (Optimal pays off);
-    /// unfiltered noise does not (Fastest avoids wasted effort).
+    /// >= 2 px); false for no filtering (ideal for noise-like 1 px cells).
     /// </param>
-    public static void Write(string path, ReadOnlySpan<Rgb24> pixels, int width, int height, bool upFilter)
+    /// <param name="level">
+    /// Deflate level for the zlib stream (configurable via appsettings.json; the caller passes
+    /// Fastest for unfiltered noise content, where higher levels cannot help).
+    /// </param>
+    public static void Write(string path, ReadOnlySpan<Rgb24> pixels, int width, int height, bool upFilter, CompressionLevel level)
     {
         using var fs = new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.None, 1 << 16);
         fs.Write(Signature);
@@ -48,7 +50,7 @@ internal static class FastPng
         int rowBytes = width * 3;
         ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(pixels[..(width * height)]);
         var filtered = new byte[1 + rowBytes];
-        using (var zlib = new ZLibStream(idat, upFilter ? CompressionLevel.Optimal : CompressionLevel.Fastest, leaveOpen: true))
+        using (var zlib = new ZLibStream(idat, level, leaveOpen: true))
         {
             for (int y = 0; y < height; y++)
             {

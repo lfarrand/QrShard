@@ -252,11 +252,17 @@ internal static class Encoder
         private readonly SixLabors.ImageSharp.Formats.IImageEncoder? _encoder = ShardImageFormat.CreateEncoder(format);
         private readonly bool _upFilter = layout.CellPx >= 2;
 
+        // The configured level applies where compression pays off (Up-filtered repeated rows);
+        // 1 px noise cells are incompressible by construction, so they always use Fastest.
+        private readonly System.IO.Compression.CompressionLevel _pngLevel = layout.CellPx >= 2
+            ? AppSettings.Current.PngCompressionLevel
+            : System.IO.Compression.CompressionLevel.Fastest;
+
         public void Write(string path, Rgb24[] px, int width, int height)
         {
             if (_fastPng)
             {
-                FastPng.Write(path, px.AsSpan(0, width * height), width, height, _upFilter);
+                FastPng.Write(path, px.AsSpan(0, width * height), width, height, _upFilter, _pngLevel);
                 return;
             }
             using var image = Image.LoadPixelData<Rgb24>(

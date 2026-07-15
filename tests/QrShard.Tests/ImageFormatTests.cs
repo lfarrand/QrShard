@@ -75,9 +75,13 @@ public class ImageFormatTests
     // ---------- FastPng: our own PNG writer must be standard-compliant and lossless ----------
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void FastPng_DecodesBackPixelIdentical(bool upFilter)
+    [InlineData(true, System.IO.Compression.CompressionLevel.Optimal)]
+    [InlineData(true, System.IO.Compression.CompressionLevel.Fastest)]
+    [InlineData(true, System.IO.Compression.CompressionLevel.SmallestSize)]
+    [InlineData(true, System.IO.Compression.CompressionLevel.NoCompression)]
+    [InlineData(false, System.IO.Compression.CompressionLevel.Fastest)]
+    [InlineData(false, System.IO.Compression.CompressionLevel.Optimal)]
+    public void FastPng_DecodesBackPixelIdentical(bool upFilter, System.IO.Compression.CompressionLevel level)
     {
         using var tmp = new TempDir();
         const int w = 137, h = 61; // deliberately odd sizes
@@ -87,7 +91,7 @@ public class ImageFormatTests
             pixels[i] = new Rgb24((byte)rng.Next(256), (byte)rng.Next(256), (byte)rng.Next(256));
 
         string path = tmp.File("out.png");
-        FastPng.Write(path, pixels, w, h, upFilter);
+        FastPng.Write(path, pixels, w, h, upFilter, level);
 
         using var decoded = Image.Load<Rgb24>(path);
         Assert.Equal(w, decoded.Width);
@@ -107,7 +111,7 @@ public class ImageFormatTests
             for (int i = 0; i < pixels.Length; i++)
                 pixels[i] = new Rgb24((byte)(i * 7), (byte)(i * 13), (byte)(i * 29));
             string path = tmp.File($"tiny-{w}x{h}.png");
-            FastPng.Write(path, pixels, w, h, upFilter: true);
+            FastPng.Write(path, pixels, w, h, upFilter: true, System.IO.Compression.CompressionLevel.Optimal);
 
             using var decoded = Image.Load<Rgb24>(path);
             var roundTripped = new Rgb24[w * h];
