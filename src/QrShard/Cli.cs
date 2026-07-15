@@ -3,13 +3,13 @@ namespace QrShard;
 /// <summary>Command-line interface, separated from Program for testability.</summary>
 internal static class Cli
 {
-    public static int Run(string[] args, TextWriter? stdout = null, TextWriter? stderr = null)
+    public static int Run(string[] args, TextWriter? stdout = null, TextWriter? stderr = null, AppSettings? settings = null)
     {
         var @out = stdout ?? Console.Out;
         var err = stderr ?? Console.Error;
         try
         {
-            return RunCore(args, @out, err);
+            return RunCore(args, @out, err, settings ?? AppSettings.Current);
         }
         catch (ShardDecodeException ex)
         {
@@ -24,7 +24,7 @@ internal static class Cli
         }
     }
 
-    private static int RunCore(string[] args, TextWriter @out, TextWriter err)
+    private static int RunCore(string[] args, TextWriter @out, TextWriter err, AppSettings settings)
     {
         if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
             return Help(@out, err);
@@ -40,20 +40,22 @@ internal static class Cli
                 if (!File.Exists(file))
                     return Help(@out, err, $"file not found: {file}");
 
-                var (width, height) = ParseResolution(Get(named, "-r", "--resolution") ?? "2160");
+                // Flag > appsettings.json EncodeDefaults > built-in default.
+                var defaults = settings.EncodeDefaults;
+                var (width, height) = ParseResolution(Get(named, "-r", "--resolution") ?? defaults.Resolution);
                 var opt = new EncodeOptions
                 {
                     Width = width,
                     Height = height,
-                    CellPx = GetInt(named, "-c", "--cell", 3),
-                    BitsPerCell = GetInt(named, "-b", "--bits", 4),
-                    EccParity = GetInt(named, "-e", "--ecc", 16),
-                    RecoveryPercent = GetInt(named, "-R", "--recovery", 0),
-                    ImageFormat = Get(named, "-f", "--format") ?? ShardImageFormat.Default,
-                    Compress = !flags.Contains("--no-compress"),
+                    CellPx = GetInt(named, "-c", "--cell", defaults.CellPx),
+                    BitsPerCell = GetInt(named, "-b", "--bits", defaults.BitsPerCell),
+                    EccParity = GetInt(named, "-e", "--ecc", defaults.EccParity),
+                    RecoveryPercent = GetInt(named, "-R", "--recovery", defaults.RecoveryPercent),
+                    ImageFormat = Get(named, "-f", "--format") ?? defaults.ImageFormat,
+                    Compress = !flags.Contains("--no-compress") && defaults.Compress,
                 };
                 string outDir = Get(named, "-o", "--out") ?? Path.Combine(
-                    Path.GetDirectoryName(Path.GetFullPath(file))!, Path.GetFileName(file) + ".shards");
+                    Path.GetDirectoryName(Path.GetFullPath(file))!, Path.GetFileName(file) + settings.ShardFolderSuffix);
 
                 @out.WriteLine($"Encoding '{file}' → {outDir}");
                 @out.WriteLine($"  {opt.Width}x{opt.Height}px, cell {opt.CellPx}px, {opt.BitsPerCell} bits/cell, " +

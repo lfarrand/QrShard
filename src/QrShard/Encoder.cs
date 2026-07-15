@@ -95,10 +95,12 @@ internal static class Encoder
         var files = new string[count + parityTotal];
         int done = 0, totalImages = count + parityTotal;
 
-        // Parallelism is bounded by pixel-buffer memory (one reusable buffer per worker),
-        // budgeting ~2 GB of buffers: plenty of workers at normal resolutions, few at 16K.
+        // Parallelism is bounded by pixel-buffer memory (one reusable buffer per worker); the
+        // budget (default ~2 GB, appsettings.json EncodeMemoryBudgetMB) gives plenty of workers
+        // at normal resolutions and few at 16K.
         long pixelBytes = (long)layout.Width * layout.Height * 3;
-        int degree = (int)Math.Clamp(2_000_000_000 / Math.Max(1, pixelBytes), 1, Environment.ProcessorCount);
+        long budget = AppSettings.Current.EncodeMemoryBudgetMB * 1_000_000L;
+        int degree = (int)Math.Clamp(budget / Math.Max(1, pixelBytes), 1, Environment.ProcessorCount);
         var po = new ParallelOptions { MaxDegreeOfParallelism = degree };
         var writer = new ShardImageWriter(format, layout);
 
@@ -194,7 +196,7 @@ internal static class Encoder
         {
             var original = new byte[length];
             mapped.Read(0, original);
-            byte[] compressed = Deflate(original, CompressionLevel.Optimal);
+            byte[] compressed = Deflate(original, AppSettings.Current.PayloadCompressionLevel);
             if (compressed.Length < original.Length)
             {
                 mapped.Dispose();

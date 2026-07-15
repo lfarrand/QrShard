@@ -33,12 +33,25 @@ qrshard info <image>       Show and validate a single shard image.
 qrshard test               Round-trip self-test, including simulated screenshots.
 ```
 
-An optional `appsettings.json` next to the executable holds settings that aren't per-run flags
-(comments are allowed in it, as in standard .NET appsettings files). Currently:
-`PngCompressionLevel` — the deflate level for the built-in PNG writer where compression pays off
-(cell sizes >= 2 px): `Optimal` (default), `Fastest` (~25% quicker encode, ~45% larger files),
-`SmallestSize`, or `NoCompression`. 1 px cells always use `Fastest` (noise-like content is
-incompressible by construction). Invalid values fail loudly rather than silently defaulting.
+An optional `appsettings.json` next to the executable holds preferences and machine tuning
+(comments are allowed in it, as in standard .NET appsettings files; every value is documented
+inline there). Invalid values fail loudly rather than silently defaulting. Settings:
+
+- **`EncodeDefaults`** — your preferred defaults for every `encode` flag (`Resolution`, `CellPx`,
+  `BitsPerCell`, `EccParity`, `RecoveryPercent`, `ImageFormat`, `Compress`); a flag on the
+  command line always wins over the file.
+- **`ShardFolderSuffix`** — the `<file>.shards` folder suffix used when `-o` isn't given.
+- **`PngCompressionLevel`** — deflate level for the built-in PNG writer where compression pays
+  off (cell >= 2 px): `Optimal` (default), `Fastest`, `SmallestSize`, `NoCompression`. 1 px
+  cells always use `Fastest` (noise-like content is incompressible by construction).
+- **`PayloadCompressionLevel`** — deflate level for compressing the file payload itself.
+- **`EncodeMemoryBudgetMB`** / **`DecodeMaxParallelism`** — machine tuning for the parallel
+  workers (defaults: ~2 GB pixel-buffer budget; decode auto = cores capped at 16).
+
+Deliberately *not* configurable: anything both sides of a transfer must agree on — frame
+geometry, metadata-strip layout, magic numbers, Reed-Solomon/GF(2⁸) parameters — plus the
+decoder's detection heuristics. Those are protocol, not preference; a settings file on one
+machine would silently break decoding on another.
 
 ## Capacity and throughput
 

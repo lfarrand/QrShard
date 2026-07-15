@@ -22,8 +22,13 @@ internal static class Decoder
 
         // One reusable scratch (pixel + visited buffers, the two large per-image allocations)
         // per worker: decoding N images then costs ~2 buffers per worker instead of 2N GC'd arrays.
+        // PNG decode goes memory-bandwidth-bound past ~16 workers, hence the automatic cap
+        // (overridable via appsettings.json DecodeMaxParallelism).
+        int parallelism = AppSettings.Current.DecodeMaxParallelism;
+        if (parallelism <= 0)
+            parallelism = Math.Min(Environment.ProcessorCount, 16);
         Parallel.For(0, ordered.Count,
-            new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, 16) },
+            new ParallelOptions { MaxDegreeOfParallelism = parallelism },
             () => new DecodeScratch(),
             (i, _, scratch) =>
             {

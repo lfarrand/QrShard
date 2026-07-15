@@ -4,11 +4,13 @@ namespace QrShard.Tests;
 
 public class CliTests
 {
-    private static (int Code, string Out, string Err) Run(params string[] args)
+    private static (int Code, string Out, string Err) Run(params string[] args) => Run(null, args);
+
+    private static (int Code, string Out, string Err) Run(AppSettings? settings, params string[] args)
     {
         var stdout = new StringWriter();
         var stderr = new StringWriter();
-        int code = Cli.Run(args, stdout, stderr);
+        int code = Cli.Run(args, stdout, stderr, settings);
         return (code, stdout.ToString(), stderr.ToString());
     }
 
@@ -184,6 +186,34 @@ public class CliTests
         Assert.Equal(0, code);
         Assert.Contains("parity #", output);
         Assert.Contains("recovery  :", output);
+    }
+
+    [Fact]
+    public void Encode_UsesSettingsDefaults_AndFlagsOverrideThem()
+    {
+        using var tmp = new TempDir();
+        string settingsPath = tmp.File("appsettings.json");
+        File.WriteAllText(settingsPath,
+            """
+            {
+              "EncodeDefaults": { "Resolution": "900", "CellPx": 2, "BitsPerCell": 6, "EccParity": 32 },
+              "ShardFolderSuffix": ".pieces"
+            }
+            """);
+        var settings = AppSettings.Load(settingsPath);
+        string input = tmp.WriteFile("payload.bin", TestData.Random(5_000));
+
+        // No flags: the settings defaults apply, including the shard-folder suffix.
+        var (code, output, _) = Run(settings, "encode", input);
+        Assert.Equal(0, code);
+        Assert.Contains("cell 2px, 6 bits/cell", output);
+        Assert.Contains("ECC parity 32", output);
+        Assert.True(Directory.Exists(input + ".pieces"), "shard folder should use the configured suffix");
+
+        // Flags still win over the settings defaults.
+        var (code2, output2, _) = Run(settings, "encode", input, "-c", "3", "-o", tmp.File("explicit"));
+        Assert.Equal(0, code2);
+        Assert.Contains("cell 3px, 6 bits/cell", output2);
     }
 
     [Fact]
