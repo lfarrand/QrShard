@@ -42,7 +42,8 @@ internal static class Cli
 
                 // Flag > appsettings.json EncodeDefaults > built-in default.
                 var defaults = settings.EncodeDefaults;
-                var (width, height) = ParseResolution(Get(named, "-r", "--resolution") ?? defaults.Resolution);
+                string resolutionValue = Get(named, "-r", "--resolution") ?? defaults.Resolution;
+                var (width, height, resolutionNote) = ResolveResolution(resolutionValue);
                 var opt = new EncodeOptions
                 {
                     Width = width,
@@ -58,7 +59,7 @@ internal static class Cli
                     Path.GetDirectoryName(Path.GetFullPath(file))!, Path.GetFileName(file) + settings.ShardFolderSuffix);
 
                 @out.WriteLine($"Encoding '{file}' → {outDir}");
-                @out.WriteLine($"  {opt.Width}x{opt.Height}px, cell {opt.CellPx}px, {opt.BitsPerCell} bits/cell, " +
+                @out.WriteLine($"  {opt.Width}x{opt.Height}px{resolutionNote}, cell {opt.CellPx}px, {opt.BitsPerCell} bits/cell, " +
                                $"ECC parity {opt.EccParity}, recovery {opt.RecoveryPercent}%, " +
                                $"format {opt.ImageFormat}, compression {(opt.Compress ? "on" : "off")}");
                 var result = Encoder.Encode(file, outDir, opt, @out.WriteLine);
@@ -132,6 +133,32 @@ internal static class Cli
         return (int.Parse(value[..split]), int.Parse(value[(split + 1)..]));
     }
 
+    /// <summary>Fallback when "auto" is requested but no display can be detected (headless/remote).</summary>
+    internal const int FallbackResolution = 2160;
+
+    /// <summary>
+    /// Resolves a resolution value: "auto" detects the primary monitor's native resolution
+    /// (clamped into the encodable range), anything else parses as a number or WxH.
+    /// The note is appended to the CLI's config line to say where an auto value came from.
+    /// </summary>
+    internal static (int Width, int Height, string Note) ResolveResolution(
+        string value, Func<(int Width, int Height)?>? detect = null)
+    {
+        if (!value.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            var (w, h) = ParseResolution(value);
+            return (w, h, "");
+        }
+
+        var detected = (detect ?? MonitorResolution.DetectPrimary)();
+        if (detected is null)
+            return (FallbackResolution, FallbackResolution, " (auto: no display detected, using fallback)");
+
+        int width = Math.Clamp(detected.Value.Width, Layout.MinResolution, Layout.MaxResolution);
+        int height = Math.Clamp(detected.Value.Height, Layout.MinResolution, Layout.MaxResolution);
+        return (width, height, " (auto: primary monitor)");
+    }
+
     private static bool IsImageFile(string path) =>
         Path.GetExtension(path).ToLowerInvariant()
             is ".png" or ".bmp" or ".jpg" or ".jpeg" or ".webp" or ".tga" or ".qoi" or ".tif" or ".tiff";
@@ -173,8 +200,11 @@ internal static class Cli
             usage:
               qrshard encode <file> [options]     Split a file into shard images.
                 -o, --out <dir>          Output folder (default: <file>.shards next to the input)
-                -r, --resolution <px>    Image size: one number (square) or WxH, 700-16384
-                                         (default: 2160; try 3840x2160 for a 4K display)
+                -r, --resolution <px>    Image size: "auto" (the default) uses the primary
+                                         monitor's native resolution so shards fill the screen
+                                         they'll be captured from; or one number (square) or
+                                         WxH, 700-16384, to override (e.g. a smaller size shows
+                                         the code surrounded by padding)
                 -c, --cell <px>          Data cell size in pixels, 1-64 (default: 3)
                 -b, --bits <n>           Bits per cell / color density, 1-8 (default: 4)
                 -e, --ecc <n>            Reed-Solomon parity per 255-byte block, even, 0-64

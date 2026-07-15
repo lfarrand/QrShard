@@ -15,8 +15,10 @@ dotnet run --project src/QrShard -c Release -- <command> ...
 ```
 qrshard encode <file> [options]     Split a file into shard images.
   -o, --out <dir>          Output folder (default: <file>.shards next to the input)
-  -r, --resolution <px>    Image size: one number (square) or WxH, 700-16384
-                           (default: 2160; try 3840x2160 for a 4K display)
+  -r, --resolution <px>    Image size: "auto" (the default) detects the primary monitor's
+                           native resolution so shards fill the screen they'll be captured
+                           from; or one number (square) or WxH, 700-16384, to override —
+                           e.g. a smaller size shows the code surrounded by padding
   -c, --cell <px>          Data cell size in pixels, 1-64 (default: 3)
   -b, --bits <n>           Bits per cell / color density, 1-8 (default: 4)
   -e, --ecc <n>            Reed-Solomon parity per 255-byte block, even, 0-64
@@ -286,6 +288,9 @@ so far (latest measurement of a case wins).
 Results land in `BenchmarkDotNet.Artifacts/results/`:
 
 - the standard BenchmarkDotNet table (console + GitHub-markdown + CSV);
+- a full machine-spec header on the HTML report (CPU model/speed, motherboard + firmware
+  revision, RAM sticks/type/speed, physical disks, Windows edition + build.revision, .NET
+  runtime version), gathered via WMI at report time so the numbers carry their context;
 - **`transfer-graphs.html`** — self-contained SVG charts generated from the run: codec time vs
   file size (log-log), estimated end-to-end transfer time including screenshot cadence (manual
   3 s/image and automated 0.5 s/image), codec throughput, and the full numbers table;

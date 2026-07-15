@@ -316,6 +316,16 @@ internal static class GraphReport
         static string Cell(double seconds) => double.IsNaN(seconds) ? "—" : FormatSeconds(seconds);
     }
 
+    private static string MachineSpecTable()
+    {
+        var sb = new StringBuilder();
+        sb.Append("<table class=\"spec\"><tbody>");
+        foreach (var (label, value) in MachineSpec.Collect())
+            sb.Append($"<tr><th>{label}</th><td>{System.Net.WebUtility.HtmlEncode(value)}</td></tr>");
+        sb.Append("</tbody></table>");
+        return sb.ToString();
+    }
+
     private static string Header() =>
         $$"""
         <!doctype html><html><head><meta charset="utf-8">
@@ -356,8 +366,12 @@ internal static class GraphReport
           th, td { text-align: right; padding: 5px 10px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
           th:nth-child(-n+2), td:nth-child(-n+2) { text-align: left; }
           th { color: var(--ink-2); font-weight: 600; }
+          .spec { font-size: 12px; margin: 8px 0 4px; }
+          .spec th { white-space: nowrap; width: 1%; vertical-align: top; text-align: left; }
+          .spec td { text-align: left; }
         </style></head><body class="viz"><main>
         <h1>QrShard transfer benchmarks</h1>
-        <p class="meta">Generated {{DateTime.Now:yyyy-MM-dd HH:mm}} &middot; {{Environment.ProcessorCount}} logical cores &middot; {{Environment.OSVersion}}</p>
+        <p class="meta">Generated {{DateTime.Now:yyyy-MM-dd HH:mm}}</p>
+        {{MachineSpecTable()}}
         """;
 }

@@ -102,6 +102,53 @@ public class CliTests
         Assert.Equal((width, height), Cli.ParseResolution(value));
 
     [Fact]
+    public void ResolveResolution_Auto_UsesDetectedMonitor()
+    {
+        var (w, h, note) = Cli.ResolveResolution("auto", () => (3840, 2160));
+        Assert.Equal((3840, 2160), (w, h));
+        Assert.Contains("primary monitor", note);
+
+        (w, h, _) = Cli.ResolveResolution("AUTO", () => (2560, 1440)); // case-insensitive
+        Assert.Equal((2560, 1440), (w, h));
+    }
+
+    [Fact]
+    public void ResolveResolution_Auto_ClampsToEncodableRange()
+    {
+        var (w, h, _) = Cli.ResolveResolution("auto", () => (640, 480)); // tiny display
+        Assert.Equal((Layout.MinResolution, Layout.MinResolution), (w, h));
+        (w, h, _) = Cli.ResolveResolution("auto", () => (32000, 17000)); // absurd display
+        Assert.Equal((Layout.MaxResolution, Layout.MaxResolution), (w, h));
+    }
+
+    [Fact]
+    public void ResolveResolution_Auto_NoDisplay_FallsBackWithNote()
+    {
+        var (w, h, note) = Cli.ResolveResolution("auto", () => null);
+        Assert.Equal((Cli.FallbackResolution, Cli.FallbackResolution), (w, h));
+        Assert.Contains("no display detected", note);
+    }
+
+    [Fact]
+    public void ResolveResolution_Explicit_BypassesDetection()
+    {
+        var (w, h, note) = Cli.ResolveResolution("1200x800", () => throw new InvalidOperationException("must not detect"));
+        Assert.Equal((1200, 800, ""), (w, h, note));
+    }
+
+    [Fact]
+    public void MonitorDetection_ReturnsNullOrPlausibleDimensions()
+    {
+        // Environment-dependent smoke test: headless machines get null, real ones sane pixels.
+        var detected = MonitorResolution.DetectPrimary();
+        if (detected is var (w, h) && detected is not null)
+        {
+            Assert.InRange(w, 1, 65536);
+            Assert.InRange(h, 1, 65536);
+        }
+    }
+
+    [Fact]
     public void EncodeDecodeInfo_EndToEnd()
     {
         using var tmp = new TempDir();

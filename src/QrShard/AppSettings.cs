@@ -45,7 +45,7 @@ internal sealed class AppSettings
 
     internal sealed class EncodeDefaultSettings
     {
-        public string Resolution { get; set; } = "2160";
+        public string Resolution { get; set; } = "auto";
         public int CellPx { get; set; } = 3;
         public int BitsPerCell { get; set; } = 4;
         public int EccParity { get; set; } = 16;
@@ -141,6 +141,8 @@ internal sealed class AppSettings
 
     private static bool IsValidResolution(string value)
     {
+        if (value.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase))
+            return true;
         int split = value.IndexOfAny(['x', 'X']);
         return split < 0
             ? int.TryParse(value, out int r) && r > 0

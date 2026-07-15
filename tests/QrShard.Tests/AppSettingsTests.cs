@@ -139,9 +139,16 @@ public class AppSettingsTests
         using var tmp = new TempDir();
         var settings = LoadJson(tmp, """{ "EncodeDefaults": { "CellPx": 2 } }""");
         Assert.Equal(2, settings.EncodeDefaults.CellPx);
-        Assert.Equal("2160", settings.EncodeDefaults.Resolution);
+        Assert.Equal("auto", settings.EncodeDefaults.Resolution);
         Assert.Equal(4, settings.EncodeDefaults.BitsPerCell);
         Assert.True(settings.EncodeDefaults.Compress);
+    }
+
+    [Fact]
+    public void Resolution_Auto_IsValid()
+    {
+        using var tmp = new TempDir();
+        Assert.Equal("Auto", LoadJson(tmp, """{ "EncodeDefaults": { "Resolution": "Auto" } }""").EncodeDefaults.Resolution);
     }
 
     [Theory]
