@@ -241,18 +241,22 @@ files' shards can be mixed in one folder (grouped by random 64-bit file ID).
 
 The codec is pure managed .NET with no Windows dependency: ImageSharp, the built-in PNG writer,
 memory-mapped I/O, and the `Vector128` SIMD paths (which map to NEON on ARM) all work on Linux
-and macOS. Verified: `dotnet publish -r linux-x64 --self-contained`, full round trips on Linux,
-and cross-OS transfers in both directions — including parity-recovering a Linux-encoded shard
-set on Windows. Shards are byte-compatible across platforms by construction (the wire format is
-protocol, not platform).
+and macOS. Verified: full round trips on Linux and cross-OS transfers in both directions —
+including parity-recovering a Linux-encoded shard set on Windows. Shards are byte-compatible
+across platforms by construction (the wire format is protocol, not platform).
 
-Two conveniences are Windows-only and degrade gracefully elsewhere:
+**Publishing:** `./publish.ps1` (or `./publish.sh`) produces self-contained single-file binaries
+for `win-x64`, `linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64` under `publish/<rid>/` —
+no .NET install needed on the target machine.
 
-- **Monitor auto-detection** (`-r auto`) uses a user32 call; on other platforms (or headless) it
-  falls back to 2160 with a note — pass `-r` explicitly.
-- **The benchmark report's machine spec** uses WMI; elsewhere it degrades to OS description,
-  .NET version, and core count. (Linux equivalents — /proc/cpuinfo, /sys/class/dmi — could be
-  added if benchmarks are ever run there.)
+**Monitor auto-detection** (`-r auto`) is implemented per platform: EnumDisplaySettings on
+Windows, `xrandr` parsing on Linux (X11 and XWayland; verified to degrade cleanly when xrandr
+is missing or there is no display), and CoreGraphics display-mode pixel dimensions on macOS
+(Retina framebuffer pixels, not scaled points; written to Apple's documented API but untested
+on real hardware here). Headless or undetectable environments fall back to 2160 with a note.
+
+**The benchmark report's machine spec** uses WMI and is Windows-only; elsewhere it degrades to
+OS description, .NET version, and core count.
 
 ## Building and testing
 
