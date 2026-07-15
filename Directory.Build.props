@@ -1,0 +1,11 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- Six Labors license (ImageSharp 4.x validates at build time). The license file is
+         personal and deliberately NOT committed (gitignored): drop your own sixlabors.lic at
+         the solution root, or set the SixLaborsLicenseKey environment variable instead.
+         Free community licenses: https://sixlabors.com/pricing/ -->
+    <SixLaborsLicenseFile Condition="Exists('$(MSBuildThisFileDirectory)sixlabors.lic')">$(MSBuildThisFileDirectory)sixlabors.lic</SixLaborsLicenseFile>
+  </PropertyGroup>
+
+</Project>

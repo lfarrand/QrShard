@@ -14,3 +14,6 @@ tests/QrShard.Benchmarks/bench-*.log
 *.DotSettings.user
 *.user
 .claude/settings.local.json
+
+# Six Labors license key — personal, local-only; never commit (see README "Building and testing")
+sixlabors.lic

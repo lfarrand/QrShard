@@ -40,8 +40,8 @@ internal static class ShardImageFormat
     public static IImageEncoder? CreateEncoder(string normalizedFormat) => normalizedFormat switch
     {
         "png" => null,
-        "bmp" => new BmpEncoder { BitsPerPixel = BmpBitsPerPixel.Pixel24, SupportTransparency = false },
-        "tga" => new TgaEncoder { BitsPerPixel = TgaBitsPerPixel.Pixel24, Compression = TgaCompression.RunLength },
+        "bmp" => new BmpEncoder { BitsPerPixel = BmpBitsPerPixel.Bit24, SupportTransparency = false },
+        "tga" => new TgaEncoder { BitsPerPixel = TgaBitsPerPixel.Bit24, Compression = TgaCompression.RunLength },
         "qoi" => new QoiEncoder { Channels = QoiChannels.Rgb },
         "webp" => new WebpEncoder { FileFormat = WebpFileFormatType.Lossless, Method = WebpEncodingMethod.Fastest, Quality = 100 },
         "tiff" => new TiffEncoder

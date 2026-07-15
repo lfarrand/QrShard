@@ -300,8 +300,8 @@ self-contained `transfer-graphs.html`, and `[RPlotExporter]` R plots when
 ### Image library choice
 
 Decode must parse arbitrary screenshots from unknown tools — that needs a mature library:
-**ImageSharp** (pure managed, cross-platform; pinned to 3.1.x because 4.0 requires a commercial
-license key at build time). Encode owns every pixel and needs no library, hence FastPng.
+**ImageSharp** (pure managed, cross-platform; v4, used under a Six Labors community license —
+see below). Encode owns every pixel and needs no library, hence FastPng.
 SkiaSharp (native dependency, no TGA/QOI encode), Magick.NET (heavyweight), System.Drawing
 (Windows-only, deprecated), and Stb ports (too weak on both sides) were evaluated and rejected.
 A fully custom *container* format was rejected too: shards must be displayable by ordinary OS
@@ -322,6 +322,13 @@ image viewers on the sending machine.
 
 Requires the .NET 10 SDK. `dotnet build -c Release` at the solution root; `./publish.ps1` for
 standalone binaries.
+
+ImageSharp 4.x validates a license at build time. License keys are personal and **not
+committed** to this repository: to build, obtain your own (free community licenses for
+qualifying open-source use at https://sixlabors.com/pricing/) and either drop `sixlabors.lic`
+at the solution root (gitignored; `Directory.Build.props` picks it up for every project) or set
+the `SixLaborsLicenseKey` environment variable. The license is build-time only; published
+binaries and end users need nothing.
 
 - `dotnet test` — 294 xUnit tests, ~2 s, **93% line / 87% branch coverage** (the uncovered
   remainder is mostly per-platform display-detection code that can't run on a single OS)
