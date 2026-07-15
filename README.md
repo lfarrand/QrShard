@@ -79,9 +79,15 @@ files. Hard limits: ≤ 1.5 GB per file (in-memory codec); display size caps per
   (two 16-entry product tables as byte-shuffle sources, 16 bytes per step) via `Vector128`.
 - **No nested parallelism**: per-image FEC is sequential inside the already-parallel per-image
   loops, avoiding scheduler contention.
+- **GC pressure**: server GC (the workload is many parallel allocating workers); per-worker
+  scratch extends beyond the pixel canvas to the stream/cell staging buffers, the FEC recovery
+  buffer, and the 128 KB nearest-color LUT; reassembly and decompression write into exact-size
+  output buffers (no MemoryStream doubling or ToArray copies); cross-shard stripe chunks reuse
+  one buffer set. Cell read/write uses a two-byte-window fast path instead of per-bit loops.
 
-Result (100 MB, 32 cores): Max4K encode went from 18.2 s to ~0.9 s, Max4K-R10 from 24.4 s to
-~1.0 s; default-preset encode 6.5 → 2.8 s, decode 4.3 → 2.4 s. All presets remain byte-verified.
+Result (100 MB, 32 cores, BenchmarkDotNet means): Max4K encode 18.2 s → ~0.7 s, Max4K-R10
+24.4 s → ~0.7 s; default-preset encode 6.5 → 2.3 s, decode 4.3 → 1.7 s. Decode allocations
+fell from ~9.5 GB to ~0.9 GB. All presets remain byte-verified.
 
 Deflate compression is applied automatically when a fast mid-file sample suggests it will help,
 so compressible files transfer in correspondingly fewer images (already-compressed archives skip

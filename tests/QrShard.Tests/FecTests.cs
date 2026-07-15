@@ -86,6 +86,54 @@ public class FecTests
         Assert.Throws<ArgumentException>(() => Fec.Protect(RandomStream(2000), 16, cwCount: 5));
 
     [Fact]
+    public void ProtectInto_OversizedPooledBuffer_MatchesProtect()
+    {
+        const int parity = 16, cwCount = 5;
+        byte[] stream = RandomStream(900, seed: 21);
+        byte[] expected = Fec.Protect(stream, parity, cwCount);
+
+        // Pooled (oversized, dirty) destination; only the logical prefix matters.
+        var dest = new byte[cwCount * Fec.CodewordLength + 128];
+        Array.Fill(dest, (byte)0xEE);
+        Fec.ProtectInto(stream, stream.Length, parity, cwCount, dest);
+        Assert.Equal(expected, dest[..expected.Length]);
+    }
+
+    [Fact]
+    public void ProtectInto_StreamLengthShorterThanBuffer_PadsWithZeros()
+    {
+        // A pooled stream buffer longer than the logical stream must not leak stale bytes.
+        const int parity = 16, cwCount = 2;
+        byte[] logical = RandomStream(100, seed: 22);
+        byte[] pooled = new byte[400];
+        logical.CopyTo(pooled, 0);
+        Array.Fill(pooled, (byte)0xAB, 100, 300); // stale garbage past the logical length
+
+        byte[] fromExact = Fec.Protect(logical, parity, cwCount);
+        var fromPooled = new byte[cwCount * Fec.CodewordLength];
+        Fec.ProtectInto(pooled, 100, parity, cwCount, fromPooled);
+        Assert.Equal(fromExact, fromPooled);
+    }
+
+    [Fact]
+    public void TryRecoverInto_OversizedPooledBuffer_Works()
+    {
+        const int parity = 16, cwCount = 5;
+        byte[] stream = RandomStream(1000, seed: 23);
+        byte[] buffer = Fec.Protect(stream, parity, cwCount);
+        buffer[100] ^= 0xFF;
+
+        var dest = new byte[cwCount * Fec.DataLength(parity) + 64];
+        Assert.True(Fec.TryRecoverInto(buffer, parity, cwCount, dest, out int corrected));
+        Assert.Equal(1, corrected);
+        Assert.Equal(stream, dest[..stream.Length]);
+    }
+
+    [Fact]
+    public void RecoverInto_TooSmallDestination_IsRejected() =>
+        Assert.Throws<ArgumentException>(() => Fec.TryRecoverInto(new byte[5 * 255], 16, 5, new byte[100], out _));
+
+    [Fact]
     public void CapacityMath_IsConsistent()
     {
         Assert.Equal(239, Fec.DataLength(16));

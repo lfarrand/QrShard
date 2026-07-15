@@ -82,6 +82,16 @@ public class BitIoTests
     }
 
     [Fact]
+    public void BitStream_WriteCell_MasksOversizedValues()
+    {
+        // A value wider than `bits` must not bleed into neighboring cells.
+        var buffer = new byte[2];
+        BitStream.WriteCell(buffer, 4, 4, 0xFFF); // only the low 4 bits may land
+        Assert.Equal(0b0000_1111, buffer[0]);
+        Assert.Equal(0, buffer[1]);
+    }
+
+    [Fact]
     public void BitStream_MatchesBitWriterLayout()
     {
         // The encoder writes cells with BitStream against a stream produced conceptually by

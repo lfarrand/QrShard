@@ -45,6 +45,18 @@ internal static class BitStream
     /// <summary>Reads <paramref name="bits"/> bits MSB-first starting at an absolute bit offset; missing bytes read as 0.</summary>
     public static int ReadCell(byte[] data, long bitOffset, int bits)
     {
+        if (bits <= 8)
+        {
+            // A run of <= 8 bits spans at most two bytes: one 16-bit window, one shift, one mask.
+            // This is the per-cell hot path of both rendering and grid reading.
+            long byteIdx = bitOffset >> 3;
+            if (byteIdx >= data.Length)
+                return 0;
+            int bitInByte = (int)(bitOffset & 7);
+            int window = data[byteIdx] << 8 | (byteIdx + 1 < data.Length ? data[byteIdx + 1] : 0);
+            return (window >> (16 - bitInByte - bits)) & ((1 << bits) - 1);
+        }
+
         int v = 0;
         for (int k = 0; k < bits; k++)
         {
@@ -59,6 +71,19 @@ internal static class BitStream
     /// <summary>Writes <paramref name="bits"/> bits MSB-first at an absolute bit offset; bits past the buffer are dropped.</summary>
     public static void WriteCell(byte[] data, long bitOffset, int bits, int value)
     {
+        if (bits <= 8)
+        {
+            long byteIdx = bitOffset >> 3;
+            if (byteIdx >= data.Length)
+                return;
+            int bitInByte = (int)(bitOffset & 7);
+            int shifted = (value & ((1 << bits) - 1)) << (16 - bitInByte - bits);
+            data[byteIdx] |= (byte)(shifted >> 8);
+            if (byteIdx + 1 < data.Length)
+                data[byteIdx + 1] |= (byte)shifted;
+            return;
+        }
+
         for (int k = 0; k < bits; k++)
         {
             long bo = bitOffset + k;

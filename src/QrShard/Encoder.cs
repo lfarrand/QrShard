@@ -65,28 +65,33 @@ internal static class Encoder
         Directory.CreateDirectory(outDir);
         int dataPad = Math.Max(3, count.ToString().Length);
 
-        // A padded (to `capacity`) view of data chunk i — the unit the cross-shard code operates on.
-        byte[] Chunk(int i)
+        // Fills a padded (to `capacity`) view of data chunk i — the unit the cross-shard code
+        // operates on — into a reusable buffer.
+        void FillChunk(int i, byte[] dest)
         {
             long offset = (long)i * capacity;
             int len = (int)Math.Min(capacity, data.LongLength - offset);
-            var c = new byte[capacity];
-            data.AsSpan((int)offset, len).CopyTo(c);
-            return c;
+            data.AsSpan((int)offset, len).CopyTo(dest);
+            if (len < capacity)
+                Array.Clear(dest, len, capacity - len);
         }
 
-        // Compute parity chunks stripe-by-stripe (bounded memory), before rendering.
+        // Compute parity chunks stripe-by-stripe before rendering, reusing one set of chunk
+        // buffers across stripes (a 1 GB file would otherwise churn ~1 GB of chunk copies).
         var parityChunks = new byte[parityTotal][];
         if (stripeParity > 0)
         {
+            var chunkBuffers = new byte[stripeData][];
+            for (int t = 0; t < stripeData; t++)
+                chunkBuffers[t] = new byte[capacity];
+
             for (int g = 0; g < stripes; g++)
             {
                 int first = g * stripeData;
                 int s = Math.Min(stripeData, count - first);
-                var dataShards = new byte[s][];
                 for (int t = 0; t < s; t++)
-                    dataShards[t] = Chunk(first + t);
-                byte[][] parity = CrossShardFec.Encode(dataShards, stripeParity, capacity);
+                    FillChunk(first + t, chunkBuffers[t]);
+                byte[][] parity = CrossShardFec.Encode(new ArraySegment<byte[]>(chunkBuffers, 0, s), stripeParity, capacity);
                 for (int p = 0; p < stripeParity; p++)
                     parityChunks[g * stripeParity + p] = parity[p];
             }
@@ -102,11 +107,12 @@ internal static class Encoder
         var po = new ParallelOptions { MaxDegreeOfParallelism = degree };
         var pngEncoder = ShardPngEncoder(layout);
 
-        // Data and parity images in ONE parallel loop (no barrier between the phases), with a
-        // thread-local pixel buffer so each worker allocates its ~15-50 MB canvas exactly once.
+        // Data and parity images in ONE parallel loop (no barrier between the phases), with
+        // thread-local scratch (pixel canvas + stream/cell byte buffers) so each worker
+        // allocates its working set exactly once instead of per image.
         Parallel.For(0, totalImages, po,
-            () => new Rgb24[layout.Width * layout.Height],
-            (i, _, px) =>
+            () => new RenderScratch(layout),
+            (i, _, scratch) =>
             {
                 ShardHeader header;
                 ReadOnlySpan<byte> payload;
@@ -156,12 +162,12 @@ internal static class Encoder
                     outPath = Path.Combine(outDir, $"{fileName}.qrs-parity{(ord + 1).ToString().PadLeft(3, '0')}of{parityTotal.ToString().PadLeft(3, '0')}.png");
                 }
 
-                RenderShard(layout, palette, metaModules, header, payload, outPath, px, pngEncoder);
+                RenderShard(layout, palette, metaModules, header, payload, outPath, scratch, pngEncoder);
                 files[i] = outPath;
                 int finished = Interlocked.Increment(ref done);
                 log?.Invoke($"  [{finished}/{totalImages}] {Path.GetFileName(outPath)}" +
                             (i < count ? $" ({header.PayloadLength:N0} bytes)" : " (parity)"));
-                return px;
+                return scratch;
             },
             _ => { });
 
@@ -202,18 +208,59 @@ internal static class Encoder
         return (stripeData, stripeParity);
     }
 
+    /// <summary>Per-worker reusable buffers: the pixel canvas plus the stream/cell staging arrays.</summary>
+    private sealed class RenderScratch(Layout layout)
+    {
+        public readonly Rgb24[] Pixels = new Rgb24[layout.Width * layout.Height];
+        private byte[]? _stream;
+        private byte[]? _cells;
+
+        public byte[] Stream(int length)
+        {
+            if (_stream is null || _stream.Length < length)
+                _stream = new byte[length];
+            return _stream;
+        }
+
+        public byte[] Cells(int length)
+        {
+            if (_cells is null || _cells.Length < length)
+                _cells = new byte[length];
+            return _cells;
+        }
+    }
+
     private static void RenderShard(Layout layout, Rgb24[] palette, byte[] metaModules, ShardHeader header,
-        ReadOnlySpan<byte> payload, string outPath, Rgb24[] px, SixLabors.ImageSharp.Formats.Png.PngEncoder pngEncoder)
+        ReadOnlySpan<byte> payload, string outPath, RenderScratch scratch, SixLabors.ImageSharp.Formats.Png.PngEncoder pngEncoder)
     {
         byte[] headerBytes = header.Serialize();
-        byte[] stream = new byte[headerBytes.Length + payload.Length];
-        headerBytes.CopyTo(stream, 0);
-        payload.CopyTo(stream.AsSpan(headerBytes.Length));
+        int streamLength = headerBytes.Length + payload.Length;
 
-        byte[] cellBuffer = layout.EccParity > 0
-            ? Fec.Protect(stream, layout.EccParity, layout.CodewordCount)
-            : stream;
-        Render(layout, palette, metaModules, cellBuffer, outPath, px, pngEncoder);
+        byte[] cellBuffer;
+        if (layout.EccParity > 0)
+        {
+            byte[] stream = scratch.Stream(streamLength);
+            headerBytes.CopyTo(stream, 0);
+            payload.CopyTo(stream.AsSpan(headerBytes.Length));
+
+            // The renderer reads TotalBytes; FEC fills the first CodewordCount*255 of them,
+            // so clear the sub-codeword tail to keep pooled-buffer reuse deterministic.
+            int cellLength = (int)layout.TotalBytes;
+            cellBuffer = scratch.Cells(cellLength);
+            Fec.ProtectInto(stream, streamLength, layout.EccParity, layout.CodewordCount, cellBuffer);
+            int protectedLength = layout.CodewordCount * Fec.CodewordLength;
+            if (protectedLength < cellLength)
+                Array.Clear(cellBuffer, protectedLength, cellLength - protectedLength);
+        }
+        else
+        {
+            // Without ECC the stream itself is the cell buffer; it must be exactly sized because
+            // the renderer treats bytes past the end as zero cells.
+            cellBuffer = new byte[streamLength];
+            headerBytes.CopyTo(cellBuffer, 0);
+            payload.CopyTo(cellBuffer.AsSpan(headerBytes.Length));
+        }
+        Render(layout, palette, metaModules, cellBuffer, outPath, scratch.Pixels, pngEncoder);
     }
 
     private static void Render(Layout layout, Rgb24[] palette, byte[] metaModules, byte[] cellBuffer, string outPath,

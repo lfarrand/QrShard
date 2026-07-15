@@ -79,18 +79,19 @@ internal static class Decoder
             if (s.Header.Count != count)
                 throw new ShardDecodeException($"Inconsistent shard set for '{first.FileName}': image counts differ.");
 
+        // Both reassembly paths allocate the exact output size up front, so bound it first.
+        if (first.TotalLength is < 0 or > Encoder.MaxFileBytes || first.OriginalLength is < 0 or > Encoder.MaxFileBytes)
+            throw new ShardDecodeException($"'{first.FileName}': shard header declares an implausible file size.");
+
         byte[] data = first.StripeParity > 0
             ? ReassembleWithParity(shards, first, log)
             : ReassembleContiguous(shards, first);
-
-        if (data.LongLength != first.TotalLength)
-            throw new ShardDecodeException($"'{first.FileName}': reassembled length {data.Length:N0} does not match expected {first.TotalLength:N0}.");
 
         if ((first.Flags & ShardHeader.FlagCompressed) != 0)
         {
             try
             {
-                data = Inflate(data);
+                data = Inflate(data, (int)first.OriginalLength);
             }
             catch (InvalidDataException)
             {
@@ -125,10 +126,17 @@ internal static class Decoder
                 $"'{first.FileName}': missing image(s) {string.Join(", ", missing.Select(i => i + 1))} of {first.Count}. " +
                 "Capture them and decode again.");
 
-        using var ms = new MemoryStream();
+        if (byIndex.Sum(s => (long)s!.Payload.Length) != first.TotalLength)
+            throw new ShardDecodeException($"'{first.FileName}': reassembled length does not match expected {first.TotalLength:N0}.");
+
+        var data = new byte[first.TotalLength];
+        int offset = 0;
         foreach (var s in byIndex)
-            ms.Write(s!.Payload);
-        return ms.ToArray();
+        {
+            s!.Payload.CopyTo(data.AsSpan(offset));
+            offset += s.Payload.Length;
+        }
+        return data;
     }
 
     /// <summary>
@@ -219,13 +227,17 @@ internal static class Decoder
         if (reconstructed > 0)
             log($"  recovered {reconstructed} missing image(s) from parity");
 
-        using var ms = new MemoryStream();
+        long lastLen = first.TotalLength - (long)(count - 1) * cap;
+        if (lastLen < 0 || lastLen > cap)
+            throw new ShardDecodeException($"'{first.FileName}': reassembled length does not match expected {first.TotalLength:N0}.");
+
+        var data = new byte[first.TotalLength]; // offsets fit int: TotalLength <= Encoder.MaxFileBytes
         for (int i = 0; i < count; i++)
         {
-            int len = i < count - 1 ? cap : (int)(first.TotalLength - (long)(count - 1) * cap);
-            ms.Write(chunks[i], 0, Math.Min(len, chunks[i].Length));
+            int len = i < count - 1 ? cap : (int)lastLen;
+            chunks[i].AsSpan(0, Math.Min(len, chunks[i].Length)).CopyTo(data.AsSpan(i * cap));
         }
-        return ms.ToArray();
+        return data;
     }
 
     private static byte[] Pad(byte[] src, int length)
@@ -239,11 +251,14 @@ internal static class Decoder
 
     // ---------- Single-image decode ----------
 
-    /// <summary>Reusable per-worker buffers for the two large per-image allocations.</summary>
+    /// <summary>Reusable per-worker buffers for the large per-image allocations.</summary>
     internal sealed class DecodeScratch
     {
         private Rgb24[]? _pixels;
         private bool[]? _visited;
+        private byte[]? _cells;
+        private byte[]? _recovered;
+        private int[]? _lut;
 
         public Rgb24[] Pixels(int length)
         {
@@ -259,6 +274,29 @@ internal static class Decoder
             else
                 Array.Clear(_visited, 0, length);
             return _visited;
+        }
+
+        public byte[] ClearedCells(int length)
+        {
+            if (_cells is null || _cells.Length < length)
+                _cells = new byte[length];
+            else
+                Array.Clear(_cells, 0, length); // the grid reader ORs bits in
+            return _cells;
+        }
+
+        public byte[] Recovered(int length)
+        {
+            if (_recovered is null || _recovered.Length < length)
+                _recovered = new byte[length];
+            return _recovered;
+        }
+
+        public int[] ResetNearestColorLut()
+        {
+            _lut ??= new int[1 << 15];
+            Array.Fill(_lut, -1);
+            return _lut;
         }
     }
 
@@ -315,13 +353,14 @@ internal static class Decoder
             throw new ShardDecodeException("Found a frame but the metadata strip is unreadable (CRC mismatch). The capture may be scaled too small or blurred.");
 
         var palette = ReadPalette(bmp, inner, layout);
-        byte[] cells = ReadDataGrid(bmp, inner, layout, palette);
+        byte[] cells = ReadDataGrid(bmp, inner, layout, palette, scratch);
 
         byte[] stream;
         int correctedBytes = 0;
         if (layout.EccParity > 0)
         {
-            if (!Fec.TryRecover(cells, layout.EccParity, layout.CodewordCount, out stream, out correctedBytes))
+            stream = scratch.Recovered(layout.CodewordCount * Fec.DataLength(layout.EccParity));
+            if (!Fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes))
                 throw new ShardDecodeException("Damage exceeds the error-correction capacity of this image. Recapture it.");
         }
         else
@@ -576,7 +615,7 @@ internal static class Decoder
         return score;
     }
 
-    private static byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette)
+    private static byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette, DecodeScratch scratch)
     {
         double sx = inner.W / layout.InnerW;
         double sy = inner.H / layout.InnerH;
@@ -590,10 +629,9 @@ internal static class Decoder
             offsets.AddRange([(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]);
 
         int bits = layout.BitsPerCell;
-        var stream = new byte[(layout.TotalBits + 7) / 8];
+        byte[] stream = scratch.ClearedCells((int)((layout.TotalBits + 7) / 8));
         // Lazy nearest-color lookup keyed on 5-bit-per-channel quantized RGB.
-        var lut = new int[1 << 15];
-        Array.Fill(lut, -1);
+        int[] lut = scratch.ResetNearestColorLut();
 
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
@@ -656,13 +694,23 @@ internal static class Decoder
         return new Rgb24((byte)(r / n), (byte)(g / n), (byte)(b / n));
     }
 
-    private static byte[] Inflate(byte[] data)
+    private static byte[] Inflate(byte[] data, int expectedLength)
     {
+        // The original length is known from the (CRC-validated) header, so decompress straight
+        // into an exact-size buffer — no MemoryStream doubling, no final ToArray copy. Any
+        // length lie is caught by the SHA-256 verification that follows.
         using var input = new MemoryStream(data);
         using var ds = new DeflateStream(input, CompressionMode.Decompress);
-        using var output = new MemoryStream();
-        ds.CopyTo(output);
-        return output.ToArray();
+        var result = new byte[expectedLength];
+        int offset = 0;
+        while (offset < result.Length)
+        {
+            int n = ds.Read(result, offset, result.Length - offset);
+            if (n == 0)
+                break;
+            offset += n;
+        }
+        return result;
     }
 }
 

@@ -23,24 +23,37 @@ internal static class Fec
     /// </summary>
     public static byte[] Protect(byte[] stream, int parity, int cwCount)
     {
-        int dataLen = DataLength(parity);
-        if (stream.Length > (long)cwCount * dataLen)
-            throw new ArgumentException("Stream exceeds the protected capacity.");
-
         var buffer = new byte[cwCount * CodewordLength];
+        ProtectInto(stream, stream.Length, parity, cwCount, buffer);
+        return buffer;
+    }
+
+    /// <summary>
+    /// Pooled-buffer variant: writes into <paramref name="dest"/> (which may be longer than
+    /// needed — every byte of the cwCount*255 region is overwritten). Only the first
+    /// <paramref name="streamLength"/> bytes of <paramref name="stream"/> are payload;
+    /// the remainder of each codeword is zero-padded.
+    /// </summary>
+    public static void ProtectInto(byte[] stream, int streamLength, int parity, int cwCount, byte[] dest)
+    {
+        int dataLen = DataLength(parity);
+        if (streamLength > (long)cwCount * dataLen)
+            throw new ArgumentException("Stream exceeds the protected capacity.");
+        if (dest.Length < cwCount * CodewordLength)
+            throw new ArgumentException("Destination buffer is too small.");
+
         Span<byte> cw = stackalloc byte[CodewordLength];
         for (int j = 0; j < cwCount; j++)
         {
             for (int i = 0; i < dataLen; i++)
             {
                 int src = j * dataLen + i;
-                cw[i] = src < stream.Length ? stream[src] : (byte)0;
+                cw[i] = src < streamLength ? stream[src] : (byte)0;
             }
             ReedSolomon.Encode(cw[..dataLen], cw[dataLen..]);
             for (int i = 0; i < CodewordLength; i++)
-                buffer[i * cwCount + j] = cw[i];
+                dest[i * cwCount + j] = cw[i];
         }
-        return buffer;
     }
 
     /// <summary>
@@ -49,8 +62,16 @@ internal static class Fec
     /// </summary>
     public static bool TryRecover(byte[] buffer, int parity, int cwCount, out byte[] stream, out int correctedBytes)
     {
+        stream = new byte[cwCount * DataLength(parity)];
+        return TryRecoverInto(buffer, parity, cwCount, stream, out correctedBytes);
+    }
+
+    /// <summary>Pooled-buffer variant of <see cref="TryRecover"/>; dest may be longer than needed.</summary>
+    public static bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes)
+    {
         int dataLen = DataLength(parity);
-        var result = new byte[cwCount * dataLen];
+        if (dest.Length < cwCount * dataLen)
+            throw new ArgumentException("Destination buffer is too small.");
         int corrected = 0, failures = 0;
 
         Span<byte> cw = stackalloc byte[CodewordLength];
@@ -61,7 +82,7 @@ internal static class Fec
 
             if (ReedSolomon.TryDecode(cw, parity, out int errors))
             {
-                cw[..dataLen].CopyTo(result.AsSpan(j * dataLen));
+                cw[..dataLen].CopyTo(dest.AsSpan(j * dataLen));
                 corrected += errors;
             }
             else
@@ -70,7 +91,6 @@ internal static class Fec
             }
         }
 
-        stream = result;
         correctedBytes = corrected;
         return failures == 0;
     }
