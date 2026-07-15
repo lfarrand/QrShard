@@ -14,6 +14,7 @@ internal sealed record EncodeOptions
     public int EccParity { get; init; } = 16; // corrects 8 damaged bytes per 255-byte codeword
     public bool Compress { get; init; } = true;
     public int RecoveryPercent { get; init; } // extra parity images (% of data images); 0 = off
+    public string ImageFormat { get; init; } = ShardImageFormat.Default; // any of ShardImageFormat.Supported
 }
 
 internal sealed record EncodeResult(
@@ -29,31 +30,24 @@ internal static class Encoder
     {
         if (opt.RecoveryPercent is < 0 or > MaxRecoveryPercent)
             throw new ArgumentException($"Recovery percent must be between 0 and {MaxRecoveryPercent}.");
-        if (new FileInfo(filePath).Length > MaxFileBytes)
+        string format = ShardImageFormat.Normalize(opt.ImageFormat);
+        long originalLength = new FileInfo(filePath).Length;
+        if (originalLength > MaxFileBytes)
             throw new InvalidOperationException($"Files larger than {MaxFileBytes / 1_000_000:N0} MB are not supported.");
-        byte[] original = File.ReadAllBytes(filePath);
-        byte[] sha = SHA256.HashData(original);
         string fileName = Path.GetFileName(filePath);
 
-        byte flags = 0;
-        byte[] data = original;
-        if (opt.Compress && original.Length > 0 && LooksCompressible(original))
-        {
-            byte[] compressed = Deflate(original, CompressionLevel.Optimal);
-            if (compressed.Length < original.Length)
-            {
-                data = compressed;
-                flags |= ShardHeader.FlagCompressed;
-            }
-        }
+        using var payload = OpenPayload(filePath, originalLength, opt.Compress, out byte flags, out byte[] sha);
+        var source = payload.Source;
+        long dataLength = source.Length;
 
         var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity);
-        long capacityLong = layout.UsableBytes - ShardHeader.Size(fileName);
+        int headerSize = ShardHeader.Size(fileName);
+        long capacityLong = layout.UsableBytes - headerSize;
         if (capacityLong < 1)
             throw new InvalidOperationException("Image capacity is too small for the header; increase resolution or density.");
         int capacity = (int)capacityLong;
 
-        int count = Math.Max(1, (int)((data.LongLength + capacity - 1) / capacity));
+        int count = Math.Max(1, (int)((dataLength + capacity - 1) / capacity));
         var (stripeData, stripeParity) = PlanStripes(count, opt.RecoveryPercent);
         int stripes = stripeParity > 0 ? (count + stripeData - 1) / stripeData : 0;
         int parityTotal = stripes * stripeParity;
@@ -64,14 +58,15 @@ internal static class Encoder
 
         Directory.CreateDirectory(outDir);
         int dataPad = Math.Max(3, count.ToString().Length);
+        string extension = ShardImageFormat.Extension(format);
 
         // Fills a padded (to `capacity`) view of data chunk i — the unit the cross-shard code
         // operates on — into a reusable buffer.
         void FillChunk(int i, byte[] dest)
         {
             long offset = (long)i * capacity;
-            int len = (int)Math.Min(capacity, data.LongLength - offset);
-            data.AsSpan((int)offset, len).CopyTo(dest);
+            int len = (int)Math.Min(capacity, dataLength - offset);
+            source.Read(offset, dest.AsSpan(0, len));
             if (len < capacity)
                 Array.Clear(dest, len, capacity - len);
         }
@@ -105,68 +100,61 @@ internal static class Encoder
         long pixelBytes = (long)layout.Width * layout.Height * 3;
         int degree = (int)Math.Clamp(2_000_000_000 / Math.Max(1, pixelBytes), 1, Environment.ProcessorCount);
         var po = new ParallelOptions { MaxDegreeOfParallelism = degree };
-        var pngEncoder = ShardPngEncoder(layout);
+        var writer = new ShardImageWriter(format, layout);
 
         // Data and parity images in ONE parallel loop (no barrier between the phases), with
         // thread-local scratch (pixel canvas + stream/cell byte buffers) so each worker
-        // allocates its working set exactly once instead of per image.
+        // allocates its working set exactly once instead of per image. Data-image payloads are
+        // read straight from the (possibly memory-mapped) source into the staging buffer.
         Parallel.For(0, totalImages, po,
             () => new RenderScratch(layout),
             (i, _, scratch) =>
             {
-                ShardHeader header;
-                ReadOnlySpan<byte> payload;
+                bool isParity = i >= count;
+                int payloadLen;
                 string outPath;
-                if (i < count)
+                if (!isParity)
                 {
-                    long offset = (long)i * capacity;
-                    int payloadLen = (int)Math.Min(capacity, data.LongLength - offset);
-                    payload = data.AsSpan((int)offset, payloadLen);
-                    header = new ShardHeader
-                    {
-                        FileId = fileId,
-                        Index = i,
-                        Count = count,
-                        PayloadLength = payloadLen,
-                        PayloadCrc32 = Crc.Crc32(payload),
-                        TotalLength = data.LongLength,
-                        OriginalLength = original.LongLength,
-                        Flags = flags,
-                        Sha256 = sha,
-                        FileName = fileName,
-                        StripeData = stripeData,
-                        StripeParity = stripeParity,
-                    };
-                    outPath = Path.Combine(outDir, $"{fileName}.qrs{(i + 1).ToString().PadLeft(dataPad, '0')}of{count.ToString().PadLeft(dataPad, '0')}.png");
+                    payloadLen = (int)Math.Min(capacity, dataLength - (long)i * capacity);
+                    outPath = Path.Combine(outDir, $"{fileName}.qrs{(i + 1).ToString().PadLeft(dataPad, '0')}of{count.ToString().PadLeft(dataPad, '0')}{extension}");
                 }
                 else
                 {
-                    int ord = i - count;
-                    byte[] parity = parityChunks[ord];
-                    payload = parity;
-                    header = new ShardHeader
-                    {
-                        FileId = fileId,
-                        Index = ord,
-                        Count = count,
-                        PayloadLength = parity.Length,
-                        PayloadCrc32 = Crc.Crc32(parity),
-                        TotalLength = data.LongLength,
-                        OriginalLength = original.LongLength,
-                        Flags = (byte)(flags | ShardHeader.FlagParity),
-                        Sha256 = sha,
-                        FileName = fileName,
-                        StripeData = stripeData,
-                        StripeParity = stripeParity,
-                    };
-                    outPath = Path.Combine(outDir, $"{fileName}.qrs-parity{(ord + 1).ToString().PadLeft(3, '0')}of{parityTotal.ToString().PadLeft(3, '0')}.png");
+                    payloadLen = parityChunks[i - count].Length;
+                    outPath = Path.Combine(outDir, $"{fileName}.qrs-parity{(i - count + 1).ToString().PadLeft(3, '0')}of{parityTotal.ToString().PadLeft(3, '0')}{extension}");
                 }
 
-                RenderShard(layout, palette, metaModules, header, payload, outPath, scratch, pngEncoder);
+                // Stage header + payload contiguously: [0..headerSize) header, then the payload.
+                int streamLength = headerSize + payloadLen;
+                byte[] stream = layout.EccParity > 0 ? scratch.Stream(streamLength) : new byte[streamLength];
+                var payloadSpan = stream.AsSpan(headerSize, payloadLen);
+                if (isParity)
+                    parityChunks[i - count].CopyTo(payloadSpan);
+                else
+                    source.Read((long)i * capacity, payloadSpan);
+
+                var header = new ShardHeader
+                {
+                    FileId = fileId,
+                    Index = isParity ? i - count : i,
+                    Count = count,
+                    PayloadLength = payloadLen,
+                    PayloadCrc32 = Crc.Crc32(payloadSpan),
+                    TotalLength = dataLength,
+                    OriginalLength = originalLength,
+                    Flags = (byte)(isParity ? flags | ShardHeader.FlagParity : flags),
+                    Sha256 = sha,
+                    FileName = fileName,
+                    StripeData = stripeData,
+                    StripeParity = stripeParity,
+                };
+                header.Serialize().CopyTo(stream, 0);
+
+                RenderShard(layout, palette, metaModules, stream, streamLength, outPath, scratch, writer);
                 files[i] = outPath;
                 int finished = Interlocked.Increment(ref done);
                 log?.Invoke($"  [{finished}/{totalImages}] {Path.GetFileName(outPath)}" +
-                            (i < count ? $" ({header.PayloadLength:N0} bytes)" : " (parity)"));
+                            (isParity ? " (parity)" : $" ({payloadLen:N0} bytes)"));
                 return scratch;
             },
             _ => { });
@@ -175,20 +163,47 @@ internal static class Encoder
             count, parityTotal, stripeData, stripeParity);
     }
 
-    /// <summary>
-    /// PNG settings tuned for shard content: level-1 deflate (dense cell data is nearly
-    /// incompressible, so higher effort buys little) and, for cells of 2+ px, the "Up" filter
-    /// (rows repeat CellPx times, which Up turns into runs of zeros). Level 6 adaptive — the
-    /// ImageSharp default — costs ~3x the encode time for a marginal size difference here.
-    /// </summary>
-    private static SixLabors.ImageSharp.Formats.Png.PngEncoder ShardPngEncoder(Layout layout) => new()
+    private sealed class PayloadHandle(IPayloadSource source) : IDisposable
     {
-        CompressionLevel = SixLabors.ImageSharp.Formats.Png.PngCompressionLevel.Level1,
-        FilterMethod = layout.CellPx >= 2
-            ? SixLabors.ImageSharp.Formats.Png.PngFilterMethod.Up
-            : SixLabors.ImageSharp.Formats.Png.PngFilterMethod.None,
-        ColorType = SixLabors.ImageSharp.Formats.Png.PngColorType.Rgb,
-    };
+        public IPayloadSource Source => source;
+
+        public void Dispose() => source.Dispose();
+    }
+
+    /// <summary>
+    /// Chooses how the input is exposed to the encoder:
+    ///  - empty file → trivial in-memory source;
+    ///  - compressible content (per a mid-file sample for large files) → deflated in memory,
+    ///    when that actually wins;
+    ///  - everything else → a memory-mapped source, so large incompressible files (zips, media)
+    ///    are streamed per-chunk and never materialized as a managed array.
+    /// </summary>
+    private static PayloadHandle OpenPayload(string filePath, long length, bool compress, out byte flags, out byte[] sha)
+    {
+        flags = 0;
+        if (length == 0)
+        {
+            sha = SHA256.HashData([]);
+            return new PayloadHandle(new BytePayloadSource([]));
+        }
+
+        var mapped = new MappedPayloadSource(filePath);
+        sha = PayloadSource.ComputeSha256(mapped);
+
+        if (compress && LooksCompressible(mapped))
+        {
+            var original = new byte[length];
+            mapped.Read(0, original);
+            byte[] compressed = Deflate(original, CompressionLevel.Optimal);
+            if (compressed.Length < original.Length)
+            {
+                mapped.Dispose();
+                flags = ShardHeader.FlagCompressed;
+                return new PayloadHandle(new BytePayloadSource(compressed));
+            }
+        }
+        return new PayloadHandle(mapped);
+    }
 
     /// <summary>
     /// Chooses stripe geometry for a given recovery target. Parity is a percentage of the data
@@ -230,19 +245,33 @@ internal static class Encoder
         }
     }
 
-    private static void RenderShard(Layout layout, Rgb24[] palette, byte[] metaModules, ShardHeader header,
-        ReadOnlySpan<byte> payload, string outPath, RenderScratch scratch, SixLabors.ImageSharp.Formats.Png.PngEncoder pngEncoder)
+    /// <summary>How rendered pixels are written to disk for the chosen container format.</summary>
+    private sealed class ShardImageWriter(string format, Layout layout)
     {
-        byte[] headerBytes = header.Serialize();
-        int streamLength = headerBytes.Length + payload.Length;
+        private readonly bool _fastPng = format == "png";
+        private readonly SixLabors.ImageSharp.Formats.IImageEncoder? _encoder = ShardImageFormat.CreateEncoder(format);
+        private readonly bool _upFilter = layout.CellPx >= 2;
 
+        public void Write(string path, Rgb24[] px, int width, int height)
+        {
+            if (_fastPng)
+            {
+                FastPng.Write(path, px.AsSpan(0, width * height), width, height, _upFilter);
+                return;
+            }
+            using var image = Image.LoadPixelData<Rgb24>(
+                ShardImageFormat.EncodeConfiguration, px.AsSpan(0, width * height), width, height);
+            image.Save(path, _encoder!);
+        }
+    }
+
+    /// <summary>The stream buffer holds [0..headerSize) header then payload, streamLength bytes total.</summary>
+    private static void RenderShard(Layout layout, Rgb24[] palette, byte[] metaModules, byte[] stream, int streamLength,
+        string outPath, RenderScratch scratch, ShardImageWriter writer)
+    {
         byte[] cellBuffer;
         if (layout.EccParity > 0)
         {
-            byte[] stream = scratch.Stream(streamLength);
-            headerBytes.CopyTo(stream, 0);
-            payload.CopyTo(stream.AsSpan(headerBytes.Length));
-
             // The renderer reads TotalBytes; FEC fills the first CodewordCount*255 of them,
             // so clear the sub-codeword tail to keep pooled-buffer reuse deterministic.
             int cellLength = (int)layout.TotalBytes;
@@ -254,17 +283,15 @@ internal static class Encoder
         }
         else
         {
-            // Without ECC the stream itself is the cell buffer; it must be exactly sized because
-            // the renderer treats bytes past the end as zero cells.
-            cellBuffer = new byte[streamLength];
-            headerBytes.CopyTo(cellBuffer, 0);
-            payload.CopyTo(cellBuffer.AsSpan(headerBytes.Length));
+            // Without ECC the stream itself is the cell buffer; the caller allocated it exactly
+            // sized in this mode, because the renderer treats bytes past the end as zero cells.
+            cellBuffer = stream;
         }
-        Render(layout, palette, metaModules, cellBuffer, outPath, scratch.Pixels, pngEncoder);
+        Render(layout, palette, metaModules, cellBuffer, outPath, scratch.Pixels, writer);
     }
 
     private static void Render(Layout layout, Rgb24[] palette, byte[] metaModules, byte[] cellBuffer, string outPath,
-        Rgb24[] px, SixLabors.ImageSharp.Formats.Png.PngEncoder pngEncoder)
+        Rgb24[] px, ShardImageWriter writer)
     {
         int w = layout.Width, h = layout.Height;
         var white = new Rgb24(255, 255, 255);
@@ -300,8 +327,7 @@ internal static class Encoder
             }
         }
 
-        using var image = Image.LoadPixelData<Rgb24>(px.AsSpan(0, w * h), w, h);
-        image.SaveAsPng(outPath, pngEncoder);
+        writer.Write(outPath, px, w, h);
     }
 
     private static void DrawMetaStrip(Rgb24[] px, int stride, Layout layout, byte[] metaModules, int ix, int yTop)
@@ -345,13 +371,13 @@ internal static class Encoder
     /// Cheap pre-check before deflating large inputs: compressing a mid-file sample at the
     /// fastest level tells us whether a full pass is worth the CPU (a .zip/.mp4 is not).
     /// </summary>
-    internal static bool LooksCompressible(byte[] data)
+    internal static bool LooksCompressible(IPayloadSource source)
     {
         const int threshold = 4_000_000, sampleLen = 1_000_000;
-        if (data.Length <= threshold)
+        if (source.Length <= threshold)
             return true;
-        int offset = data.Length / 2 - sampleLen / 2;
-        byte[] sample = data[offset..(offset + sampleLen)];
+        var sample = new byte[sampleLen];
+        source.Read(source.Length / 2 - sampleLen / 2, sample);
         return Deflate(sample, CompressionLevel.Fastest).Length < sampleLen * 98L / 100;
     }
 

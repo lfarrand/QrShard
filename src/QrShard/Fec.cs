@@ -1,3 +1,5 @@
+using System.Runtime.Intrinsics;
+
 namespace QrShard;
 
 /// <summary>
@@ -73,25 +75,74 @@ internal static class Fec
         if (dest.Length < cwCount * dataLen)
             throw new ArgumentException("Destination buffer is too small.");
         int corrected = 0, failures = 0;
+        var cwScratch = new byte[CodewordLength];
 
-        Span<byte> cw = stackalloc byte[CodewordLength];
-        for (int j = 0; j < cwCount; j++)
+        int j = 0;
+
+        // SIMD fast path: the buffer is interleaved (byte k*cwCount+j is symbol k of codeword j),
+        // so 16 consecutive codewords' symbols sit in 16 consecutive bytes. Compute all their
+        // syndromes together — one Vector128 lane per codeword, multiplying every lane by the
+        // constant α^i via nibble shuffles. Clean codewords (the vast majority) are then copied
+        // straight out; only dirty lanes fall back to the scalar Berlekamp-Massey decoder.
+        if (Vector128.IsHardwareAccelerated && parity > 0 && cwCount >= 16)
         {
-            for (int i = 0; i < CodewordLength; i++)
-                cw[i] = buffer[i * cwCount + j];
+            var tableLo = new Vector128<byte>[parity];
+            var tableHi = new Vector128<byte>[parity];
+            for (int i = 0; i < parity; i++)
+                (tableLo[i], tableHi[i]) = Gf256.MulTables(Gf256.AlphaPower(i));
+            var synd = new Vector128<byte>[parity];
 
-            if (ReedSolomon.TryDecode(cw, parity, out int errors))
+            for (; j + 16 <= cwCount; j += 16)
             {
-                cw[..dataLen].CopyTo(dest.AsSpan(j * dataLen));
-                corrected += errors;
-            }
-            else
-            {
-                failures++;
+                Array.Clear(synd);
+                for (int k = 0; k < CodewordLength; k++)
+                {
+                    var c = Vector128.Create<byte>(buffer.AsSpan(k * cwCount + j, 16));
+                    for (int i = 0; i < parity; i++)
+                        synd[i] = Gf256.MulVec(synd[i], tableLo[i], tableHi[i]) ^ c;
+                }
+
+                var dirty = Vector128<byte>.Zero;
+                for (int i = 0; i < parity; i++)
+                    dirty |= synd[i];
+
+                for (int lane = 0; lane < 16; lane++)
+                {
+                    if (dirty.GetElement(lane) == 0)
+                        CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
+                    else
+                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures);
+                }
             }
         }
 
+        for (; j < cwCount; j++)
+            DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures);
+
         correctedBytes = corrected;
         return failures == 0;
+    }
+
+    private static void CopyCleanCodeword(byte[] buffer, int cwCount, int j, int dataLen, byte[] dest)
+    {
+        for (int i = 0; i < dataLen; i++)
+            dest[j * dataLen + i] = buffer[i * cwCount + j];
+    }
+
+    private static void DecodeCodeword(byte[] buffer, int parity, int cwCount, int j, int dataLen, byte[] dest,
+        byte[] cwScratch, ref int corrected, ref int failures)
+    {
+        for (int i = 0; i < CodewordLength; i++)
+            cwScratch[i] = buffer[i * cwCount + j];
+
+        if (ReedSolomon.TryDecode(cwScratch, parity, out int errors))
+        {
+            cwScratch.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
+            corrected += errors;
+        }
+        else
+        {
+            failures++;
+        }
     }
 }

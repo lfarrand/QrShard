@@ -140,4 +140,62 @@ public class FecTests
         Assert.Equal(255, Fec.DataLength(0));
         Assert.Equal(191, Fec.DataLength(64));
     }
+
+    // ---------- SIMD syndrome-scan path (>= 16 codewords: vector blocks + scalar tail) ----------
+
+    [Theory]
+    [InlineData(16)]  // exactly one vector block
+    [InlineData(40)]  // two blocks + tail of 8
+    [InlineData(100)] // several blocks
+    public void ManyCodewords_CleanRecovery(int cwCount)
+    {
+        const int parity = 16;
+        byte[] stream = RandomStream(cwCount * Fec.DataLength(parity), seed: 200 + cwCount);
+        byte[] buffer = Fec.Protect(stream, parity, cwCount);
+
+        Assert.True(Fec.TryRecover(buffer, parity, cwCount, out byte[] recovered, out int corrected));
+        Assert.Equal(0, corrected);
+        Assert.Equal(stream, recovered[..stream.Length]);
+    }
+
+    [Theory]
+    [InlineData(40)]
+    [InlineData(100)]
+    public void ManyCodewords_ScatteredDamage_IsCorrected(int cwCount)
+    {
+        const int parity = 16;
+        byte[] stream = RandomStream(cwCount * 100, seed: 300 + cwCount);
+        byte[] buffer = Fec.Protect(stream, parity, cwCount);
+
+        // Damage codewords across vector blocks AND the scalar tail, staying under 8/codeword.
+        var rng = new Random(400 + cwCount);
+        int damaged = 0;
+        for (int j = 0; j < cwCount; j += 3) // every third codeword gets 5 bad symbols
+        {
+            foreach (int k in Enumerable.Range(0, Fec.CodewordLength).OrderBy(_ => rng.Next()).Take(5))
+            {
+                buffer[k * cwCount + j] ^= (byte)rng.Next(1, 256);
+                damaged++;
+            }
+        }
+
+        Assert.True(Fec.TryRecover(buffer, parity, cwCount, out byte[] recovered, out int corrected));
+        Assert.Equal(damaged, corrected);
+        Assert.Equal(stream, recovered[..stream.Length]);
+    }
+
+    [Fact]
+    public void ManyCodewords_OneRuinedCodeword_FailsWithoutCorruptingOthers()
+    {
+        const int parity = 16, cwCount = 48;
+        byte[] stream = RandomStream(cwCount * 100, seed: 55);
+        byte[] buffer = Fec.Protect(stream, parity, cwCount);
+
+        // Ruin codeword 20 (inside a vector block) beyond its 8-error budget.
+        var rng = new Random(56);
+        foreach (int k in Enumerable.Range(0, Fec.CodewordLength).OrderBy(_ => rng.Next()).Take(20))
+            buffer[k * cwCount + 20] ^= 0x5A;
+
+        Assert.False(Fec.TryRecover(buffer, parity, cwCount, out _, out _));
+    }
 }

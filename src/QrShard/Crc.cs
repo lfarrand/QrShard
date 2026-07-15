@@ -18,13 +18,19 @@ internal static class Crc
         return table;
     }
 
-    public static uint Crc32(ReadOnlySpan<byte> data)
+    public static uint Crc32(ReadOnlySpan<byte> data) => Crc32Finish(Crc32Append(Crc32Begin(), data));
+
+    // Incremental CRC-32 (for streamed writers, e.g. the PNG chunk CRC).
+    public static uint Crc32Begin() => 0xFFFFFFFFu;
+
+    public static uint Crc32Append(uint state, ReadOnlySpan<byte> data)
     {
-        uint crc = 0xFFFFFFFFu;
         foreach (byte b in data)
-            crc = Table32[(crc ^ b) & 0xFF] ^ (crc >> 8);
-        return crc ^ 0xFFFFFFFFu;
+            state = Table32[(state ^ b) & 0xFF] ^ (state >> 8);
+        return state;
     }
+
+    public static uint Crc32Finish(uint state) => state ^ 0xFFFFFFFFu;
 
     public static ushort Crc16Ccitt(ReadOnlySpan<byte> data)
     {

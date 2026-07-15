@@ -49,6 +49,7 @@ internal static class Cli
                     BitsPerCell = GetInt(named, "-b", "--bits", 4),
                     EccParity = GetInt(named, "-e", "--ecc", 16),
                     RecoveryPercent = GetInt(named, "-R", "--recovery", 0),
+                    ImageFormat = Get(named, "-f", "--format") ?? ShardImageFormat.Default,
                     Compress = !flags.Contains("--no-compress"),
                 };
                 string outDir = Get(named, "-o", "--out") ?? Path.Combine(
@@ -56,7 +57,8 @@ internal static class Cli
 
                 @out.WriteLine($"Encoding '{file}' → {outDir}");
                 @out.WriteLine($"  {opt.Width}x{opt.Height}px, cell {opt.CellPx}px, {opt.BitsPerCell} bits/cell, " +
-                               $"ECC parity {opt.EccParity}, recovery {opt.RecoveryPercent}%, compression {(opt.Compress ? "on" : "off")}");
+                               $"ECC parity {opt.EccParity}, recovery {opt.RecoveryPercent}%, " +
+                               $"format {opt.ImageFormat}, compression {(opt.Compress ? "on" : "off")}");
                 var result = Encoder.Encode(file, outDir, opt, @out.WriteLine);
                 @out.WriteLine($"Done: {result.ImageCount} image(s) of {result.Width}x{result.Height}px, up to {result.BytesPerImage:N0} payload bytes each.");
                 if (result.ParityImages > 0)
@@ -129,7 +131,8 @@ internal static class Cli
     }
 
     private static bool IsImageFile(string path) =>
-        Path.GetExtension(path).ToLowerInvariant() is ".png" or ".bmp" or ".jpg" or ".jpeg" or ".webp";
+        Path.GetExtension(path).ToLowerInvariant()
+            is ".png" or ".bmp" or ".jpg" or ".jpeg" or ".webp" or ".tga" or ".qoi" or ".tif" or ".tiff";
 
     private static (List<string> Positional, Dictionary<string, string> Named, HashSet<string> Flags) ParseArgs(string[] args)
     {
@@ -177,6 +180,8 @@ internal static class Cli
                 -R, --recovery <pct>     Add parity IMAGES so whole missing/damaged images can be
                                          rebuilt without recapture; pct% extra images, 0-100
                                          (default: 0; e.g. 15 tolerates losing ~15% of the images)
+                -f, --format <fmt>       Lossless image format: png, bmp, tga, qoi, webp, tiff
+                                         (default: png, written by the built-in fast PNG writer)
                 --no-compress            Skip deflate compression of the payload
 
               qrshard decode <folder|images...> [-o <file>]

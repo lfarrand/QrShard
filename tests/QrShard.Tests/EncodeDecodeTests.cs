@@ -136,9 +136,9 @@ public class EncodeDecodeTests
     public void LooksCompressible_SkipsLargeIncompressibleInput()
     {
         // > 4 MB of noise: the sampling heuristic must bail out instead of deflating it all.
-        Assert.False(Encoder.LooksCompressible(TestData.Random(6_000_000)));
-        Assert.True(Encoder.LooksCompressible(TestData.CompressibleText(6_000_000)));
-        Assert.True(Encoder.LooksCompressible(TestData.Random(1_000))); // small inputs always try
+        Assert.False(Encoder.LooksCompressible(new BytePayloadSource(TestData.Random(6_000_000))));
+        Assert.True(Encoder.LooksCompressible(new BytePayloadSource(TestData.CompressibleText(6_000_000))));
+        Assert.True(Encoder.LooksCompressible(new BytePayloadSource(TestData.Random(1_000)))); // small inputs always try
     }
 
     [Fact]

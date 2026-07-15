@@ -187,6 +187,34 @@ public class CliTests
     }
 
     [Fact]
+    public void Encode_WithFormatOption_ProducesAndDecodesThatFormat()
+    {
+        using var tmp = new TempDir();
+        byte[] content = TestData.Random(10_000);
+        string input = tmp.WriteFile("payload.bin", content);
+        string shardDir = tmp.File("shards");
+
+        var (code, output, _) = Run("encode", input, "-o", shardDir, "-r", "900", "-f", "qoi");
+        Assert.Equal(0, code);
+        Assert.Contains("format qoi", output);
+        Assert.NotEmpty(Directory.GetFiles(shardDir, "*.qoi"));
+
+        string restored = tmp.File("restored.bin");
+        Assert.Equal(0, Run("decode", shardDir, "-o", restored).Code);
+        Assert.Equal(content, File.ReadAllBytes(restored));
+    }
+
+    [Fact]
+    public void Encode_UnsupportedFormat_ReportsError()
+    {
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("f.bin", TestData.Random(100));
+        var (code, _, err) = Run("encode", input, "-r", "900", "-f", "gif");
+        Assert.Equal(1, code);
+        Assert.Contains("Unsupported image format", err);
+    }
+
+    [Fact]
     public void Encode_InvalidRecoveryValue_ReportsError()
     {
         using var tmp = new TempDir();

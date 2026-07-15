@@ -23,6 +23,8 @@ qrshard encode <file> [options]     Split a file into shard images.
                            (default: 16 ≈ 6% overhead, fixes 8 bad bytes per block)
   -R, --recovery <pct>     Add parity IMAGES so whole missing/damaged images can be rebuilt
                            without recapture; pct% extra images, 0-100 (default: 0)
+  -f, --format <fmt>       Lossless image format: png, bmp, tga, qoi, webp, tiff
+                           (default: png, written by the built-in fast PNG writer)
   --no-compress            Skip deflate compression of the payload
 
 qrshard decode <folder|images...> [-o <file>]
@@ -84,6 +86,14 @@ files. Hard limits: ≤ 1.5 GB per file (in-memory codec); display size caps per
   buffer, and the 128 KB nearest-color LUT; reassembly and decompression write into exact-size
   output buffers (no MemoryStream doubling or ToArray copies); cross-shard stripe chunks reuse
   one buffer set. Cell read/write uses a two-byte-window fast path instead of per-bit loops.
+- **Streaming encoder**: incompressible inputs (the common big-transfer case) are memory-mapped
+  and read per-chunk by the parallel workers — the file is never materialized as a managed
+  array. Compressible inputs still materialize (the deflated stream must exist somewhere).
+- **SIMD syndrome scan**: the per-image FEC buffer is symbol-interleaved, so 16 codewords'
+  syndromes are computed together — one Vector128 lane per codeword — and clean codewords
+  (nearly all of them) skip the scalar decoder entirely.
+- **Custom fast PNG writer** for the default format (see the library investigation above), and
+  a dedicated pooled ImageSharp memory allocator for the non-PNG encoders.
 
 Result (100 MB, 32 cores, BenchmarkDotNet means): Max4K encode 18.2 s → ~0.7 s, Max4K-R10
 24.4 s → ~0.7 s; default-preset encode 6.5 → 2.3 s, decode 4.3 → 1.7 s. Decode allocations
@@ -92,6 +102,51 @@ fell from ~9.5 GB to ~0.9 GB. All presets remain byte-verified.
 Deflate compression is applied automatically when a fast mid-file sample suggests it will help,
 so compressible files transfer in correspondingly fewer images (already-compressed archives skip
 straight to encoding).
+
+## Image formats
+
+Shards can be written in any of six lossless container formats (`-f`); the container is
+transport-only — decoding, ECC, and recovery are identical through all of them. Measured on a
+100 MB transfer at the default density (32 cores):
+
+| Format | Encode | Decode | Disk | Notes |
+|---|---:|---:|---:|---|
+| `png` (default) | 3.0 s | 2.0 s | 365 MB | built-in fast writer; best balance |
+| `qoi` | 2.6 s | 2.2 s | 1.5 GB | simplest codec, very fast |
+| `bmp` | 4.2 s | 2.5 s | 6.6 GB | uncompressed; disk-write bound |
+| `tga` | 3.2 s | 3.5 s | 2.4 GB | RLE |
+| `tiff` | 6.2 s | 2.9 s | 973 MB | deflate level 1 |
+| `webp` | 21 s | 5.2 s | 194 MB | lossless mode; smallest, slowest |
+
+GIF is deliberately unsupported: its 256-color palette cannot hold the 8-bit cell palette plus
+the frame and strip colors. JPEG and other lossy formats are rejected outright — the format
+requires bit-exact pixels (though mild JPEG *re-encoding of a capture* is absorbed by ECC).
+
+## Image library: investigation and the custom PNG writer
+
+The codec has asymmetric needs. **Decode** must parse arbitrary screenshots produced by unknown
+tools — that genuinely needs a mature, battle-tested image library. **Encode** does not: we own
+every pixel and just need to serialize a buffer losslessly. Options considered:
+
+- **ImageSharp** (current): pure managed, cross-platform, decodes every format we care about,
+  pluggable memory allocator. Kept for all decoding and for the non-PNG encoders. Pinned to
+  3.1.x (4.0 requires a commercial license key at build time).
+- **SkiaSharp**: fast native codecs, but a ~10 MB native dependency per RID, no TGA/QOI encode,
+  and interop copies at the boundary — no win for this workload.
+- **Magick.NET**: broadest format support, but a heavyweight native dependency and
+  process-global configuration; overkill for six lossless formats.
+- **System.Drawing.Common**: Windows-only since .NET 6 and effectively deprecated for new code.
+- **StbImageSharp/StbImageWriteSharp**: tiny, but decode-side robustness and encode-side
+  compression quality are both below what the transfer needs.
+- **Custom**: viable precisely once, for the encode hot path — implemented as
+  [FastPng.cs](src/QrShard/FastPng.cs), ~150 lines: 8-bit truecolor, a fixed None/Up filter,
+  zlib via .NET's zlib-ng, one IDAT streamed straight from the render buffer to the file with
+  an incrementally-computed chunk CRC. Output is standard PNG readable by anything (verified
+  pixel-identical through ImageSharp in tests). It removed the last library overhead from the
+  encode path and produces smaller files than ImageSharp's level-1 encoder did.
+
+A fully custom *container* format was rejected: shards must be displayable by ordinary OS image
+viewers on the sending machine, so the container must be a mainstream standard.
 
 ## Resilience
 

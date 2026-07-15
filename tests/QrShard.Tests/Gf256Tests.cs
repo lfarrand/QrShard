@@ -1,3 +1,4 @@
+using System.Runtime.Intrinsics;
 using QrShard;
 
 namespace QrShard.Tests;
@@ -95,6 +96,36 @@ public class Gf256Tests
         var copy = (byte[])dst.Clone();
         Gf256.MulAdd(0, src, dst);
         Assert.Equal(copy, dst);
+    }
+
+    [Fact]
+    public void AlphaPower_MatchesRepeatedMultiplication()
+    {
+        byte alpha = Gf256.AlphaPower(1);
+        byte acc = 1;
+        for (int i = 0; i < 300; i++) // crosses the 255-cycle wrap
+        {
+            Assert.Equal(acc, Gf256.AlphaPower(i));
+            acc = Gf256.Mul(acc, alpha);
+        }
+    }
+
+    [Fact]
+    public void MulVec_MatchesScalarMul_ForAllLanes()
+    {
+        if (!Vector128.IsHardwareAccelerated)
+            return;
+        var rng = new Random(6);
+        Span<byte> input = stackalloc byte[16];
+        foreach (byte coef in new byte[] { 1, 2, 0x1D, 0x80, 0xFF, 29 })
+        {
+            var (lo, hi) = Gf256.MulTables(coef);
+            rng.NextBytes(input);
+            var v = Vector128.Create<byte>(input);
+            var product = Gf256.MulVec(v, lo, hi);
+            for (int lane = 0; lane < 16; lane++)
+                Assert.Equal(Gf256.Mul(coef, input[lane]), product.GetElement(lane));
+        }
     }
 
     [Fact]

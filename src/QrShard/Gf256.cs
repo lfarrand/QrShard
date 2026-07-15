@@ -44,6 +44,33 @@ internal static class Gf256
         return Exp[255 - Log[a]];
     }
 
+    /// <summary>α^i for the field's generator α.</summary>
+    public static byte AlphaPower(int i) => Exp[i % 255];
+
+    /// <summary>
+    /// Builds the two 16-entry nibble product tables for multiplication by a fixed coefficient:
+    /// coef*b = coef*(b_hi·16) ^ coef*b_lo, so a pair of byte shuffles multiplies 16 lanes at once.
+    /// </summary>
+    public static (Vector128<byte> Lo, Vector128<byte> Hi) MulTables(byte coef)
+    {
+        Span<byte> lo = stackalloc byte[16];
+        Span<byte> hi = stackalloc byte[16];
+        for (int n = 0; n < 16; n++)
+        {
+            lo[n] = Mul(coef, (byte)n);
+            hi[n] = Mul(coef, (byte)(n << 4));
+        }
+        return (Vector128.Create<byte>(lo), Vector128.Create<byte>(hi));
+    }
+
+    /// <summary>Multiplies all 16 lanes by the fixed coefficient encoded in the nibble tables.</summary>
+    public static Vector128<byte> MulVec(Vector128<byte> v, Vector128<byte> tableLo, Vector128<byte> tableHi)
+    {
+        var nibble = Vector128.Create((byte)0x0F);
+        return Vector128.ShuffleNative(tableLo, v & nibble)
+             ^ Vector128.ShuffleNative(tableHi, Vector128.ShiftRightLogical(v.AsUInt16(), 4).AsByte() & nibble);
+    }
+
     /// <summary>
     /// Multiply-accumulate a whole shard: dst[i] ^= coef * src[i] over GF(2^8).
     /// This is the inner loop of both encoding and reconstruction.
@@ -60,23 +87,11 @@ internal static class Gf256
         int i = 0;
         if (Vector128.IsHardwareAccelerated && src.Length >= 16)
         {
-            Span<byte> lo = stackalloc byte[16];
-            Span<byte> hi = stackalloc byte[16];
-            for (int n = 0; n < 16; n++)
-            {
-                lo[n] = Mul(coef, (byte)n);
-                hi[n] = Mul(coef, (byte)(n << 4));
-            }
-            var tableLo = Vector128.Create<byte>(lo);
-            var tableHi = Vector128.Create<byte>(hi);
-            var nibble = Vector128.Create((byte)0x0F);
-
+            var (tableLo, tableHi) = MulTables(coef);
             for (; i <= src.Length - 16; i += 16)
             {
                 var v = Vector128.Create<byte>(src.Slice(i, 16));
-                var idxLo = v & nibble;
-                var idxHi = Vector128.ShiftRightLogical(v.AsUInt16(), 4).AsByte() & nibble;
-                var product = Vector128.ShuffleNative(tableLo, idxLo) ^ Vector128.ShuffleNative(tableHi, idxHi);
+                var product = MulVec(v, tableLo, tableHi);
                 (Vector128.Create<byte>(dst.Slice(i, 16)) ^ product).CopyTo(dst.Slice(i, 16));
             }
         }
