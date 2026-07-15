@@ -237,6 +237,23 @@ files' shards can be mixed in one folder (grouped by random 64-bit file ID).
   `--ecc` (e.g. 32) for hostile conditions, or lower it toward 0 for maximum capacity.
 - Rotation/perspective is not supported — this is a screenshot format, not a camera format.
 
+## Cross-platform
+
+The codec is pure managed .NET with no Windows dependency: ImageSharp, the built-in PNG writer,
+memory-mapped I/O, and the `Vector128` SIMD paths (which map to NEON on ARM) all work on Linux
+and macOS. Verified: `dotnet publish -r linux-x64 --self-contained`, full round trips on Linux,
+and cross-OS transfers in both directions — including parity-recovering a Linux-encoded shard
+set on Windows. Shards are byte-compatible across platforms by construction (the wire format is
+protocol, not platform).
+
+Two conveniences are Windows-only and degrade gracefully elsewhere:
+
+- **Monitor auto-detection** (`-r auto`) uses a user32 call; on other platforms (or headless) it
+  falls back to 2160 with a note — pass `-r` explicitly.
+- **The benchmark report's machine spec** uses WMI; elsewhere it degrades to OS description,
+  .NET version, and core count. (Linux equivalents — /proc/cpuinfo, /sys/class/dmi — could be
+  added if benchmarks are ever run there.)
+
 ## Building and testing
 
 Requires the .NET 10 SDK. `dotnet build -c Release` at the solution root.
