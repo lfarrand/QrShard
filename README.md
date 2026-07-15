@@ -1,54 +1,118 @@
 # QrShard
 
-Encodes any file into a series of high-density, QR-style PNG images that can be captured by
-screenshot on another device and reconstituted back into the original file, bit-for-bit.
+QrShard transfers files between machines through the screen: it encodes any file into a series
+of high-density, QR-style images which are displayed on one machine, captured by screenshot on
+another, and reconstituted back into the original file — **bit-for-bit, verified by SHA-256**.
 
-The format is custom (not QR-standard) and tuned for screen-to-screenshot transfer rather than
-camera capture, which allows far higher data density than a real QR code.
+The image format is custom (not QR-standard) and tuned for screen-to-screenshot transfer rather
+than camera capture. Because a screenshot is a lossless pixel copy, each image can be vastly
+denser than a real QR code: from ~212 KB per image at the robust default up to **~6.5 MB per
+image** on a 4K display — so a 100 MB file fits in 22 screenshots and a 300 MB zip in ~65.
+Layered error correction absorbs cursors, notification pop-ups, and mild re-encoding; optional
+parity images let whole screenshots be lost and rebuilt without recapture.
 
-## Usage
+**Contents:** [Platforms](#supported-platforms) · [How to use](#how-to-use-it) ·
+[Options](#commands-and-options) · [Configuration](#configuration-appsettingsjson) ·
+[Capacity](#capacity-and-throughput) · [Formats](#image-formats) · [Resilience](#resilience) ·
+[Benchmarks](#benchmark-snapshot) · [Design notes](#how-it-works) ·
+[Building & testing](#building-and-testing)
+
+## Supported platforms
+
+The codec is pure managed .NET 10 — no native dependencies — and the wire format is
+platform-agnostic by construction, so shards encoded on one OS decode on any other (verified:
+Windows→Linux and Linux→Windows transfers, including parity-recovering a Linux-encoded set on
+Windows).
+
+| Platform | Codec | Monitor auto-detection (`-r auto`) | Benchmark machine spec |
+|---|---|---|---|
+| Windows (x64) | ✅ | ✅ EnumDisplaySettings (physical pixels, DPI-scaling-proof) | ✅ WMI |
+| Linux (x64/arm64) | ✅ verified via WSL | ✅ `xrandr` parsing (X11/XWayland); headless falls back | degraded (OS + .NET + cores) |
+| macOS (x64/arm64) | ✅ (managed-only code) | ✅ CoreGraphics Retina pixel dimensions (untested on real hardware) | degraded |
+
+`./publish.ps1` (or `./publish.sh`) produces self-contained single-file binaries for `win-x64`,
+`linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64` under `publish/<rid>/` (~72-79 MB each) —
+no .NET install needed on either machine.
+
+## How to use it
+
+**On the sending machine:**
 
 ```
-dotnet run --project src/QrShard -c Release -- <command> ...
+qrshard encode holiday-photos.zip
 ```
 
-```
-qrshard encode <file> [options]     Split a file into shard images.
-  -o, --out <dir>          Output folder (default: <file>.shards next to the input)
-  -r, --resolution <px>    Image size: "auto" (the default) detects the primary monitor's
-                           native resolution so shards fill the screen they'll be captured
-                           from; or one number (square) or WxH, 700-16384, to override —
-                           e.g. a smaller size shows the code surrounded by padding
-  -c, --cell <px>          Data cell size in pixels, 1-64 (default: 3)
-  -b, --bits <n>           Bits per cell / color density, 1-8 (default: 4)
-  -e, --ecc <n>            Reed-Solomon parity per 255-byte block, even, 0-64
-                           (default: 16 ≈ 6% overhead, fixes 8 bad bytes per block)
-  -R, --recovery <pct>     Add parity IMAGES so whole missing/damaged images can be rebuilt
-                           without recapture; pct% extra images, 0-100 (default: 0)
-  -f, --format <fmt>       Lossless image format: png, bmp, tga, qoi, webp, tiff
-                           (default: png, written by the built-in fast PNG writer)
-  --no-compress            Skip deflate compression of the payload
+This creates `holiday-photos.zip.shards/` next to the input, containing numbered images sized to
+your primary monitor. Open the folder in any image viewer, display each image fullscreen at
+**100% zoom**, and screenshot each one on/for the receiving side (a cropped region capture is
+fine — just include the whole black frame with a little margin). For large files add `-R 10` so
+up to ~10% of the screenshots can be botched or skipped without redoing anything.
 
-qrshard decode <folder|images...> [-o <file>]
-                           Reconstitute the original file from captured images.
-qrshard info <image>       Show and validate a single shard image.
-qrshard test               Round-trip self-test, including simulated screenshots.
+**On the receiving machine**, put the captured screenshots in a folder (any filenames, any
+order, duplicates fine) and:
+
+```
+qrshard decode captures\ -o holiday-photos.zip
 ```
 
-An optional `appsettings.json` next to the executable holds preferences and machine tuning
-(comments are allowed in it, as in standard .NET appsettings files; every value is documented
-inline there). Invalid values fail loudly rather than silently defaulting. Settings:
+Every image is CRC-verified as it's read; damaged captures are repaired by error correction or
+rebuilt from parity images, anything unrecoverable is reported by exact part number ("missing
+image 7 of 22 — recapture it"), and the final file is verified against a SHA-256 carried inside
+the shards. If decode says it succeeded, the file is bit-identical. `qrshard info <image>`
+inspects and validates a single capture.
 
-- **`EncodeDefaults`** — your preferred defaults for every `encode` flag (`Resolution`, `CellPx`,
-  `BitsPerCell`, `EccParity`, `RecoveryPercent`, `ImageFormat`, `Compress`); a flag on the
-  command line always wins over the file.
-- **`ShardFolderSuffix`** — the `<file>.shards` folder suffix used when `-o` isn't given.
-- **`PngCompressionLevel`** — deflate level for the built-in PNG writer where compression pays
-  off (cell >= 2 px): `Optimal` (default), `Fastest`, `SmallestSize`, `NoCompression`. 1 px
-  cells always use `Fastest` (noise-like content is incompressible by construction).
-- **`PayloadCompressionLevel`** — deflate level for compressing the file payload itself.
-- **`EncodeMemoryBudgetMB`** / **`DecodeMaxParallelism`** — machine tuning for the parallel
-  workers (defaults: ~2 GB pixel-buffer budget; decode auto = cores capped at 16).
+Run from source with `dotnet run --project src/QrShard -c Release -- <command>`, or publish
+standalone binaries with `./publish.ps1`.
+
+## Commands and options
+
+| Command | Description |
+|---|---|
+| `qrshard encode <file> [options]` | Split a file into shard images |
+| `qrshard decode <folder\|images...> [-o <file>]` | Reconstitute the original file from captured images |
+| `qrshard info <image>` | Show and validate a single shard image |
+| `qrshard test` | End-to-end self-test, including simulated screenshots |
+
+### `encode` options
+
+| Option | Supported values | Default | Description |
+|---|---|---|---|
+| `-o, --out <dir>` | any path | `<file>.shards` next to the input | Output folder for the shard images |
+| `-r, --resolution <px>` | `auto`; one number (square); `WxH` — 700–16384 per side | `auto` | Image size. `auto` detects the primary monitor's native resolution so shards fill the screen they'll be captured from; smaller explicit values show the code surrounded by padding on the display |
+| `-c, --cell <px>` | 1–64 | 3 | Data cell size in pixels. 3 survives fractional display rescaling; 1 doubles-to-quadruples density but needs pixel-perfect captures |
+| `-b, --bits <n>` | 1–8 | 4 | Bits per cell (color density): 2ⁿ palette colors. Higher = denser but less tolerant of color distortion |
+| `-e, --ecc <n>` | even, 0–64 | 16 | Reed-Solomon parity bytes per 255-byte block. 16 ≈ 6% overhead, fixes 8 damaged bytes/block (cursors, toasts); 0 disables; raise for hostile captures |
+| `-R, --recovery <pct>` | 0–100 | 0 (off) | Extra **parity images** as % of data images; any lost/destroyed images up to that budget are rebuilt without recapture |
+| `-f, --format <fmt>` | `png`, `bmp`, `tga`, `qoi`, `webp`, `tiff` | `png` | Lossless container format (see [Image formats](#image-formats)) |
+| `--no-compress` | flag | compression on | Skip deflate compression of the payload (it is auto-skipped anyway when a sample shows the file is incompressible) |
+
+### `decode` options
+
+| Option | Supported values | Default | Description |
+|---|---|---|---|
+| `-o, --out <file>` | any path | original filename in the current directory (never overwrites — falls back to `<name>.restored<ext>`) | Where to write the reconstituted file |
+
+## Configuration (appsettings.json)
+
+An optional `appsettings.json` next to the executable holds preferences and machine tuning.
+Comments are allowed in it (as in standard .NET appsettings files) and every value is documented
+inline there. Precedence: **CLI flag > appsettings.json > built-in default**. Invalid values
+fail loudly, naming the setting, rather than silently defaulting.
+
+| Setting | Supported values | Default | Description |
+|---|---|---|---|
+| `EncodeDefaults.Resolution` | `auto`, number, `WxH` | `auto` | Default for `-r` |
+| `EncodeDefaults.CellPx` | 1–64 | 3 | Default for `-c` |
+| `EncodeDefaults.BitsPerCell` | 1–8 | 4 | Default for `-b` |
+| `EncodeDefaults.EccParity` | even, 0–64 | 16 | Default for `-e` |
+| `EncodeDefaults.RecoveryPercent` | 0–100 | 0 | Default for `-R` |
+| `EncodeDefaults.ImageFormat` | `png` `bmp` `tga` `qoi` `webp` `tiff` | `png` | Default for `-f` |
+| `EncodeDefaults.Compress` | `true`/`false` | `true` | `false` = always `--no-compress` |
+| `ShardFolderSuffix` | filename-safe suffix | `.shards` | Output-folder suffix when `-o` isn't given |
+| `PngCompressionLevel` | `Optimal`, `Fastest`, `SmallestSize`, `NoCompression` | `Optimal` | Deflate level for the built-in PNG writer where compression pays off (cells ≥ 2 px). 1 px cells always use `Fastest` — their noise-like content is incompressible by construction |
+| `PayloadCompressionLevel` | same four values | `Optimal` | Deflate level for compressing the file payload itself |
+| `EncodeMemoryBudgetMB` | 64–1000000 | 2000 | Pixel-buffer budget capping parallel encode workers |
+| `DecodeMaxParallelism` | 0–1024 | 0 (auto: cores, capped at 16) | Max parallel image decodes |
 
 Deliberately *not* configurable: anything both sides of a transfer must agree on — frame
 geometry, metadata-strip layout, magic numbers, Reed-Solomon/GF(2⁸) parameters — plus the
@@ -67,69 +131,20 @@ Per image (with the default ECC): `bytes ≈ grid cells × bits/cell / 8 × 239/
 | 3840x2160   | 1 px | 8    | ~6.5 MB       | pixel-perfect, ideal conditions |
 | 4096²       | 1 px | 8    | ~14.1 MB      | pixel-perfect; needs a >4K display to show at 100% |
 
-Measured on a desktop CPU (32 logical cores, parallel codec):
-
-- **100 MB @ 3840x2160 / cell 1 / 6 bits / 10% recovery → 24 images, encoded in ~1 s, decoded
-  in ~1.2 s** — roughly 100 MB/s encode, 85 MB/s decode. Deleting whole images before decoding
-  still produces a byte-identical, SHA-256-verified file (rebuilt from parity).
-- 100 MB @ robust defaults → 485 images, ~2.8 s encode / ~2.4 s decode.
-
-**Can you transfer a 300 MB zip? Yes.** At 4K density it is ~65 images; with `-R 10` you also get 7
-parity images so any 7 can be lost. The codec itself is never the bottleneck (a few seconds for
-300 MB). End-to-end time is dominated by *capture cadence*: at a manual ~3 s per screenshot, ~72
-images ≈ **3-4 minutes** of capturing (~1 MB/s effective). An automated capture loop (a script
-paging through the images and screenshotting each) pushes that several-fold. At the robust default
-density (~212 KB/image) the same 300 MB would instead be ~1,450 images — fine for an automated
-loop, tedious by hand — which is why a dense config on a 4K display is the right choice for large
-files. Hard limits: ≤ 1.5 GB per file (in-memory codec); display size caps per-image resolution
-(the code must be shown at 100% zoom to be pixel-perfect).
-
-### Codec performance design
-
-- **One flat parallel loop over all images** (data + parity together, no phase barrier), with a
-  **thread-local pixel canvas** per worker — reused across images instead of a fresh 15-50 MB
-  allocation each. Worker count adapts to a ~2 GB pixel-buffer budget, so normal resolutions use
-  every core while 16K images cap themselves.
-- **PNG settings tuned to shard content**: level-1 deflate (dense cell data is nearly
-  incompressible; ImageSharp's default level-6 adaptive filtering cost ~3x the encode time and
-  *hurt* compression of noise-like data), with the "Up" filter only where cell rows repeat.
-- **Decode workers reuse scratch buffers** (pixels + flood-fill visited map) — decoding 100 MB
-  previously allocated ~9.5 GB of garbage; now ~2 buffers per worker, and the folder decode uses
-  up to 16 workers.
-- **Table-driven Reed-Solomon**: the encoder's LFSR inner loop XORs a precomputed 256-row
-  generator table instead of doing per-symbol field multiplies; syndrome computation (the
-  every-codeword hot path on decode) uses per-α multiplication tables.
-- **SIMD GF(2⁸) for cross-shard parity**: `MulAdd` uses the nibble-shuffle technique
-  (two 16-entry product tables as byte-shuffle sources, 16 bytes per step) via `Vector128`.
-- **No nested parallelism**: per-image FEC is sequential inside the already-parallel per-image
-  loops, avoiding scheduler contention.
-- **GC pressure**: server GC (the workload is many parallel allocating workers); per-worker
-  scratch extends beyond the pixel canvas to the stream/cell staging buffers, the FEC recovery
-  buffer, and the 128 KB nearest-color LUT; reassembly and decompression write into exact-size
-  output buffers (no MemoryStream doubling or ToArray copies); cross-shard stripe chunks reuse
-  one buffer set. Cell read/write uses a two-byte-window fast path instead of per-bit loops.
-- **Streaming encoder**: incompressible inputs (the common big-transfer case) are memory-mapped
-  and read per-chunk by the parallel workers — the file is never materialized as a managed
-  array. Compressible inputs still materialize (the deflated stream must exist somewhere).
-- **SIMD syndrome scan**: the per-image FEC buffer is symbol-interleaved, so 16 codewords'
-  syndromes are computed together — one Vector128 lane per codeword — and clean codewords
-  (nearly all of them) skip the scalar decoder entirely.
-- **Custom fast PNG writer** for the default format (see the library investigation above), and
-  a dedicated pooled ImageSharp memory allocator for the non-PNG encoders.
-
-Result (100 MB, 32 cores, BenchmarkDotNet means): Max4K encode 18.2 s → ~0.7 s, Max4K-R10
-24.4 s → ~0.7 s; default-preset encode 6.5 → 2.3 s, decode 4.3 → 1.7 s. Decode allocations
-fell from ~9.5 GB to ~0.9 GB. All presets remain byte-verified.
-
-Deflate compression is applied automatically when a fast mid-file sample suggests it will help,
-so compressible files transfer in correspondingly fewer images (already-compressed archives skip
-straight to encoding).
+**Can you transfer a 300 MB zip? Yes.** At 4K density it is ~65 images; with `-R 10` you also
+get 7 parity images so any 7 can be lost. The codec itself is never the bottleneck (about a
+second for 300 MB) — end-to-end time is dominated by *capture cadence*: at a manual ~3 s per
+screenshot, ~72 images ≈ **3-4 minutes** (~1 MB/s effective); an automated capture loop pushes
+that several-fold. At the robust default density the same 300 MB would be ~1,450 images — fine
+automated, tedious by hand — which is why dense-on-a-big-display is the right choice for large
+files. Hard limits: ≤ 1.5 GB per file (decode is in-memory); display size caps per-image
+resolution (the code must be shown at 100% zoom to be pixel-perfect).
 
 ## Image formats
 
 Shards can be written in any of six lossless container formats (`-f`); the container is
 transport-only — decoding, ECC, and recovery are identical through all of them. Measured on a
-100 MB transfer at the default density (32 cores):
+100 MB transfer at the default density:
 
 | Format | Encode | Decode | Disk | Notes |
 |---|---:|---:|---:|---|
@@ -144,32 +159,6 @@ GIF is deliberately unsupported: its 256-color palette cannot hold the 8-bit cel
 the frame and strip colors. JPEG and other lossy formats are rejected outright — the format
 requires bit-exact pixels (though mild JPEG *re-encoding of a capture* is absorbed by ECC).
 
-## Image library: investigation and the custom PNG writer
-
-The codec has asymmetric needs. **Decode** must parse arbitrary screenshots produced by unknown
-tools — that genuinely needs a mature, battle-tested image library. **Encode** does not: we own
-every pixel and just need to serialize a buffer losslessly. Options considered:
-
-- **ImageSharp** (current): pure managed, cross-platform, decodes every format we care about,
-  pluggable memory allocator. Kept for all decoding and for the non-PNG encoders. Pinned to
-  3.1.x (4.0 requires a commercial license key at build time).
-- **SkiaSharp**: fast native codecs, but a ~10 MB native dependency per RID, no TGA/QOI encode,
-  and interop copies at the boundary — no win for this workload.
-- **Magick.NET**: broadest format support, but a heavyweight native dependency and
-  process-global configuration; overkill for six lossless formats.
-- **System.Drawing.Common**: Windows-only since .NET 6 and effectively deprecated for new code.
-- **StbImageSharp/StbImageWriteSharp**: tiny, but decode-side robustness and encode-side
-  compression quality are both below what the transfer needs.
-- **Custom**: viable precisely once, for the encode hot path — implemented as
-  [FastPng.cs](src/QrShard/FastPng.cs), ~150 lines: 8-bit truecolor, a fixed None/Up filter,
-  zlib via .NET's zlib-ng, one IDAT streamed straight from the render buffer to the file with
-  an incrementally-computed chunk CRC. Output is standard PNG readable by anything (verified
-  pixel-identical through ImageSharp in tests). It removed the last library overhead from the
-  encode path and produces smaller files than ImageSharp's level-1 encoder did.
-
-A fully custom *container* format was rejected: shards must be displayable by ordinary OS image
-viewers on the sending machine, so the container must be a mainstream standard.
-
 ## Resilience
 
 Four independent layers, from within-image to whole-image:
@@ -183,9 +172,8 @@ Four independent layers, from within-image to whole-image:
    fail to capture whole images and rebuild them without recapture. Images are grouped into
    stripes; a stripe of *S* data images gets *P* parity images (a systematic Cauchy Reed-Solomon
    erasure code over GF(2⁸)), and **any** *S* of the *S+P* reconstruct the stripe — there are no
-   unlucky loss patterns. `-R 10` tolerates losing ~10% of the images. This is the layer that
-   matters for large multi-image transfers, where finding and recapturing one bad screenshot out
-   of hundreds is the real pain point.
+   unlucky loss patterns. This is the layer that matters for large multi-image transfers, where
+   finding and recapturing one bad screenshot out of hundreds is the real pain point.
 3. **Detection**: a CRC-32 of each image's payload plus a CRC-32-protected header. Damage beyond
    ECC capacity makes an image unreadable — it is then treated as a missing image and recovered by
    layer 2 if parity allows, otherwise reported by exact part number. A SHA-256 of the whole file,
@@ -205,7 +193,69 @@ measures its inner edge with subpixel precision, and tolerates cropping, padding
 rescaling. Shards are order-independent, duplicate-tolerant, filename-agnostic, and multiple
 files' shards can be mixed in one folder (grouped by random 64-bit file ID).
 
-## Image format
+## Benchmark snapshot
+
+Measured on this machine (BenchmarkDotNet means, Monitoring strategy, 3 iterations per case;
+decoded output SHA-verified every iteration):
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 9 9950X3D 16-Core @ 4.3 GHz (family 26, model 68, stepping 0) |
+| Cores | 16 physical / 32 logical |
+| Motherboard | ASRock X670E Taichi (firmware 4.20) |
+| RAM | 4x DDR5-3600, 128 GB total |
+| Storage | Crucial T700 2 TB NVMe (temp/work); Corsair MP600 PRO NH 2 TB (artifacts) |
+| OS | Windows 11 Pro 25H2 (build 26200.8737) |
+| .NET | 10.0.10 (win-x64) |
+
+Presets: **Default** = 2160², 3 px cells, 4 bits (robust); **Dense** = 2160², 2 px, 6 bits;
+**Max4K** = 3840x2160, 1 px, 6 bits; **Max4K-R10** = Max4K + 10% parity images.
+
+| Size | Default enc / dec | Dense | Max4K | Max4K-R10 |
+|---:|---:|---:|---:|---:|
+| 1 KB | 21 / 42 ms | 31 / 54 ms | 112 / 159 ms | 113 / 180 ms |
+| 1 MB | 102 / 38 ms | 170 / 62 ms | 137 / 165 ms | 173 / 184 ms |
+| 10 MB | 277 / 272 ms | 204 / 95 ms | 217 / 178 ms | 230 / 187 ms |
+| 100 MB | 2.68 / 1.72 s | 1.45 / 0.72 s | **0.35 / 0.58 s** | 0.46 / 0.57 s |
+
+The crossover: below ~1 MB every preset needs one image, so the smaller Default canvas wins on
+fixed cost; at scale, Max4K packs ~13x more payload per pixel (6 bits/px vs 0.44), so 100 MB is
+22 images instead of 495. That dominates end-to-end time too, since every image is a screenshot:
+
+| 100 MB transfer | Images | Est. manual capture (3 s/img) | Est. automated (0.5 s/img) |
+|---|---:|---:|---:|
+| Default | 495 | 24.8 min | 4.2 min |
+| Dense | 147 | 7.4 min | 1.3 min |
+| Max4K | 22 | **1.1 min** | **12 s** |
+| Max4K-R10 | 22 + 3 parity | 1.3 min | 14 s |
+
+Full interactive charts (log-log codec time, end-to-end estimates, throughput, all numbers) are
+generated per run at `tests/QrShard.Benchmarks/BenchmarkDotNet.Artifacts/results/transfer-graphs.html`.
+
+### Running the benchmarks
+
+`tests/QrShard.Benchmarks` is a [BenchmarkDotNet](https://benchmarkdotnet.org/) suite measuring
+encode (file → shard images on disk) and decode (images → SHA-verified file) across file sizes
+**1 KB – 1 GB** and the four presets, with deterministic incompressible payloads.
+
+```
+cd tests/QrShard.Benchmarks
+dotnet run -c Release                      # full matrix — ~2 hours, ~5 GB temp disk,
+                                           #   ~8 GB free RAM for the 1 GB cases
+
+# Trim either axis without editing code:
+QRSHARD_BENCH_SIZES=1KB,1MB,100MB QRSHARD_BENCH_PRESETS=Default,Max4K dotnet run -c Release
+
+dotnet run -c Release -- --graphs-only     # regenerate graphs from persisted results, no runs
+```
+
+Results persist in `results/transfer-results.json` and **merge across runs** (latest measurement
+of a case wins), so the matrix can be benchmarked in sittings. Output includes the standard
+BenchmarkDotNet tables (console/markdown/CSV), the machine-spec header (via WMI on Windows), the
+self-contained `transfer-graphs.html`, and `[RPlotExporter]` R plots when
+[R](https://www.r-project.org/) is on `PATH`.
+
+## How it works
 
 ```
 ┌──────────────────────────────────────┐
@@ -226,95 +276,64 @@ files' shards can be mixed in one folder (grouped by random 64-bit file ID).
 └──────────────────────────────────────┘
 ```
 
+### Codec performance design
+
+- **One flat parallel loop over all images** (data + parity together, no phase barrier), with a
+  **thread-local pixel canvas** per worker — reused across images instead of a fresh 15-50 MB
+  allocation each. Worker count adapts to the configured pixel-buffer budget.
+- **Custom fast PNG writer** ([FastPng.cs](src/QrShard/FastPng.cs), ~150 lines) for the default
+  format: fixed None/Up filter, zlib-ng, one IDAT streamed straight from the render buffer with
+  an incrementally-computed chunk CRC. Standard PNG output, verified pixel-identical through
+  ImageSharp. Non-PNG formats go through ImageSharp with lossless speed-tuned settings and a
+  dedicated pooled memory allocator.
+- **Streaming encoder**: incompressible inputs (the common big-transfer case) are memory-mapped
+  and read per-chunk by the parallel workers — the file is never materialized as a managed array.
+- **Table-driven Reed-Solomon** (precomputed generator/α-power tables) plus a **SIMD syndrome
+  scan**: the FEC buffer is symbol-interleaved, so 16 codewords' syndromes compute together —
+  one `Vector128` lane per codeword — and clean codewords skip the scalar decoder entirely.
+  Cross-shard parity uses nibble-shuffle SIMD GF(2⁸) multiply-accumulate.
+- **GC discipline**: server GC; per-worker scratch buffers on both encode and decode (pixels,
+  flood-fill map, staging/recovery buffers, color LUT); exact-size reassembly and decompression
+  buffers; no nested parallelism. A 100 MB decode allocates ~0.9 GB total, down from ~9.5 GB in
+  the first implementation.
+
+### Image library choice
+
+Decode must parse arbitrary screenshots from unknown tools — that needs a mature library:
+**ImageSharp** (pure managed, cross-platform; pinned to 3.1.x because 4.0 requires a commercial
+license key at build time). Encode owns every pixel and needs no library, hence FastPng.
+SkiaSharp (native dependency, no TGA/QOI encode), Magick.NET (heavyweight), System.Drawing
+(Windows-only, deprecated), and Stb ports (too weak on both sides) were evaluated and rejected.
+A fully custom *container* format was rejected too: shards must be displayable by ordinary OS
+image viewers on the sending machine.
+
 ## Capture tips
 
-- Display the PNG at **100% zoom** and screenshot it (a cropped region capture is fine — just
+- Display the image at **100% zoom** and screenshot it (a cropped region capture is fine — just
   include the whole black frame with a little margin).
-- On a 4K display, encode with `-r 3840x2160` and view fullscreen for maximum per-image payload.
+- `-r auto` sizes shards to your monitor; on a 4K display add `-c 1 -b 6` for maximum density.
 - For cell sizes below 3 px the capture must be pixel-perfect: avoid fractional display scaling
   (125%/150%) and browser zoom.
 - Cursors, small overlays, and high-quality JPEG re-encoding are absorbed by ECC; raise
   `--ecc` (e.g. 32) for hostile conditions, or lower it toward 0 for maximum capacity.
 - Rotation/perspective is not supported — this is a screenshot format, not a camera format.
 
-## Cross-platform
-
-The codec is pure managed .NET with no Windows dependency: ImageSharp, the built-in PNG writer,
-memory-mapped I/O, and the `Vector128` SIMD paths (which map to NEON on ARM) all work on Linux
-and macOS. Verified: full round trips on Linux and cross-OS transfers in both directions —
-including parity-recovering a Linux-encoded shard set on Windows. Shards are byte-compatible
-across platforms by construction (the wire format is protocol, not platform).
-
-**Publishing:** `./publish.ps1` (or `./publish.sh`) produces self-contained single-file binaries
-for `win-x64`, `linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64` under `publish/<rid>/` —
-no .NET install needed on the target machine.
-
-**Monitor auto-detection** (`-r auto`) is implemented per platform: EnumDisplaySettings on
-Windows, `xrandr` parsing on Linux (X11 and XWayland; verified to degrade cleanly when xrandr
-is missing or there is no display), and CoreGraphics display-mode pixel dimensions on macOS
-(Retina framebuffer pixels, not scaled points; written to Apple's documented API but untested
-on real hardware here). Headless or undetectable environments fall back to 2160 with a note.
-
-**The benchmark report's machine spec** uses WMI and is Windows-only; elsewhere it degrades to
-OS description, .NET version, and core count.
-
 ## Building and testing
 
-Requires the .NET 10 SDK. `dotnet build -c Release` at the solution root.
-Uses SixLabors.ImageSharp 3.1.x (pinned below 4.0, which requires a commercial license key at
-build time; 3.1 is free under the Six Labors Split License for open source and small business).
+Requires the .NET 10 SDK. `dotnet build -c Release` at the solution root; `./publish.ps1` for
+standalone binaries.
 
-- `dotnet test` — 217 xUnit tests, ~2 s, **97% line / 92% branch coverage** of the codec
+- `dotnet test` — 294 xUnit tests, ~2 s, **93% line / 87% branch coverage** (the uncovered
+  remainder is mostly per-platform display-detection code that can't run on a single OS)
   (`dotnet test --collect:"XPlat Code Coverage"` to reproduce). Covers: CRC check-vectors,
   GF(2⁸) field laws and matrix inversion, Reed-Solomon (max-error correction, beyond-capacity
-  detection, shortened codewords), FEC interleaving (burst and scatter damage), cross-shard
-  erasure coding (exhaustive loss-pattern MDS verification, mixed data/parity loss, degenerate
-  and max-size stripes), palette construction/classification, bit packing, layout geometry incl.
-  non-square, metadata strip (every-single-bit-flip rejection), header robustness
-  (corruption/truncation/unicode/parity), full round trips across density and ECC configs,
-  simulated captures (padded/rescaled/cropped/dark-background/JPEG), damage recovery (cursor,
-  banner, dead strips, excessive damage fails cleanly), whole-image recovery (deleted and
-  destroyed images rebuilt from parity, loss-beyond-budget fails cleanly), shard-set handling
-  (missing, duplicate, corrupt-among-good, multi-file folders, overwrite protection), and the CLI.
+  detection, shortened codewords), FEC interleaving (burst/scatter damage, SIMD blocks + tails),
+  cross-shard erasure coding (exhaustive loss-pattern MDS verification), palette
+  construction/classification, bit packing, layout geometry, metadata strip
+  (every-single-bit-flip rejection), header robustness (corruption/truncation/unicode/parity),
+  round trips across density/ECC/format configs, FastPng pixel identity, streaming source
+  behavior, simulated captures (padded/rescaled/cropped/dark-background/JPEG), damage and
+  whole-image recovery, shard-set handling, settings parsing/validation, xrandr parsing, and
+  the CLI including settings-vs-flags precedence.
 - `qrshard test` — end-to-end self-test at real resolutions (up to a 14 MB single image),
   including simulated screenshots with cursor damage and a cross-shard recovery scenario.
-
-## Benchmarks
-
-`tests/QrShard.Benchmarks` is a [BenchmarkDotNet](https://benchmarkdotnet.org/) suite measuring
-encode (file → shard PNGs on disk) and decode (PNGs → SHA-verified file) across file sizes
-**1 KB, 10 KB, 100 KB, 500 KB, 1 MB, 10 MB, 100 MB, 250 MB, 500 MB, 1 GB** and four config
-presets: `Default` (2160², cell 3, 4 bits), `Dense` (2160², cell 2, 6 bits), `Max4K`
-(3840x2160, cell 1, 6 bits), and `Max4K-R10` (Max4K + 10% cross-shard parity). Payloads are
-generated deterministically (incompressible, zip-like) and every decode iteration is verified
-byte-identical via SHA-256 outside the timed region.
-
-```
-cd tests/QrShard.Benchmarks
-dotnet run -c Release                      # full matrix — takes ~2 hours, needs ~5 GB temp disk
-                                           #   and ~8 GB free RAM for the 1 GB cases
-
-# Trim either axis without editing code:
-QRSHARD_BENCH_SIZES=1KB,1MB,100MB QRSHARD_BENCH_PRESETS=Default,Max4K dotnet run -c Release
-
-dotnet run -c Release -- --graphs-only     # regenerate graphs from persisted results, no runs
-```
-
-Long-running macro-benchmarks use the Monitoring run strategy (1 warmup + 3 measured iterations
-per case) rather than BenchmarkDotNet's micro-benchmark defaults, which would take days at 1 GB.
-Results persist in `results/transfer-results.json` and **merge across runs** — benchmark the
-small sizes now and the 1 GB cases overnight, and the graphs always show everything measured
-so far (latest measurement of a case wins).
-
-Results land in `BenchmarkDotNet.Artifacts/results/`:
-
-- the standard BenchmarkDotNet table (console + GitHub-markdown + CSV);
-- a full machine-spec header on the HTML report (CPU model/speed, motherboard + firmware
-  revision, RAM sticks/type/speed, physical disks, Windows edition + build.revision, .NET
-  runtime version), gathered via WMI at report time so the numbers carry their context;
-- **`transfer-graphs.html`** — self-contained SVG charts generated from the run: codec time vs
-  file size (log-log), estimated end-to-end transfer time including screenshot cadence (manual
-  3 s/image and automated 0.5 s/image), codec throughput, and the full numbers table;
-- `[RPlotExporter]` boxplot/density `.png` graphs as described on the BenchmarkDotNet homepage —
-  these require [R](https://www.r-project.org/) with `Rscript` on `PATH`; without R the exporter
-  is skipped (the HTML graphs are produced regardless).
