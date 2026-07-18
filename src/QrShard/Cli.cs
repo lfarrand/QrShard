@@ -40,20 +40,24 @@ internal static class Cli
                 if (!File.Exists(file))
                     return Help(@out, err, $"file not found: {file}");
 
-                // Flag > appsettings.json EncodeDefaults > built-in default.
+                // Flag > appsettings.json EncodeDefaults > built-in default. The camera profile
+                // swaps in photo-appropriate density defaults (big cells, few colors, heavy
+                // ECC); explicit flags still win.
                 var defaults = settings.EncodeDefaults;
+                bool camera = flags.Contains("--camera");
                 string resolutionValue = Get(named, "-r", "--resolution") ?? defaults.Resolution;
                 var (width, height, resolutionNote) = ResolveResolution(resolutionValue);
                 var opt = new EncodeOptions
                 {
                     Width = width,
                     Height = height,
-                    CellPx = GetInt(named, "-c", "--cell", defaults.CellPx),
-                    BitsPerCell = GetInt(named, "-b", "--bits", defaults.BitsPerCell),
-                    EccParity = GetInt(named, "-e", "--ecc", defaults.EccParity),
+                    CellPx = GetInt(named, "-c", "--cell", camera ? 8 : defaults.CellPx),
+                    BitsPerCell = GetInt(named, "-b", "--bits", camera ? 2 : defaults.BitsPerCell),
+                    EccParity = GetInt(named, "-e", "--ecc", camera ? 32 : defaults.EccParity),
                     RecoveryPercent = GetInt(named, "-R", "--recovery", defaults.RecoveryPercent),
                     ImageFormat = Get(named, "-f", "--format") ?? defaults.ImageFormat,
                     Compress = !flags.Contains("--no-compress") && defaults.Compress,
+                    CameraMode = camera,
                 };
                 string outDir = Get(named, "-o", "--out") ?? Path.Combine(
                     Path.GetDirectoryName(Path.GetFullPath(file))!, Path.GetFileName(file) + settings.ShardFolderSuffix);
@@ -61,7 +65,8 @@ internal static class Cli
                 @out.WriteLine($"Encoding '{file}' → {outDir}");
                 @out.WriteLine($"  {opt.Width}x{opt.Height}px{resolutionNote}, cell {opt.CellPx}px, {opt.BitsPerCell} bits/cell, " +
                                $"ECC parity {opt.EccParity}, recovery {opt.RecoveryPercent}%, " +
-                               $"format {opt.ImageFormat}, compression {(opt.Compress ? "on" : "off")}");
+                               $"format {opt.ImageFormat}, compression {(opt.Compress ? "on" : "off")}" +
+                               (camera ? ", camera profile (finder patterns)" : ""));
                 var result = Encoder.Encode(file, outDir, opt, @out.WriteLine);
                 @out.WriteLine($"Done: {result.ImageCount} image(s) of {result.Width}x{result.Height}px, up to {result.BytesPerImage:N0} payload bytes each.");
                 if (result.ParityImages > 0)
@@ -170,7 +175,7 @@ internal static class Cli
         var flags = new HashSet<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--no-compress")
+            if (args[i] is "--no-compress" or "--camera")
                 flags.Add(args[i]);
             else if (args[i].StartsWith('-') && i + 1 < args.Length)
                 named[args[i]] = args[++i];
@@ -214,6 +219,11 @@ internal static class Cli
                                          (default: 0; e.g. 15 tolerates losing ~15% of the images)
                 -f, --format <fmt>       Lossless image format: png, bmp, tga, qoi, webp, tiff
                                          (default: png, written by the built-in fast PNG writer)
+                --camera                 Camera profile: adds finder patterns so images decode
+                                         from PHOTOS of the screen (rotation + perspective), not
+                                         just screenshots; shifts defaults to cell 8, 2 bits,
+                                         ECC 32 (explicit flags still win). Far lower density —
+                                         use for small/medium payloads
                 --no-compress            Skip deflate compression of the payload
 
               qrshard decode <folder|images...> [-o <file>]

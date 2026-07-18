@@ -27,6 +27,17 @@ internal sealed class Layout
     public const int MaxResolution = 16384;
     public const int MaxCellPx = 64;
 
+    // ---- Camera profile: finder-pattern geometry, in finder modules ----
+    // A finder is the classic 7-module concentric square (3-module solid core, 1-module white
+    // ring, 1-module black ring) whose row/column signature is 1:1:3:1:1. Four of them sit at
+    // the corners of added top/bottom bands, inset 2 modules from the image corner (center at
+    // 5.5 modules), plus a solid 3-module orientation tick 7 modules right of the top-left
+    // finder center. The camera decoder relies only on these module-relative offsets.
+    public const int FinderModules = 7;
+    public const int FinderCornerInsetModules = 2;
+    public const int FinderBandModules = FinderModules + 2 * FinderCornerInsetModules; // 11
+    public const int OrientationTickOffsetModules = 7;
+
     public required int BitsPerCell { get; init; }
     public required int CellPx { get; init; }
     public required int GridW { get; init; }
@@ -35,10 +46,17 @@ internal sealed class Layout
     public required int InnerW { get; init; }
     public required int InnerH { get; init; }
     public required int EccParity { get; init; } // RS parity symbols per 255-byte codeword, 0 = none
+    public required int FinderModule { get; init; } // finder module px; 0 = screenshot profile (no bands)
+
+    public bool CameraFinders => FinderModule > 0;
+    public int FinderBand => FinderModule * FinderBandModules;
+
+    /// <summary>Rows the frame + inner content are shifted down by (the top finder band).</summary>
+    public int ContentTop => FinderBand;
 
     public int Gutter => MetaH;
     public int Width => InnerW + 2 * Border;
-    public int Height => InnerH + 2 * Border;
+    public int Height => InnerH + 2 * Border + 2 * FinderBand;
     public int DataLeft => Gutter;
     public int DataTop => Gutter + 2 * MetaH;
     public long TotalBits => (long)GridW * GridH * BitsPerCell;
@@ -50,7 +68,7 @@ internal sealed class Layout
     /// <summary>Bytes available for header + payload after ECC overhead.</summary>
     public long UsableBytes => EccParity == 0 ? TotalBytes : (long)CodewordCount * Fec.DataLength(EccParity);
 
-    public static Layout Create(int width, int height, int cellPx, int bitsPerCell, int eccParity)
+    public static Layout Create(int width, int height, int cellPx, int bitsPerCell, int eccParity, bool cameraFinders = false)
     {
         if (width is < MinResolution or > MaxResolution || height is < MinResolution or > MaxResolution)
             throw new ArgumentException($"Resolution must be between {MinResolution} and {MaxResolution} in both dimensions.");
@@ -61,8 +79,20 @@ internal sealed class Layout
         if (eccParity is < 0 or > Fec.MaxParity || (eccParity & 1) != 0)
             throw new ArgumentException($"ECC parity must be an even number between 0 and {Fec.MaxParity}.");
 
+        // Camera profile: reserve top/bottom finder bands within the requested dimensions, so
+        // the image still fits the display it will be shown on. Module size scales with the
+        // image so finders stay comfortably detectable in a photo.
+        int finderModule = 0;
+        if (cameraFinders)
+        {
+            finderModule = Math.Clamp((int)Math.Round(Math.Min(width, height) / 84.0), 8, 48);
+            if (height - 2 * finderModule * FinderBandModules < MinResolution / 2)
+                throw new ArgumentException("Resolution is too small for the camera profile's finder bands.");
+        }
+        int band = finderModule * FinderBandModules;
+
         int innerWTarget = width - 2 * Border;
-        int innerHTarget = height - 2 * Border;
+        int innerHTarget = height - 2 * band - 2 * Border;
         int metaH = EstimateMetaH(innerWTarget);
         int gutter = metaH;
 
@@ -83,6 +113,7 @@ internal sealed class Layout
             InnerW = 2 * gutter + gridW * cellPx,
             InnerH = 2 * gutter + 4 * metaH + gridH * cellPx,
             EccParity = eccParity,
+            FinderModule = finderModule,
         };
         if (eccParity > 0 && layout.CodewordCount < 1)
             throw new ArgumentException("Image capacity is too small for error correction; increase resolution or use --ecc 0.");
@@ -154,6 +185,9 @@ internal sealed class Layout
             InnerW = innerW,
             InnerH = innerH,
             EccParity = eccParity,
+            // Not carried in the strip: after (any) rectification the decoder maps geometry
+            // purely from the frame's inner rectangle, so band info is irrelevant downstream.
+            FinderModule = 0,
         };
     }
 }
