@@ -84,7 +84,7 @@ standalone binaries with `./publish.ps1`.
 | `-e, --ecc <n>` | even, 0–64 | 16 | Reed-Solomon parity bytes per 255-byte block. 16 ≈ 6% overhead, fixes 8 damaged bytes/block (cursors, toasts); 0 disables; raise for hostile captures |
 | `-R, --recovery <pct>` | 0–100 | 0 (off) | Extra **parity images** as % of data images; any lost/destroyed images up to that budget are rebuilt without recapture |
 | `-f, --format <fmt>` | `png`, `bmp`, `tga`, `qoi`, `webp`, `tiff` | `png` | Lossless container format (see [Image formats](#image-formats)) |
-| `--camera` | flag | off | Camera profile: adds finder patterns so shards decode from **photos** of the screen (rotation + perspective), not just screenshots; shifts defaults to cell 8 / 2 bits / ECC 32 (explicit flags win). See [Camera capture](#camera-capture-phase-1) |
+| `--camera` | flag | off | Camera profile: adds finder patterns so shards decode from **photos** of the screen (rotation + perspective), not just screenshots; shifts defaults to cell 8 / 2 bits / ECC 32 (explicit flags win). See [Camera capture](#camera-capture) |
 | `--no-compress` | flag | compression on | Skip deflate compression of the payload (it is auto-skipped anyway when a sample shows the file is incompressible) |
 
 ### `decode` options
@@ -194,7 +194,7 @@ measures its inner edge with subpixel precision, and tolerates cropping, padding
 rescaling. Shards are order-independent, duplicate-tolerant, filename-agnostic, and multiple
 files' shards can be mixed in one folder (grouped by random 64-bit file ID).
 
-## Camera capture (phase 1)
+## Camera capture
 
 Shards encoded with `--camera` also decode from **photos of the screen**, not just screenshots.
 The encoder adds four QR-style finder patterns (the classic 7-module 1:1:3:1:1 squares) in
@@ -202,20 +202,29 @@ bands above and below the normal layout, plus an orientation tick beside the top
 Everything inside the frame — metadata, palette strips, data grid, ECC — is unchanged, so
 camera-profile shards still decode through the ordinary screenshot path too.
 
-Decoding is automatic, no flag needed: when the axis-aligned pipeline fails, the decoder
-detects the finder patterns (run-ratio scan + vertical verification + clustering), resolves
-orientation from the tick (any rotation works, including 90°/180°/270°), solves the four-point
-homography, and resamples the photo into an axis-aligned image that the normal pipeline
-consumes. Verified against simulated captures with rotation, strong perspective (~8% corner
-displacement), Gaussian blur, and JPEG re-compression, on a non-white background.
+Decoding is automatic, no flag needed. When the axis-aligned pipeline fails, the decoder:
+
+1. detects the finder patterns (run-ratio scan + vertical verification + clustering), resolves
+   orientation from the tick (any rotation works, including 90°/180°/270°), and solves the
+   four-point homography — this alone handles rotation and perspective;
+2. refines for handheld reality using the **black frame itself as a dense alignment
+   structure**: its four edges are traced at many points in the photo with subpixel precision,
+   and the normal-direction residuals feed a correction field (top/bottom edges loft the
+   vertical component, left/right the horizontal — each edge can only observe its own normal)
+   that absorbs **lens distortion** (barrel and pincushion) and mild screen curvature;
+3. normalizes illumination per pixel: each traced point also samples the frame's black and the
+   quiet zone's white, and the interpolated fields flatten **vignette, glare gradients, and
+   white-balance shifts** per channel before the color classifier sees anything.
+
+Verified against simulated captures combining rotation, strong perspective (~8% corner
+displacement), barrel/pincushion distortion, vignette + lateral glare (brightness varying to
+~55%), Gaussian blur, and JPEG re-compression on a non-white background. If refinement cannot
+lock onto the frame, the plain homography result is used.
 
 Density is necessarily far lower than screenshots — each cell must span several camera pixels
 and only 4 colors are used: **~16 KB per image** at the 4K camera defaults (vs ~4.9 MB for a
-screenshot at the same resolution). Use it for documents, keys, and small payloads.
-
-Phase 1 assumes a reasonably flat, evenly-lit screen (tripod-or-steady-hand territory). Not yet
-handled: lens distortion and strong illumination gradients across the code — that is phase 2
-(an alignment-pattern lattice with local mesh correction and per-region color normalization).
+screenshot at the same resolution). Use it for documents, keys, and small payloads. Simulated
+warps are a good proxy but not a phone: real handheld photos remain the honest acceptance test.
 
 ## Benchmark snapshot
 
@@ -341,7 +350,7 @@ image viewers on the sending machine.
 - Cursors, small overlays, and high-quality JPEG re-encoding are absorbed by ECC; raise
   `--ecc` (e.g. 32) for hostile conditions, or lower it toward 0 for maximum capacity.
 - Rotation/perspective is only supported for `--camera` shards (see
-  [Camera capture](#camera-capture-phase-1)); the default screenshot profile assumes an
+  [Camera capture](#camera-capture)); the default screenshot profile assumes an
   axis-aligned capture.
 
 ## Building and testing
@@ -356,7 +365,7 @@ at the solution root (gitignored; `Directory.Build.props` picks it up for every 
 the `SixLaborsLicenseKey` environment variable. The license is build-time only; published
 binaries and end users need nothing.
 
-- `dotnet test` — 306 xUnit tests, ~2 s, **~93% line coverage** (the uncovered remainder is
+- `dotnet test` — 310 xUnit tests, ~2 s, **~93% line coverage** (the uncovered remainder is
   mostly per-platform display-detection code that can't run on a single OS)
   (`dotnet test --collect:"XPlat Code Coverage"` to reproduce). Covers: CRC check-vectors,
   GF(2⁸) field laws and matrix inversion, Reed-Solomon (max-error correction, beyond-capacity

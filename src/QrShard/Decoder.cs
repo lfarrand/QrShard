@@ -618,13 +618,24 @@ internal static class Decoder
     private static Layout? ReadMetadata(Bitmap bmp, InnerRect inner)
     {
         // Before the metadata is read, gutter and strip height are only known via the shared
-        // approximation innerWidth/100 (see Layout.EstimateMetaH); sampling mid-strip tolerates the ~1px error.
+        // approximation innerWidth/100 (see Layout.EstimateMetaH). The strip is CRC-16
+        // protected, so a small vertical search around the estimated line is free of false
+        // positives and absorbs the residual geometric error of imperfect captures (rescaled
+        // screenshots, camera rectification).
         double gutter = inner.W / 100.0;
         double metaH = Math.Max(6.0, inner.W / 100.0);
 
-        // Redundant strips: top first, then the mirrored bottom copy.
-        return TryReadStrip(inner.Y0 + gutter + metaH / 2)
-            ?? TryReadStrip(inner.Y1 - gutter - metaH / 2);
+        // Offsets in strip-height fractions: estimated position first, then nearby lines.
+        ReadOnlySpan<double> offsets = [0, -0.25, 0.25, -0.5, 0.5, -0.8];
+        foreach (double offset in offsets)
+        {
+            // Redundant strips: top copy, then the mirrored bottom copy.
+            var layout = TryReadStrip(inner.Y0 + gutter + metaH * (0.5 + offset))
+                      ?? TryReadStrip(inner.Y1 - gutter - metaH * (0.5 + offset));
+            if (layout is not null)
+                return layout;
+        }
+        return null;
 
         Layout? TryReadStrip(double yCenter)
         {

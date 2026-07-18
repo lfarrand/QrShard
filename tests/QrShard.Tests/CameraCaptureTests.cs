@@ -35,11 +35,13 @@ public class CameraCaptureTests
 
     /// <summary>
     /// Simulates photographing the displayed shard: rotate + perspective-warp onto a larger
-    /// desk-gray canvas (via an independent forward use of the homography math), then optical
-    /// blur and JPEG compression.
+    /// desk-gray canvas (via an independent forward use of the homography math), optional
+    /// radial lens distortion (barrel > 0, pincushion < 0), vignette darkening toward the
+    /// corners, a lateral glare/brightness gradient, then optical blur and JPEG compression.
     /// </summary>
     private static string SimulateCameraCapture(string srcPath, string dstPath,
-        double rotationDegrees, double perspective, float blurSigma = 0.6f, int jpegQuality = 88)
+        double rotationDegrees, double perspective, float blurSigma = 0.6f, int jpegQuality = 88,
+        double barrel = 0, double vignette = 0, double glare = 0)
     {
         using var image = Image.Load<Rgb24>(srcPath);
         int w = image.Width, h = image.Height;
@@ -48,6 +50,7 @@ public class CameraCaptureTests
 
         int canvasSize = (int)(Math.Sqrt((double)w * w + (double)h * h) * 1.12);
         double cx = canvasSize / 2.0, cy = canvasSize / 2.0;
+        double radius = canvasSize / 2.0;
         double theta = rotationDegrees * Math.PI / 180;
 
         (double X, double Y) Place(double x, double y)
@@ -70,10 +73,24 @@ public class CameraCaptureTests
         {
             for (int x = 0; x < canvasSize; x++)
             {
-                var (sx, sy) = toSource.Apply(x + 0.5, y + 0.5);
-                canvasPx[y * canvasSize + x] = sx < -1 || sy < -1 || sx > w || sy > h
+                // Radial lens distortion in photo space: the content the camera "sees" at this
+                // pixel actually comes from a radially displaced position.
+                double px = x + 0.5, py = y + 0.5;
+                double rx = (px - cx) / radius, ry = (py - cy) / radius;
+                double r2 = rx * rx + ry * ry;
+                double qx = cx + (px - cx) * (1 + barrel * r2);
+                double qy = cy + (py - cy) * (1 + barrel * r2);
+
+                var (sx, sy) = toSource.Apply(qx, qy);
+                var color = sx < -1 || sy < -1 || sx > w || sy > h
                     ? background
                     : Bilinear(srcPx, w, h, sx - 0.5, sy - 0.5);
+
+                double brightness = (1 - vignette * r2) * (1 - glare * (px / canvasSize));
+                canvasPx[y * canvasSize + x] = new Rgb24(
+                    (byte)Math.Clamp(color.R * brightness, 0, 255),
+                    (byte)Math.Clamp(color.G * brightness, 0, 255),
+                    (byte)Math.Clamp(color.B * brightness, 0, 255));
             }
         }
 
@@ -105,12 +122,12 @@ public class CameraCaptureTests
     }
 
     private static string CaptureDir(TempDir tmp, List<string> files, double rotation, double perspective,
-        float blurSigma = 0.6f, int jpegQuality = 88)
+        float blurSigma = 0.6f, int jpegQuality = 88, double barrel = 0, double vignette = 0, double glare = 0)
     {
         string dir = tmp.Sub($"cap-{Guid.NewGuid().ToString("N")[..6]}");
         foreach (string f in files)
             SimulateCameraCapture(f, Path.Combine(dir, Path.GetFileNameWithoutExtension(f) + ".jpg"),
-                rotation, perspective, blurSigma, jpegQuality);
+                rotation, perspective, blurSigma, jpegQuality, barrel, vignette, glare);
         return dir;
     }
 
@@ -160,6 +177,48 @@ public class CameraCaptureTests
         using var tmp = new TempDir();
         var (content, files) = Encode(tmp, size: 1_500);
         string captures = CaptureDir(tmp, files, rotation: 2, perspective: 0.03, blurSigma: 1.0f, jpegQuality: 75);
+        AssertDecodes(tmp, Directory.EnumerateFiles(captures), content);
+    }
+
+    // ---------- Phase 2: lens distortion + illumination ----------
+
+    [Fact]
+    public void BarrelDistortedPhoto_Decodes()
+    {
+        using var tmp = new TempDir();
+        var (content, files) = Encode(tmp);
+        string captures = CaptureDir(tmp, files, rotation: 2, perspective: 0.03, barrel: 0.06);
+        AssertDecodes(tmp, Directory.EnumerateFiles(captures), content);
+    }
+
+    [Fact]
+    public void PincushionDistortedPhoto_Decodes()
+    {
+        using var tmp = new TempDir();
+        var (content, files) = Encode(tmp);
+        string captures = CaptureDir(tmp, files, rotation: 2, perspective: 0.03, barrel: -0.05);
+        AssertDecodes(tmp, Directory.EnumerateFiles(captures), content);
+    }
+
+    [Fact]
+    public void VignetteAndGlareGradient_Decodes()
+    {
+        // Brightness varies from full to ~55% across the photo; the per-region black/white
+        // normalization from the traced frame must flatten it before color classification.
+        using var tmp = new TempDir();
+        var (content, files) = Encode(tmp);
+        string captures = CaptureDir(tmp, files, rotation: 2, perspective: 0.03, vignette: 0.4, glare: 0.25);
+        AssertDecodes(tmp, Directory.EnumerateFiles(captures), content);
+    }
+
+    [Fact]
+    public void HandheldCombo_DistortionVignetteBlurJpeg_Decodes()
+    {
+        // Everything at once: the realistic handheld-phone case phase 2 exists for.
+        using var tmp = new TempDir();
+        var (content, files) = Encode(tmp);
+        string captures = CaptureDir(tmp, files, rotation: 5, perspective: 0.05,
+            blurSigma: 0.8f, jpegQuality: 80, barrel: 0.05, vignette: 0.35, glare: 0.2);
         AssertDecodes(tmp, Directory.EnumerateFiles(captures), content);
     }
 

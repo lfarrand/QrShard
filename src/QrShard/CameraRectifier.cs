@@ -3,14 +3,23 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace QrShard;
 
 /// <summary>
-/// Camera-capture front-end (phase 1): finds the four QR-style finder patterns that
-/// camera-profile shards carry in their top/bottom bands, resolves orientation via the tick
-/// mark next to the top-left finder, solves the 4-point homography, and resamples the photo
-/// into an axis-aligned canvas that the ordinary decode pipeline can consume.
+/// Camera-capture front-end: finds the four QR-style finder patterns that camera-profile
+/// shards carry in their top/bottom bands, resolves orientation via the tick mark next to the
+/// top-left finder, solves the 4-point homography, and resamples the photo into an
+/// axis-aligned canvas that the ordinary decode pipeline can consume.
 ///
-/// Handles rotation (any angle, including 90/180/270), perspective from off-axis shots, and
-/// the mild blur/JPEG artifacts of a real photo. Lens-distortion correction via an alignment
-/// lattice is phase 2.
+/// Phase 1 handles rotation (any angle, including 90/180/270), perspective from off-axis
+/// shots, and the mild blur/JPEG artifacts of a real photo.
+///
+/// Phase 2 refines the pure homography for handheld reality, using the black frame itself as
+/// a dense alignment structure (no encoder/protocol change needed):
+///  - the frame's four edges are traced at many points in the photo with subpixel precision;
+///    the normal-direction residuals against the homography's prediction feed a Coons-patch
+///    correction field that absorbs lens distortion and mild screen curvature;
+///  - at each traced point the frame's black and the gutter's white are sampled, and the
+///    interpolated fields normalize every rectified pixel per channel — flattening vignette,
+///    glare gradients, and white-balance shifts before the color classifier ever sees them.
+/// If refinement cannot lock onto the frame, the phase-1 homography result is used as-is.
 /// </summary>
 internal static class CameraRectifier
 {
@@ -32,7 +41,9 @@ internal static class CameraRectifier
         if (oriented is null)
             return null;
 
-        return Rectify(photo, oriented);
+        var geometry = BuildGeometry(oriented);
+        var coarse = WarpHomography(photo, geometry);
+        return TryRefine(photo, coarse, geometry) ?? coarse;
     }
 
     // ---------- Binarization ----------
@@ -339,7 +350,9 @@ internal static class CameraRectifier
 
     // ---------- Rectification ----------
 
-    private static Bitmap Rectify(Bitmap photo, OrientedQuad q)
+    private sealed record CanvasGeometry(Homography H, int Width, int Height, double Module);
+
+    private static CanvasGeometry BuildGeometry(OrientedQuad q)
     {
         // Canvas geometry: finder centers at the corners of a (margin-inset) rectangle whose
         // size comes from the photographed edge lengths, so canvas scale ≈ photo scale and no
@@ -361,18 +374,355 @@ internal static class CameraRectifier
             (margin, margin), (margin + wc, margin), (margin + wc, margin + hc), (margin, margin + hc),
         ];
         Span<(double X, double Y)> photoCorners = [q.Tl, q.Tr, q.Br, q.Bl];
-        var h = Homography.Solve(canvasCorners, photoCorners);
+        return new CanvasGeometry(Homography.Solve(canvasCorners, photoCorners), canvasW, canvasH, q.Module * scale);
+    }
 
+    private static Bitmap WarpHomography(Bitmap photo, CanvasGeometry geometry)
+    {
+        var px = new Rgb24[geometry.Width * geometry.Height];
+        for (int y = 0; y < geometry.Height; y++)
+        {
+            for (int x = 0; x < geometry.Width; x++)
+            {
+                var (sx, sy) = geometry.H.Apply(x + 0.5, y + 0.5);
+                px[y * geometry.Width + x] = SampleBilinear(photo, sx - 0.5, sy - 0.5);
+            }
+        }
+        return new Bitmap(px, geometry.Width, geometry.Height);
+    }
+
+    // ---------- Phase 2: frame-edge refinement + illumination normalization ----------
+
+    private const int EdgeSamplesPerSide = 17;
+
+    /// <summary>
+    /// Locates the frame in the coarse canvas, traces its four edges in the original photo,
+    /// and re-warps with a Coons-patch residual correction plus per-pixel black/white
+    /// normalization. Returns null (caller keeps the phase-1 result) when the frame cannot be
+    /// traced confidently.
+    /// </summary>
+    private static Bitmap? TryRefine(Bitmap photo, Bitmap coarse, CanvasGeometry geometry)
+    {
+        var box = FindCoarseFrameBox(coarse, geometry.Module);
+        if (box is null)
+            return null;
+        var (bx0, by0, bx1, by1) = box.Value;
+
+        var top = TraceSide(photo, geometry, i => (Lerp(bx0, bx1, (i + 0.5) / EdgeSamplesPerSide), by0), (0, -1));
+        var bottom = TraceSide(photo, geometry, i => (Lerp(bx0, bx1, (i + 0.5) / EdgeSamplesPerSide), by1), (0, 1));
+        var left = TraceSide(photo, geometry, i => (bx0, Lerp(by0, by1, (i + 0.5) / EdgeSamplesPerSide)), (-1, 0));
+        var right = TraceSide(photo, geometry, i => (bx1, Lerp(by0, by1, (i + 0.5) / EdgeSamplesPerSide)), (1, 0));
+        if (top is null || bottom is null || left is null || right is null)
+            return null;
+
+        var map = new RefinedMap(geometry.H, bx0, by0, bx1, by1, top, bottom, left, right);
+        return WarpRefined(photo, map, geometry.Width, geometry.Height);
+    }
+
+    private static double Lerp(double a, double b, double t) => a + (b - a) * t;
+
+    /// <summary>
+    /// Approximate frame outer box in the coarse canvas, found by scanning for the strong dark
+    /// bars from outside inward. Deliberately loose (bowed edges under lens distortion don't
+    /// form clean rows) — every edge sample re-searches around it in the photo.
+    /// </summary>
+    private static (double X0, double Y0, double X1, double Y1)? FindCoarseFrameBox(Bitmap coarse, double module)
+    {
+        int w = coarse.Width, h = coarse.Height;
+        // Finder centers sit at (8m, 8m)-style margins by canvas construction; the content
+        // (and its frame) lies between the bands. Scan windows derived from module units.
+        int? y0 = ScanRows(coarse, (int)(11 * module), (int)Math.Min(24 * module, h / 2.0), +1);
+        int? y1 = ScanRows(coarse, h - 1 - (int)(11 * module), h - 1 - (int)Math.Min(24 * module, h / 2.0), -1);
+        if (y0 is null || y1 is null || y1 - y0 < 8 * module)
+            return null;
+        int? x0 = ScanCols(coarse, (int)(1.5 * module), (int)Math.Min(9 * module, w / 2.0), +1, y0.Value, y1.Value);
+        int? x1 = ScanCols(coarse, w - 1 - (int)(1.5 * module), w - 1 - (int)Math.Min(9 * module, w / 2.0), -1, y0.Value, y1.Value);
+        if (x0 is null || x1 is null || x1 - x0 < 8 * module)
+            return null;
+        return (x0.Value, y0.Value, x1.Value, y1.Value);
+
+        static int? ScanRows(Bitmap bmp, int from, int to, int step)
+        {
+            int lo = (int)(bmp.Width * 0.2), hi = (int)(bmp.Width * 0.8);
+            for (int y = from; step > 0 ? y <= to : y >= to; y += step)
+            {
+                if (y < 0 || y >= bmp.Height)
+                    continue;
+                int dark = 0;
+                for (int x = lo; x < hi; x++)
+                    if (bmp.IsDark(x, y))
+                        dark++;
+                if (dark > (hi - lo) * 0.45)
+                    return y;
+            }
+            return null;
+        }
+
+        static int? ScanCols(Bitmap bmp, int from, int to, int step, int y0, int y1)
+        {
+            int lo = y0 + (y1 - y0) / 4, hi = y1 - (y1 - y0) / 4;
+            for (int x = from; step > 0 ? x <= to : x >= to; x += step)
+            {
+                if (x < 0 || x >= bmp.Width)
+                    continue;
+                int dark = 0;
+                for (int y = lo; y < hi; y++)
+                    if (bmp.IsDark(x, y))
+                        dark++;
+                if (dark > (hi - lo) * 0.45)
+                    return x;
+            }
+            return null;
+        }
+    }
+
+    /// <summary>Per-side traced data: normal-direction residuals plus local black/white colors.</summary>
+    private sealed class SideTrace
+    {
+        public readonly double[] Dx = new double[EdgeSamplesPerSide];
+        public readonly double[] Dy = new double[EdgeSamplesPerSide];
+        public readonly double[][] Black = new double[EdgeSamplesPerSide][];
+        public readonly double[][] White = new double[EdgeSamplesPerSide][];
+        public readonly bool[] Valid = new bool[EdgeSamplesPerSide];
+    }
+
+    private static SideTrace? TraceSide(Bitmap photo, CanvasGeometry geometry,
+        Func<int, (double X, double Y)> canvasPoint, (double X, double Y) outwardNormal)
+    {
+        var trace = new SideTrace();
+        int valid = 0;
+        for (int i = 0; i < EdgeSamplesPerSide; i++)
+        {
+            var p = canvasPoint(i);
+            var basePt = geometry.H.Apply(p.X, p.Y);
+            var stepPt = geometry.H.Apply(p.X + outwardNormal.X * 4, p.Y + outwardNormal.Y * 4);
+            double dx = stepPt.X - basePt.X, dy = stepPt.Y - basePt.Y;
+            double len = Math.Sqrt(dx * dx + dy * dy);
+            if (len < 1e-6)
+                continue;
+            dx /= len;
+            dy /= len;
+
+            if (TraceEdge(photo, basePt, (dx, dy), geometry.Module, out double outerT, out double thickness))
+            {
+                trace.Dx[i] = dx * outerT;
+                trace.Dy[i] = dy * outerT;
+                double blackT = outerT - thickness / 2;  // mid-frame: guaranteed black
+                double whiteT = outerT + thickness / 2;  // quiet zone just outside: guaranteed white
+                trace.Black[i] = SamplePatch(photo, basePt.X + dx * blackT, basePt.Y + dy * blackT);
+                trace.White[i] = SamplePatch(photo, basePt.X + dx * whiteT, basePt.Y + dy * whiteT);
+                trace.Valid[i] = true;
+                valid++;
+            }
+        }
+        if (valid < EdgeSamplesPerSide * 0.7)
+            return null;
+
+        FillInvalid(trace);
+        return trace;
+    }
+
+    /// <summary>
+    /// Walks a luminance profile along the outward normal and finds the frame's outer edge
+    /// (light-to-dark moving inward) with subpixel precision, plus the frame thickness.
+    /// </summary>
+    private static bool TraceEdge(Bitmap photo, (double X, double Y) basePt, (double X, double Y) dir,
+        double module, out double outerT, out double thickness)
+    {
+        outerT = 0;
+        thickness = 0;
+        double search = Math.Max(12, module * 3);
+        const double step = 0.5;
+        int samples = (int)(2 * search / step) + 1;
+
+        Span<double> lum = stackalloc double[512];
+        if (samples > lum.Length)
+            samples = lum.Length;
+        double min = double.MaxValue, max = double.MinValue;
+        for (int i = 0; i < samples; i++)
+        {
+            double t = search - i * step; // from outside (+search) inward (-search)
+            var c = SampleBilinear(photo, basePt.X + dir.X * t - 0.5, basePt.Y + dir.Y * t - 0.5);
+            lum[i] = (c.R + c.G + c.B) / 3.0;
+            min = Math.Min(min, lum[i]);
+            max = Math.Max(max, lum[i]);
+        }
+        if (max - min < 50)
+            return false;
+        double mid = (min + max) / 2;
+
+        // Outer edge: first crossing below mid, walking inward.
+        int outer = -1;
+        for (int i = 1; i < samples; i++)
+        {
+            if (lum[i - 1] >= mid && lum[i] < mid)
+            {
+                outer = i;
+                break;
+            }
+        }
+        if (outer < 0)
+            return false;
+        double frac = (lum[outer - 1] - mid) / (lum[outer - 1] - lum[outer]);
+        outerT = search - (outer - 1 + frac) * step;
+
+        // Inner edge: next crossing back above mid.
+        int inner = -1;
+        for (int i = outer + 1; i < samples; i++)
+        {
+            if (lum[i - 1] < mid && lum[i] >= mid)
+            {
+                inner = i;
+                break;
+            }
+        }
+        if (inner < 0)
+            return false;
+        double innerFrac = (mid - lum[inner - 1]) / (lum[inner] - lum[inner - 1]);
+        double innerT = search - (inner - 1 + innerFrac) * step;
+
+        thickness = outerT - innerT;
+        return thickness >= 2.5 && thickness <= search;
+    }
+
+    private static double[] SamplePatch(Bitmap photo, double cx, double cy)
+    {
+        double r = 0, g = 0, b = 0;
+        int n = 0;
+        int x0 = (int)Math.Round(cx), y0 = (int)Math.Round(cy);
+        for (int y = y0 - 1; y <= y0 + 1; y++)
+        {
+            for (int x = x0 - 1; x <= x0 + 1; x++)
+            {
+                int xc = Math.Clamp(x, 0, photo.Width - 1), yc = Math.Clamp(y, 0, photo.Height - 1);
+                var p = photo.At(xc, yc);
+                r += p.R;
+                g += p.G;
+                b += p.B;
+                n++;
+            }
+        }
+        return [r / n, g / n, b / n];
+    }
+
+    private static void FillInvalid(SideTrace trace)
+    {
+        for (int i = 0; i < EdgeSamplesPerSide; i++)
+        {
+            if (trace.Valid[i])
+                continue;
+            int prev = i - 1, next = i + 1;
+            while (prev >= 0 && !trace.Valid[prev])
+                prev--;
+            while (next < EdgeSamplesPerSide && !trace.Valid[next])
+                next++;
+            int source = prev >= 0 ? prev : next;
+            int other = next < EdgeSamplesPerSide ? next : source;
+            double t = prev >= 0 && next < EdgeSamplesPerSide ? (double)(i - prev) / (next - prev) : 0;
+            trace.Dx[i] = Lerp(trace.Dx[source], trace.Dx[other], t);
+            trace.Dy[i] = Lerp(trace.Dy[source], trace.Dy[other], t);
+            trace.Black[i] = LerpVec(trace.Black[source], trace.Black[other], t);
+            trace.White[i] = LerpVec(trace.White[source], trace.White[other], t);
+        }
+
+        static double[] LerpVec(double[] a, double[] b, double t) =>
+            [Lerp(a[0], b[0], t), Lerp(a[1], b[1], t), Lerp(a[2], b[2], t)];
+    }
+
+    /// <summary>
+    /// Homography plus a Coons-patch field interpolated from the four traced sides: geometric
+    /// residual (dx, dy) and local black/white colors, evaluated per canvas pixel.
+    /// </summary>
+    private sealed class RefinedMap(Homography h, double x0, double y0, double x1, double y1,
+        SideTrace top, SideTrace bottom, SideTrace left, SideTrace right)
+    {
+        public (double X, double Y) Apply(double x, double y)
+        {
+            var (px, py) = h.Apply(x, y);
+            double u = Math.Clamp((x - x0) / (x1 - x0), 0, 1);
+            double v = Math.Clamp((y - y0) / (y1 - y0), 0, 1);
+
+            // Each traced side only observes displacement along its own normal (the aperture
+            // problem: an edge cannot reveal tangential shift). So the top/bottom pair lofts
+            // one orthogonal component of the photo-space correction and the left/right pair
+            // the other, and the two families simply add — classical Coons corner-blending
+            // would wrongly average a measured component with a structurally-zero one.
+            double dx = (1 - v) * SideValue(top.Dx, u) + v * SideValue(bottom.Dx, u)
+                      + (1 - u) * SideValue(left.Dx, v) + u * SideValue(right.Dx, v);
+            double dy = (1 - v) * SideValue(top.Dy, u) + v * SideValue(bottom.Dy, u)
+                      + (1 - u) * SideValue(left.Dy, v) + u * SideValue(right.Dy, v);
+            return (px + dx, py + dy);
+        }
+
+        public (double[] Black, double[] White) Illumination(double x, double y)
+        {
+            double u = Math.Clamp((x - x0) / (x1 - x0), 0, 1);
+            double v = Math.Clamp((y - y0) / (y1 - y0), 0, 1);
+            var black = new double[3];
+            var white = new double[3];
+            for (int c = 0; c < 3; c++)
+            {
+                black[c] = Coons(u, v, Channel(top.Black, c), Channel(bottom.Black, c), Channel(left.Black, c), Channel(right.Black, c));
+                white[c] = Coons(u, v, Channel(top.White, c), Channel(bottom.White, c), Channel(left.White, c), Channel(right.White, c));
+            }
+            return (black, white);
+
+            static double[] Channel(double[][] side, int c)
+            {
+                var values = new double[EdgeSamplesPerSide];
+                for (int i = 0; i < EdgeSamplesPerSide; i++)
+                    values[i] = side[i][c];
+                return values;
+            }
+        }
+
+        /// <summary>Transfinite (Coons) interpolation from four boundary sample arrays.</summary>
+        private static double Coons(double u, double v, double[] top, double[] bottom, double[] left, double[] right)
+        {
+            double t = SideValue(top, u), b = SideValue(bottom, u);
+            double l = SideValue(left, v), r = SideValue(right, v);
+            double c00 = (top[0] + left[0]) / 2;
+            double c10 = (top[^1] + right[0]) / 2;
+            double c01 = (bottom[0] + left[^1]) / 2;
+            double c11 = (bottom[^1] + right[^1]) / 2;
+            return (1 - v) * t + v * b + (1 - u) * l + u * r
+                 - ((1 - u) * (1 - v) * c00 + u * (1 - v) * c10 + (1 - u) * v * c01 + u * v * c11);
+        }
+
+        private static double SideValue(double[] samples, double t)
+        {
+            double pos = t * EdgeSamplesPerSide - 0.5;
+            int i0 = Math.Clamp((int)Math.Floor(pos), 0, EdgeSamplesPerSide - 1);
+            int i1 = Math.Min(i0 + 1, EdgeSamplesPerSide - 1);
+            return Lerp(samples[i0], samples[i1], Math.Clamp(pos - i0, 0, 1));
+        }
+    }
+
+    private static Bitmap WarpRefined(Bitmap photo, RefinedMap map, int canvasW, int canvasH)
+    {
         var px = new Rgb24[canvasW * canvasH];
         for (int y = 0; y < canvasH; y++)
         {
             for (int x = 0; x < canvasW; x++)
             {
-                var (sx, sy) = h.Apply(x + 0.5, y + 0.5);
-                px[y * canvasW + x] = SampleBilinear(photo, sx - 0.5, sy - 0.5);
+                var (sx, sy) = map.Apply(x + 0.5, y + 0.5);
+                var sample = SampleBilinear(photo, sx - 0.5, sy - 0.5);
+                var (black, white) = map.Illumination(x + 0.5, y + 0.5);
+                px[y * canvasW + x] = new Rgb24(
+                    Normalize(sample.R, black[0], white[0]),
+                    Normalize(sample.G, black[1], white[1]),
+                    Normalize(sample.B, black[2], white[2]));
             }
         }
         return new Bitmap(px, canvasW, canvasH);
+
+        // Linear per-channel remap against the locally interpolated black/white references —
+        // this is what flattens vignette, glare gradients, and white-balance shifts.
+        static byte Normalize(byte value, double black, double white)
+        {
+            double range = Math.Max(white - black, 24);
+            return (byte)Math.Clamp((value - black) * 255.0 / range + 0.5, 0, 255);
+        }
     }
 
     private static Rgb24 SampleBilinear(Bitmap photo, double x, double y)
