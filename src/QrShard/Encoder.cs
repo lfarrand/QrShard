@@ -14,6 +14,7 @@ internal sealed record EncodeOptions
     public int EccParity { get; init; } = 16; // corrects 8 damaged bytes per 255-byte codeword
     public bool Compress { get; init; } = true;
     public int RecoveryPercent { get; init; } // extra parity images (% of data images); 0 = off
+    public bool CameraMode { get; init; } // add finder patterns so photos (not just screenshots) decode
     public string ImageFormat { get; init; } = ShardImageFormat.Default; // any of ShardImageFormat.Supported
 }
 
@@ -40,7 +41,7 @@ internal static class Encoder
         var source = payload.Source;
         long dataLength = source.Length;
 
-        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity);
+        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity, opt.CameraMode);
         int headerSize = ShardHeader.Size(fileName);
         long capacityLong = layout.UsableBytes - headerSize;
         if (capacityLong < 1)
@@ -306,14 +307,21 @@ internal static class Encoder
         var black = new Rgb24(0, 0, 0);
         Array.Fill(px, white);
 
-        // Locator frame ring.
-        int f0 = Layout.QuietPx, f1 = Layout.Border; // frame spans [f0, f1) from each edge
-        FillRect(px, w, f0, f0, w - 2 * f0, Layout.FramePx, black);                    // top
-        FillRect(px, w, f0, h - f1, w - 2 * f0, Layout.FramePx, black);                // bottom
-        FillRect(px, w, f0, f0, Layout.FramePx, h - 2 * f0, black);                    // left
-        FillRect(px, w, w - f1, f0, Layout.FramePx, h - 2 * f0, black);                // right
+        // Camera profile shifts the frame + inner content down below the top finder band.
+        int oy = layout.ContentTop;
+        int contentH = h - 2 * layout.FinderBand;
 
-        int ix = Layout.Border, iy = Layout.Border; // inner-area origin
+        // Locator frame ring.
+        int f0 = Layout.QuietPx, f1 = Layout.Border; // frame spans [f0, f1) from each content edge
+        FillRect(px, w, f0, oy + f0, w - 2 * f0, Layout.FramePx, black);               // top
+        FillRect(px, w, f0, oy + contentH - f1, w - 2 * f0, Layout.FramePx, black);    // bottom
+        FillRect(px, w, f0, oy + f0, Layout.FramePx, contentH - 2 * f0, black);        // left
+        FillRect(px, w, w - f1, oy + f0, Layout.FramePx, contentH - 2 * f0, black);    // right
+
+        if (layout.CameraFinders)
+            DrawFinderBands(px, w, h, layout);
+
+        int ix = Layout.Border, iy = oy + Layout.Border; // inner-area origin
         int gutter = layout.Gutter;
 
         // Metadata + palette strips, duplicated top and bottom for overlay resilience.
@@ -336,6 +344,41 @@ internal static class Encoder
         }
 
         writer.Write(outPath, px, w, h);
+    }
+
+    /// <summary>
+    /// Camera-profile finder bands: four 7-module concentric-square finder patterns at the
+    /// image corners (row/column signature 1:1:3:1:1) plus the solid orientation tick
+    /// 7 modules right of the top-left finder center. Geometry constants live in Layout and
+    /// are shared with the camera rectifier.
+    /// </summary>
+    private static void DrawFinderBands(Rgb24[] px, int w, int h, Layout layout)
+    {
+        int m = layout.FinderModule;
+        int inset = Layout.FinderCornerInsetModules * m;
+        int finder = Layout.FinderModules * m;
+        int bottomBandTop = h - layout.FinderBand;
+
+        DrawFinder(px, w, inset, inset, m);                                    // top-left
+        DrawFinder(px, w, w - inset - finder, inset, m);                       // top-right
+        DrawFinder(px, w, inset, bottomBandTop + inset, m);                    // bottom-left
+        DrawFinder(px, w, w - inset - finder, bottomBandTop + inset, m);       // bottom-right
+
+        // Orientation tick: a 3-module solid square centered 7 modules right of the TL finder
+        // center (center y = inset + 3.5m). Its mirrored position near the TR finder stays
+        // white, which is what disambiguates the four rotations.
+        int tickCenterX = inset + finder / 2 + Layout.OrientationTickOffsetModules * m;
+        int tickCenterY = inset + finder / 2;
+        FillRect(px, w, tickCenterX - (3 * m) / 2, tickCenterY - (3 * m) / 2, 3 * m, 3 * m, new Rgb24(0, 0, 0));
+    }
+
+    private static void DrawFinder(Rgb24[] px, int stride, int x, int y, int m)
+    {
+        var black = new Rgb24(0, 0, 0);
+        var white = new Rgb24(255, 255, 255);
+        FillRect(px, stride, x, y, 7 * m, 7 * m, black);
+        FillRect(px, stride, x + m, y + m, 5 * m, 5 * m, white);
+        FillRect(px, stride, x + 2 * m, y + 2 * m, 3 * m, 3 * m, black);
     }
 
     private static void DrawMetaStrip(Rgb24[] px, int stride, Layout layout, byte[] metaModules, int ix, int yTop)

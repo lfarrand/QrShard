@@ -9,9 +9,26 @@ internal sealed record DecodedShard(ShardHeader Header, byte[] Payload, string S
 
 internal sealed record RestoredFile(string FileName, string OutputPath, long Length);
 
+/// <summary>A plain RGB pixel grid, shared by the decoder pipeline and the camera rectifier.</summary>
+internal sealed class Bitmap(Rgb24[] px, int width, int height)
+{
+    public const int DarkThreshold = 80; // luminance below this is "frame black"
+
+    public readonly Rgb24[] Px = px;
+    public readonly int Width = width;
+    public readonly int Height = height;
+
+    public Rgb24 At(int x, int y) => Px[y * Width + x];
+
+    public bool IsDark(int x, int y)
+    {
+        var p = Px[y * Width + x];
+        return p.R + p.G + p.B < DarkThreshold * 3;
+    }
+}
+
 internal static class Decoder
 {
-    private const int DarkThreshold = 80; // luminance below this is "frame black"
 
     // ---------- Whole-folder decode ----------
 
@@ -327,6 +344,41 @@ internal static class Decoder
             bmp = new Bitmap(px, image.Width, image.Height);
         }
 
+        try
+        {
+            return DecodeBitmap(bmp, scratch, path);
+        }
+        catch (ShardDecodeException axisAlignedError)
+        {
+            // Camera fallback: photos are rotated/perspective-distorted, which the axis-aligned
+            // pipeline cannot handle. If the image carries camera-profile finder patterns,
+            // rectify it into an axis-aligned canvas and run the same pipeline on that.
+            Bitmap? rectified;
+            try
+            {
+                rectified = CameraRectifier.TryRectify(bmp);
+            }
+            catch (ShardDecodeException)
+            {
+                rectified = null;
+            }
+            if (rectified is null)
+                throw;
+
+            try
+            {
+                return DecodeBitmap(rectified, scratch, path);
+            }
+            catch (ShardDecodeException cameraError)
+            {
+                throw new ShardDecodeException(
+                    $"Camera-rectified decode failed: {cameraError.Message} (axis-aligned attempt: {axisAlignedError.Message})");
+            }
+        }
+    }
+
+    internal static DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path)
+    {
         // Several dark rings can plausibly be the locator frame (e.g. a dark desktop border around
         // the capture also forms a ring); try candidates largest-first until the metadata validates.
         var candidates = FindFrameCandidates(bmp, scratch.ClearedVisited(bmp.Width * bmp.Height));
@@ -397,21 +449,6 @@ internal static class Decoder
         public double H => Y1 - Y0;
     }
 
-    private sealed class Bitmap(Rgb24[] px, int width, int height)
-    {
-        public readonly Rgb24[] Px = px;
-        public readonly int Width = width;
-        public readonly int Height = height;
-
-        public Rgb24 At(int x, int y) => Px[y * Width + x];
-
-        public bool IsDark(int x, int y)
-        {
-            var p = Px[y * Width + x];
-            return p.R + p.G + p.B < DarkThreshold * 3;
-        }
-    }
-
     /// <summary>
     /// Finds locator-frame candidates: connected dark components whose bounding box is roughly
     /// square, ring-shaped (low fill density), and covers its own bounding-box edges.
@@ -478,23 +515,50 @@ internal static class Decoder
         return [.. candidates.OrderByDescending(c => (long)c.W * c.H)];
     }
 
-    /// <summary>Fraction of the bounding-box perimeter that is dark (a frame ring covers ~all of it).</summary>
+    /// <summary>
+    /// Fraction of the bounding-box perimeter that is dark (a frame ring covers ~all of it).
+    /// Checked with a small inward tolerance band: resampled captures (camera rectification,
+    /// rescaled screenshots) leave the ring's edges wavy by a pixel or two, and the exact
+    /// bounding-box row only touches a wavy edge where it peaks.
+    /// </summary>
     private static double EdgeCoverage(Bitmap bmp, Rect box)
     {
+        const int tolerance = 2;
+        int innerTop = Math.Min(box.Y0 + tolerance, box.Y1 - 1);
+        int innerBottom = Math.Max(box.Y1 - 1 - tolerance, box.Y0);
+        int innerLeft = Math.Min(box.X0 + tolerance, box.X1 - 1);
+        int innerRight = Math.Max(box.X1 - 1 - tolerance, box.X0);
+
         long dark = 0, total = 0;
         for (int x = box.X0; x < box.X1; x++)
         {
             total += 2;
-            if (bmp.IsDark(x, box.Y0)) dark++;
-            if (bmp.IsDark(x, box.Y1 - 1)) dark++;
+            if (AnyDarkY(bmp, x, box.Y0, innerTop)) dark++;
+            if (AnyDarkY(bmp, x, innerBottom, box.Y1 - 1)) dark++;
         }
         for (int y = box.Y0; y < box.Y1; y++)
         {
             total += 2;
-            if (bmp.IsDark(box.X0, y)) dark++;
-            if (bmp.IsDark(box.X1 - 1, y)) dark++;
+            if (AnyDarkX(bmp, y, box.X0, innerLeft)) dark++;
+            if (AnyDarkX(bmp, y, innerRight, box.X1 - 1)) dark++;
         }
         return (double)dark / total;
+
+        static bool AnyDarkY(Bitmap bmp, int x, int y0, int y1)
+        {
+            for (int y = y0; y <= y1; y++)
+                if (bmp.IsDark(x, y))
+                    return true;
+            return false;
+        }
+
+        static bool AnyDarkX(Bitmap bmp, int y, int x0, int x1)
+        {
+            for (int x = x0; x <= x1; x++)
+                if (bmp.IsDark(x, y))
+                    return true;
+            return false;
+        }
     }
 
     /// <summary>
