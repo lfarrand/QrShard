@@ -72,6 +72,14 @@ internal static class Cli
                 if (result.ParityImages > 0)
                     @out.WriteLine($"  {result.DataImages} data + {result.ParityImages} parity image(s); " +
                                    $"can recover up to {result.StripeParity} lost image(s) per {result.StripeData + result.StripeParity}.");
+
+                if (flags.Contains("--video"))
+                {
+                    int intervalMs = GetInt(named, "-i", "--interval", Slideshow.DefaultIntervalMs);
+                    string slideshow = Slideshow.Write(outDir, result.Files, intervalMs);
+                    @out.WriteLine($"Slideshow: {slideshow} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
+                    @out.WriteLine("  Open it in a browser, press F11, and record the screen for at least one full cycle.");
+                }
                 return 0;
             }
 
@@ -79,7 +87,19 @@ internal static class Cli
             {
                 var (positional, named, _) = ParseArgs(args[1..]);
                 if (positional.Count == 0)
-                    return Help(@out, err, "decode requires a folder (or image files).");
+                    return Help(@out, err, "decode requires a folder, image files, or a video recording.");
+
+                // A single video file (or animated image) is a recording of the slideshow.
+                if (positional.Count == 1 && File.Exists(positional[0]) &&
+                    (VideoDecoder.IsVideoFile(positional[0]) ||
+                     (IsImageFile(positional[0]) && VideoDecoder.IsAnimatedImage(positional[0]))))
+                {
+                    double fps = GetDouble(named, "--fps", 8.0);
+                    @out.WriteLine($"Decoding video '{positional[0]}' (extracting at {fps} fps)...");
+                    var fromVideo = VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps, @out.WriteLine, out _);
+                    @out.WriteLine($"Restored {fromVideo.Count} file(s).");
+                    return 0;
+                }
 
                 var images = new List<string>();
                 foreach (string p in positional)
@@ -175,7 +195,7 @@ internal static class Cli
         var flags = new HashSet<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--no-compress" or "--camera")
+            if (args[i] is "--no-compress" or "--camera" or "--video")
                 flags.Add(args[i]);
             else if (args[i].StartsWith('-') && i + 1 < args.Length)
                 named[args[i]] = args[++i];
@@ -192,6 +212,12 @@ internal static class Cli
     {
         string? v = Get(named, shortKey, longKey);
         return v is null ? fallback : int.Parse(v);
+    }
+
+    private static double GetDouble(Dictionary<string, string> named, string key, double fallback)
+    {
+        string? v = Get(named, key);
+        return v is null ? fallback : double.Parse(v, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static int Help(TextWriter @out, TextWriter err, string? error = null)
@@ -224,10 +250,18 @@ internal static class Cli
                                          just screenshots; shifts defaults to cell 8, 2 bits,
                                          ECC 32 (explicit flags still win). Far lower density —
                                          use for small/medium payloads
+                --video                  Also write slideshow.html: one self-contained page that
+                                         cycles the images forever — record the screen for a
+                                         full cycle instead of screenshotting by hand
+                -i, --interval <ms>      Slideshow interval per image (default: 500, min 100)
                 --no-compress            Skip deflate compression of the payload
 
-              qrshard decode <folder|images...> [-o <file>]
-                                         Reconstitute the original file from captured images.
+              qrshard decode <folder|images...|recording> [-o <file>]
+                                         Reconstitute the original file from captured images, or
+                                         from a screen/phone RECORDING of the slideshow
+                                         (mp4/webm/mkv/mov/avi need ffmpeg on PATH; animated
+                                         png/gif/webp decode natively)
+                --fps <n>                Frame extraction rate for video files (default: 8)
               qrshard info <image>       Show and validate a single shard image.
               qrshard test               Round-trip self-test, including simulated screenshots.
 

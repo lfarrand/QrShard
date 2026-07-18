@@ -83,6 +83,12 @@ internal static class Decoder
         if (shards.Count == 0)
             throw new ShardDecodeException("No decodable shard images were found.");
 
+        return Assemble(shards, outputPath, log);
+    }
+
+    /// <summary>Reassembles already-decoded shards into output file(s). Shared by folder and video decoding.</summary>
+    internal static List<RestoredFile> Assemble(List<DecodedShard> shards, string? outputPath, Action<string> log)
+    {
         var groups = shards.GroupBy(s => s.Header.FileId).ToList();
         if (outputPath is not null && groups.Count > 1)
             throw new ShardDecodeException("The images belong to multiple different files; omit -o or decode them separately.");
@@ -91,6 +97,57 @@ internal static class Decoder
         foreach (var group in groups)
             restored.Add(Reassemble([.. group], outputPath, log));
         return restored;
+    }
+
+    /// <summary>
+    /// True when every file in the shard set can be fully reassembled — all data images
+    /// present, or (with cross-shard parity) every stripe holds at least StripeData of its
+    /// StripeData+StripeParity images. Used by video decoding to stop consuming frames early.
+    /// </summary>
+    internal static bool IsSetComplete(IReadOnlyCollection<DecodedShard> shards)
+    {
+        if (shards.Count == 0)
+            return false;
+
+        foreach (var group in shards.GroupBy(s => s.Header.FileId))
+        {
+            var first = group.First().Header;
+            int count = first.Count, s = first.StripeData, p = first.StripeParity;
+
+            var dataPresent = new bool[count];
+            foreach (var x in group)
+                if (!x.Header.IsParity && x.Header.Index < count)
+                    dataPresent[x.Header.Index] = true;
+
+            if (p == 0)
+            {
+                if (Array.IndexOf(dataPresent, false) >= 0)
+                    return false;
+                continue;
+            }
+
+            int stripes = (count + s - 1) / s;
+            var parityPresent = new bool[stripes * p]; // by ordinal, so duplicates don't double-count
+            foreach (var x in group)
+                if (x.Header.IsParity && x.Header.Index < parityPresent.Length)
+                    parityPresent[x.Header.Index] = true;
+
+            for (int g = 0; g < stripes; g++)
+            {
+                int firstIndex = g * s;
+                int stripeData = Math.Min(s, count - firstIndex);
+                int have = 0;
+                for (int pi = 0; pi < p; pi++)
+                    if (parityPresent[g * p + pi])
+                        have++;
+                for (int t = 0; t < stripeData; t++)
+                    if (dataPresent[firstIndex + t])
+                        have++;
+                if (have < stripeData)
+                    return false;
+            }
+        }
+        return true;
     }
 
     private static RestoredFile Reassemble(List<DecodedShard> shards, string? outputPath, Action<string> log)

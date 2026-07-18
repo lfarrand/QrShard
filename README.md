@@ -61,6 +61,23 @@ image 7 of 22 — recapture it"), and the final file is verified against a SHA-2
 the shards. If decode says it succeeded, the file is bit-identical. `qrshard info <image>`
 inspects and validates a single capture.
 
+**Video mode — no manual capturing at all.** Add `--video` when encoding and a self-contained
+`slideshow.html` is written next to the shards: open it in any browser, press F11, and it
+cycles every image forever (default 500 ms each; `--interval` to tune). On the receiving side,
+just **record the screen** for one full cycle (or point a phone at it, with `--camera` shards)
+and feed the recording straight in:
+
+```
+qrshard decode recording.mp4 -o holiday-photos.zip
+```
+
+Frames are extracted via ffmpeg (must be on PATH for mp4/webm/mkv/mov/avi; animated
+png/gif/webp decode natively), near-duplicate frames are skipped cheaply, torn mid-transition
+frames fail checksums harmlessly and come around again next cycle, and decoding **stops early**
+the moment the collected set is complete — or merely *recoverable*, letting parity
+reconstruction fill whatever the recording hadn't reached yet. No synchronization between the
+two machines is needed at any point.
+
 Run from source with `dotnet run --project src/QrShard -c Release -- <command>`, or publish
 standalone binaries with `./publish.ps1`.
 
@@ -85,6 +102,8 @@ standalone binaries with `./publish.ps1`.
 | `-R, --recovery <pct>` | 0–100 | 0 (off) | Extra **parity images** as % of data images; any lost/destroyed images up to that budget are rebuilt without recapture |
 | `-f, --format <fmt>` | `png`, `bmp`, `tga`, `qoi`, `webp`, `tiff` | `png` | Lossless container format (see [Image formats](#image-formats)) |
 | `--camera` | flag | off | Camera profile: adds finder patterns so shards decode from **photos** of the screen (rotation + perspective), not just screenshots; shifts defaults to cell 8 / 2 bits / ECC 32 (explicit flags win). See [Camera capture](#camera-capture) |
+| `--video` | flag | off | Also write `slideshow.html`, a self-contained page cycling the images forever — record the screen for one cycle instead of screenshotting by hand |
+| `-i, --interval <ms>` | ≥ 100 | 500 | Slideshow interval per image (500 is safe for 30 fps recorders) |
 | `--no-compress` | flag | compression on | Skip deflate compression of the payload (it is auto-skipped anyway when a sample shows the file is incompressible) |
 
 ### `decode` options
@@ -92,6 +111,7 @@ standalone binaries with `./publish.ps1`.
 | Option | Supported values | Default | Description |
 |---|---|---|---|
 | `-o, --out <file>` | any path | original filename in the current directory (never overwrites — falls back to `<name>.restored<ext>`) | Where to write the reconstituted file |
+| `--fps <n>` | > 0 | 8 | Frame extraction rate when decoding a video recording (ffmpeg required for mp4/webm/mkv/mov/avi) |
 
 ## Configuration (appsettings.json)
 
