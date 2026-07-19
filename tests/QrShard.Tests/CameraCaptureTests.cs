@@ -283,6 +283,6 @@ public class CameraCaptureTests
     {
         var px = new Rgb24[400 * 400];
         Array.Fill(px, new Rgb24(220, 220, 220));
-        Assert.Null(CameraRectifier.TryRectify(new Bitmap(px, 400, 400)));
+        Assert.Null(new CameraRectifier().TryRectify(new Bitmap(px, 400, 400)));
     }
 }

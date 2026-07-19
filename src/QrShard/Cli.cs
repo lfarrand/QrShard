@@ -1,4 +1,10 @@
+using Microsoft.Extensions.DependencyInjection;
+
 namespace QrShard;
+
+/// <summary>Command handlers with their dependencies resolved from the composition root.</summary>
+internal sealed record CliServices(
+    IShardEncoder Encoder, IShardDecoder Decoder, IVideoDecoder VideoDecoder, ISlideshowWriter Slideshow);
 
 /// <summary>Command-line interface, separated from Program for testability.</summary>
 internal static class Cli
@@ -7,9 +13,16 @@ internal static class Cli
     {
         var @out = stdout ?? Console.Out;
         var err = stderr ?? Console.Error;
+        var cfg = settings ?? AppSettings.Current;
         try
         {
-            return RunCore(args, @out, err, settings ?? AppSettings.Current);
+            using var provider = ServiceRegistration.BuildProvider(cfg);
+            var services = new CliServices(
+                provider.GetRequiredService<IShardEncoder>(),
+                provider.GetRequiredService<IShardDecoder>(),
+                provider.GetRequiredService<IVideoDecoder>(),
+                provider.GetRequiredService<ISlideshowWriter>());
+            return RunCore(args, @out, err, cfg, services);
         }
         catch (ShardDecodeException ex)
         {
@@ -24,7 +37,7 @@ internal static class Cli
         }
     }
 
-    private static int RunCore(string[] args, TextWriter @out, TextWriter err, AppSettings settings)
+    private static int RunCore(string[] args, TextWriter @out, TextWriter err, AppSettings settings, CliServices services)
     {
         if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
             return Help(@out, err);
@@ -67,7 +80,7 @@ internal static class Cli
                                $"ECC parity {opt.EccParity}, recovery {opt.RecoveryPercent}%, " +
                                $"format {opt.ImageFormat}, compression {(opt.Compress ? "on" : "off")}" +
                                (camera ? ", camera profile (finder patterns)" : ""));
-                var result = Encoder.Encode(file, outDir, opt, @out.WriteLine);
+                var result = services.Encoder.Encode(file, outDir, opt, @out.WriteLine);
                 @out.WriteLine($"Done: {result.ImageCount} image(s) of {result.Width}x{result.Height}px, up to {result.BytesPerImage:N0} payload bytes each.");
                 if (result.ParityImages > 0)
                     @out.WriteLine($"  {result.DataImages} data + {result.ParityImages} parity image(s); " +
@@ -76,7 +89,7 @@ internal static class Cli
                 if (flags.Contains("--video"))
                 {
                     int intervalMs = GetInt(named, "-i", "--interval", Slideshow.DefaultIntervalMs);
-                    string slideshow = Slideshow.Write(outDir, result.Files, intervalMs);
+                    string slideshow = services.Slideshow.Write(outDir, result.Files, intervalMs);
                     @out.WriteLine($"Slideshow: {slideshow} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
                     @out.WriteLine("  Open it in a browser, press F11, and record the screen for at least one full cycle.");
                 }
@@ -96,7 +109,7 @@ internal static class Cli
                 {
                     double fps = GetDouble(named, "--fps", 8.0);
                     @out.WriteLine($"Decoding video '{positional[0]}' (extracting at {fps} fps)...");
-                    var fromVideo = VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps, @out.WriteLine, out _);
+                    var fromVideo = services.VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps, @out.WriteLine, out _);
                     @out.WriteLine($"Restored {fromVideo.Count} file(s).");
                     return 0;
                 }
@@ -115,7 +128,7 @@ internal static class Cli
                     return Help(@out, err, "no image files found to decode.");
 
                 @out.WriteLine($"Decoding {images.Count} image(s)...");
-                var restored = Decoder.DecodeFolder(images, Get(named, "-o", "--out"), @out.WriteLine);
+                var restored = services.Decoder.DecodeFolder(images, Get(named, "-o", "--out"), @out.WriteLine);
                 @out.WriteLine($"Restored {restored.Count} file(s).");
                 return 0;
             }
@@ -125,7 +138,7 @@ internal static class Cli
                 var (positional, _, _) = ParseArgs(args[1..]);
                 if (positional.Count != 1 || !File.Exists(positional[0]))
                     return Help(@out, err, "info requires one shard image.");
-                var shard = Decoder.DecodeImage(positional[0]);
+                var shard = services.Decoder.DecodeImage(positional[0], new DecodeScratch());
                 var h = shard.Header;
                 @out.WriteLine($"file      : {h.FileName}");
                 @out.WriteLine($"file id   : {h.FileId:X16}");

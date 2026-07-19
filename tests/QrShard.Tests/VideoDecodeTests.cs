@@ -102,7 +102,7 @@ public class VideoDecodeTests
         string recording = BuildApng(tmp, RecordingPlan(files));
 
         string output = tmp.File("out.bin");
-        VideoDecoder.Decode(recording, output, 8, _ => { }, out var stats);
+        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.Equal(files.Count, stats.ShardsCollected);
         // The duplicate pre-filter must have skipped the repeats.
@@ -124,7 +124,7 @@ public class VideoDecodeTests
         string recording = BuildApng(tmp, plan);
 
         string output = tmp.File("out.bin");
-        VideoDecoder.Decode(recording, output, 8, _ => { }, out var stats);
+        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.True(stats.StoppedEarly);
         Assert.True(stats.FramesExamined <= files.Count + 1,
@@ -146,7 +146,7 @@ public class VideoDecodeTests
 
         string output = tmp.File("out.bin");
         var log = new List<string>();
-        VideoDecoder.Decode(recording, output, 8, log.Add, out var stats);
+        new VideoDecoder().Decode(recording, output, 8, log.Add, out var stats);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.True(stats.StoppedEarly);
         Assert.Contains(log, m => m.Contains("recovered 1 missing image"));
@@ -161,7 +161,7 @@ public class VideoDecodeTests
         string recording = BuildApng(tmp, RecordingPlan(shown, duplicates: 1));
 
         var ex = Assert.Throws<ShardDecodeException>(
-            () => VideoDecoder.Decode(recording, tmp.File("out.bin"), 8, _ => { }, out _));
+            () => new VideoDecoder().Decode(recording, tmp.File("out.bin"), 8, _ => { }, out _));
         Assert.Contains("missing image(s) 1", ex.Message);
     }
 
@@ -181,7 +181,7 @@ public class VideoDecodeTests
     {
         using var tmp = new TempDir();
         var (_, files) = Encode(tmp, opt: Fast with { RecoveryPercent = 25 });
-        var scratch = new Decoder.DecodeScratch();
+        var scratch = new DecodeScratch();
         var all = files.Select(f => Decoder.DecodeImage(f, scratch)).ToList();
         var data = all.Where(s => !s.Header.IsParity).ToList();
         var parity = all.Where(s => s.Header.IsParity).ToList();
@@ -278,7 +278,7 @@ public class VideoDecodeTests
         }
 
         string output = tmp.File("out.bin");
-        VideoDecoder.Decode(mp4, output, 8, _ => { }, out var stats);
+        new VideoDecoder().Decode(mp4, output, 8, _ => { }, out var stats);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.True(stats.FramesDecoded < stats.FramesExamined); // dedupe active at 8 fps vs 2 img/s
     }

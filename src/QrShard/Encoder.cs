@@ -27,8 +27,10 @@ internal static class Encoder
     public const long MaxFileBytes = 1_500_000_000; // byte[] limits; also far beyond any sane shard count
     public const int MaxRecoveryPercent = 100;
 
-    public static EncodeResult Encode(string filePath, string outDir, EncodeOptions opt, Action<string>? log = null)
+    public static EncodeResult Encode(string filePath, string outDir, EncodeOptions opt, Action<string>? log = null,
+        AppSettings? settings = null)
     {
+        var cfg = settings ?? AppSettings.Current;
         if (opt.RecoveryPercent is < 0 or > MaxRecoveryPercent)
             throw new ArgumentException($"Recovery percent must be between 0 and {MaxRecoveryPercent}.");
         string format = ShardImageFormat.Normalize(opt.ImageFormat);
@@ -37,7 +39,7 @@ internal static class Encoder
             throw new InvalidOperationException($"Files larger than {MaxFileBytes / 1_000_000:N0} MB are not supported.");
         string fileName = Path.GetFileName(filePath);
 
-        using var payload = OpenPayload(filePath, originalLength, opt.Compress, out byte flags, out byte[] sha);
+        using var payload = OpenPayload(filePath, originalLength, opt.Compress, cfg, out byte flags, out byte[] sha);
         var source = payload.Source;
         long dataLength = source.Length;
 
@@ -100,10 +102,10 @@ internal static class Encoder
         // budget (default ~2 GB, appsettings.json EncodeMemoryBudgetMB) gives plenty of workers
         // at normal resolutions and few at 16K.
         long pixelBytes = (long)layout.Width * layout.Height * 3;
-        long budget = AppSettings.Current.EncodeMemoryBudgetMB * 1_000_000L;
+        long budget = cfg.EncodeMemoryBudgetMB * 1_000_000L;
         int degree = (int)Math.Clamp(budget / Math.Max(1, pixelBytes), 1, Environment.ProcessorCount);
         var po = new ParallelOptions { MaxDegreeOfParallelism = degree };
-        var writer = new ShardImageWriter(format, layout);
+        var writer = new ShardImageWriter(format, layout, cfg);
 
         // Data and parity images in ONE parallel loop (no barrier between the phases), with
         // thread-local scratch (pixel canvas + stream/cell byte buffers) so each worker
@@ -181,7 +183,8 @@ internal static class Encoder
     ///  - everything else → a memory-mapped source, so large incompressible files (zips, media)
     ///    are streamed per-chunk and never materialized as a managed array.
     /// </summary>
-    private static PayloadHandle OpenPayload(string filePath, long length, bool compress, out byte flags, out byte[] sha)
+    private static PayloadHandle OpenPayload(string filePath, long length, bool compress, AppSettings cfg,
+        out byte flags, out byte[] sha)
     {
         flags = 0;
         if (length == 0)
@@ -197,7 +200,7 @@ internal static class Encoder
         {
             var original = new byte[length];
             mapped.Read(0, original);
-            byte[] compressed = Deflate(original, AppSettings.Current.PayloadCompressionLevel);
+            byte[] compressed = Deflate(original, cfg.PayloadCompressionLevel);
             if (compressed.Length < original.Length)
             {
                 mapped.Dispose();
@@ -249,7 +252,7 @@ internal static class Encoder
     }
 
     /// <summary>How rendered pixels are written to disk for the chosen container format.</summary>
-    private sealed class ShardImageWriter(string format, Layout layout)
+    private sealed class ShardImageWriter(string format, Layout layout, AppSettings cfg)
     {
         private readonly bool _fastPng = format == "png";
         private readonly SixLabors.ImageSharp.Formats.IImageEncoder? _encoder = ShardImageFormat.CreateEncoder(format);
@@ -258,7 +261,7 @@ internal static class Encoder
         // The configured level applies where compression pays off (Up-filtered repeated rows);
         // 1 px noise cells are incompressible by construction, so they always use Fastest.
         private readonly System.IO.Compression.CompressionLevel _pngLevel = layout.CellPx >= 2
-            ? AppSettings.Current.PngCompressionLevel
+            ? cfg.PngCompressionLevel
             : System.IO.Compression.CompressionLevel.Fastest;
 
         public void Write(string path, Rgb24[] px, int width, int height)
