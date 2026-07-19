@@ -19,12 +19,12 @@ namespace QrShard;
 /// PNG is written by our own <see cref="FastPng"/> (the encode hot path); all other formats
 /// go through ImageSharp with lossless, speed-tuned settings.
 /// </summary>
-internal static class ShardImageFormat
+internal sealed class ShardImageFormat
 {
     public const string Default = "png";
     public static readonly string[] Supported = ["png", "bmp", "tga", "qoi", "webp", "tiff"];
 
-    public static string Normalize(string format)
+    public string Normalize(string format)
     {
         string f = format.Trim().ToLowerInvariant();
         if (f == "tif")
@@ -34,10 +34,10 @@ internal static class ShardImageFormat
         return f;
     }
 
-    public static string Extension(string normalizedFormat) => "." + normalizedFormat;
+    public string Extension(string normalizedFormat) => "." + normalizedFormat;
 
     /// <summary>ImageSharp encoder with lossless, throughput-oriented settings (null for PNG — FastPng handles it).</summary>
-    public static IImageEncoder? CreateEncoder(string normalizedFormat) => normalizedFormat switch
+    public IImageEncoder? CreateEncoder(string normalizedFormat) => normalizedFormat switch
     {
         "png" => null,
         "bmp" => new BmpEncoder { BitsPerPixel = BmpBitsPerPixel.Bit24, SupportTransparency = false },

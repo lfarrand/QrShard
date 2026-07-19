@@ -11,9 +11,9 @@ namespace QrShard;
 /// (padding around the code, fractional up/down scaling, cursor damage).
 /// </summary>
 [ExcludeFromCodeCoverage] // exercised via `qrshard test`; unit tests cover the codec itself
-internal static class SelfTest
+internal sealed class SelfTest(IShardEncoder encoder, IShardDecoder decoder) : ISelfTest
 {
-    public static bool Run()
+    public bool Run()
     {
         string root = Path.Combine(Path.GetTempPath(), "qrshard-selftest-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(root);
@@ -39,7 +39,7 @@ internal static class SelfTest
         return allPass;
     }
 
-    private static bool Case(string root, string name, byte[] content, EncodeOptions opt, double[] captureScales, bool damage = false)
+    private bool Case(string root, string name, byte[] content, EncodeOptions opt, double[] captureScales, bool damage = false)
     {
         Console.WriteLine($"\n=== {name} ({content.Length:N0} bytes) ===");
         string dir = Path.Combine(root, name.GetHashCode().ToString("x8"));
@@ -52,7 +52,7 @@ internal static class SelfTest
         try
         {
             string shardDir = Path.Combine(dir, "shards");
-            var result = Encoder.Encode(input, shardDir, opt);
+            var result = encoder.Encode(input, shardDir, opt);
             Console.WriteLine($"  encoded: {result.ImageCount} image(s), {result.Width}x{result.Height}, capacity {result.BytesPerImage:N0} B/image");
 
             pass &= Verify("exact round-trip", shardDir, dir, wantSha);
@@ -76,7 +76,7 @@ internal static class SelfTest
     }
 
     /// <summary>Encodes with cross-shard parity, deletes whole images, and verifies reconstruction.</summary>
-    private static bool RecoveryCase(string root)
+    private bool RecoveryCase(string root)
     {
         Console.WriteLine("\n=== cross-shard recovery (1.5 MB, 25% parity) ===");
         string dir = Path.Combine(root, "recovery");
@@ -89,7 +89,7 @@ internal static class SelfTest
         try
         {
             string shardDir = Path.Combine(dir, "shards");
-            var result = Encoder.Encode(input, shardDir, new EncodeOptions { RecoveryPercent = 25 });
+            var result = encoder.Encode(input, shardDir, new EncodeOptions { RecoveryPercent = 25 });
             Console.WriteLine($"  encoded: {result.DataImages} data + {result.ParityImages} parity, " +
                               $"tolerates {result.StripeParity} loss per {result.StripeData + result.StripeParity}");
 
@@ -100,7 +100,7 @@ internal static class SelfTest
             Console.WriteLine($"  deleted {result.StripeParity} whole data image(s)");
 
             string outPath = Path.Combine(dir, "restored.bin");
-            Decoder.DecodeFolder(Directory.EnumerateFiles(shardDir, "*.png"), outPath, _ => { });
+            decoder.DecodeFolder(Directory.EnumerateFiles(shardDir, "*.png"), outPath, _ => { });
             bool ok = SHA256.HashData(File.ReadAllBytes(outPath)).AsSpan().SequenceEqual(wantSha);
             Console.WriteLine($"  {(ok ? "PASS" : "FAIL")}: rebuilt from parity after image loss");
             return ok;
@@ -112,13 +112,13 @@ internal static class SelfTest
         }
     }
 
-    private static bool Verify(string label, string imageDir, string workDir, byte[] wantSha)
+    private bool Verify(string label, string imageDir, string workDir, byte[] wantSha)
     {
         var messages = new List<string>();
         try
         {
             string outPath = Path.Combine(workDir, $"restored-{Guid.NewGuid().ToString("N")[..8]}.bin");
-            Decoder.DecodeFolder(Directory.EnumerateFiles(imageDir, "*.png"), outPath, messages.Add);
+            decoder.DecodeFolder(Directory.EnumerateFiles(imageDir, "*.png"), outPath, messages.Add);
             byte[] gotSha = SHA256.HashData(File.ReadAllBytes(outPath));
             bool ok = gotSha.AsSpan().SequenceEqual(wantSha);
             Console.WriteLine($"  {(ok ? "PASS" : "FAIL")}: {label}");

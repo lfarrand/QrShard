@@ -68,10 +68,10 @@ public class StreamingTests
         using var tmp = new TempDir();
         byte[] content = TestData.Random(6_000_000, seed: 34);
         string input = tmp.WriteFile("big.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"), new EncodeOptions());
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), new EncodeOptions());
 
         string output = tmp.File("restored.bin");
-        Decoder.DecodeFolder(result.Files, output, _ => { });
+        new ShardDecoder().DecodeFolder(result.Files, output, _ => { });
         Assert.Equal(content, File.ReadAllBytes(output));
     }
 
@@ -81,14 +81,14 @@ public class StreamingTests
         using var tmp = new TempDir();
         byte[] content = TestData.CompressibleText(200_000);
         string input = tmp.WriteFile("text.txt", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"),
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"),
             new EncodeOptions { Width = 900, Height = 900, Compress = false });
 
-        var shard = Decoder.DecodeImage(result.Files[0]);
+        var shard = new ShardDecoder().DecodeImage(result.Files[0]);
         Assert.Equal(0, shard.Header.Flags & ShardHeader.FlagCompressed);
 
         string output = tmp.File("restored.txt");
-        Decoder.DecodeFolder(result.Files, output, _ => { });
+        new ShardDecoder().DecodeFolder(result.Files, output, _ => { });
         Assert.Equal(content, File.ReadAllBytes(output));
     }
 
@@ -99,13 +99,13 @@ public class StreamingTests
         using var tmp = new TempDir();
         byte[] content = TestData.Random(6_000_000, seed: 35);
         string input = tmp.WriteFile("big.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"),
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"),
             new EncodeOptions { RecoveryPercent = 20 });
         Assert.True(result.ParityImages >= 1);
 
         File.Delete(result.Files.First(f => !f.Contains("parity")));
         string output = tmp.File("restored.bin");
-        Decoder.DecodeFolder(result.Files.Where(File.Exists), output, _ => { });
+        new ShardDecoder().DecodeFolder(result.Files.Where(File.Exists), output, _ => { });
         Assert.Equal(content, File.ReadAllBytes(output));
     }
 }

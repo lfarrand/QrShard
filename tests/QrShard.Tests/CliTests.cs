@@ -10,7 +10,7 @@ public class CliTests
     {
         var stdout = new StringWriter();
         var stderr = new StringWriter();
-        int code = Cli.Run(args, stdout, stderr, settings);
+        int code = new Cli(settings).Run(args, stdout, stderr);
         return (code, stdout.ToString(), stderr.ToString());
     }
 
@@ -184,7 +184,7 @@ public class CliTests
         Assert.Equal(0, code);
         Assert.Contains("compression off", output);
 
-        var shard = Decoder.DecodeImage(Directory.GetFiles(shardDir, "*.png")[0]);
+        var shard = new ShardDecoder().DecodeImage(Directory.GetFiles(shardDir, "*.png")[0]);
         Assert.Equal(0, shard.Header.Flags & ShardHeader.FlagCompressed);
     }
 

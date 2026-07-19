@@ -14,12 +14,16 @@ namespace QrShard;
 /// unlucky loss patterns. A stripe holds at most 255 images total (the GF(2^8) limit); the encoder
 /// partitions large files into independent stripes.
 /// </summary>
-internal static class CrossShardFec
+internal sealed class CrossShardFec(Gf256 gf)
 {
     public const int MaxShardsPerStripe = 255;
 
+    public CrossShardFec() : this(new Gf256())
+    {
+    }
+
     /// <summary>Cauchy parity row i, data column j: 1 / (x_i ^ y_j), with disjoint x/y domains.</summary>
-    private static byte[][] ParityMatrix(int dataCount, int parityCount)
+    private byte[][] ParityMatrix(int dataCount, int parityCount)
     {
         var m = new byte[parityCount][];
         for (int i = 0; i < parityCount; i++)
@@ -29,7 +33,7 @@ internal static class CrossShardFec
             for (int j = 0; j < dataCount; j++)
             {
                 byte y = (byte)(parityCount + j); // data domain: parityCount .. parityCount+dataCount-1
-                m[i][j] = Gf256.Inv((byte)(x ^ y));
+                m[i][j] = gf.Inv((byte)(x ^ y));
             }
         }
         return m;
@@ -39,7 +43,7 @@ internal static class CrossShardFec
     /// Computes <paramref name="parityCount"/> parity shards from equal-length data shards.
     /// All shards (data and parity) share <paramref name="shardLen"/> bytes.
     /// </summary>
-    public static byte[][] Encode(IReadOnlyList<byte[]> dataShards, int parityCount, int shardLen)
+    public byte[][] Encode(IReadOnlyList<byte[]> dataShards, int parityCount, int shardLen)
     {
         int k = dataShards.Count;
         if (k < 1 || parityCount < 0)
@@ -55,7 +59,7 @@ internal static class CrossShardFec
         System.Threading.Tasks.Parallel.For(0, parityCount, i =>
         {
             for (int j = 0; j < k; j++)
-                Gf256.MulAdd(matrix[i][j], dataShards[j], parity[i]);
+                gf.MulAdd(matrix[i][j], dataShards[j], parity[i]);
         });
         return parity;
     }
@@ -66,7 +70,7 @@ internal static class CrossShardFec
     /// parity shards dataCount..dataCount+parityCount-1) or null if that shard is missing.
     /// Returns false if fewer than <paramref name="dataCount"/> shards survive.
     /// </summary>
-    public static bool TryReconstruct(byte[]?[] present, int dataCount, int parityCount, int shardLen, out byte[][] data)
+    public bool TryReconstruct(byte[]?[] present, int dataCount, int parityCount, int shardLen, out byte[][] data)
     {
         data = [];
         int available = present.Count(p => p is not null);
@@ -103,7 +107,7 @@ internal static class CrossShardFec
             picked++;
         }
 
-        if (!Gf256.Invert(decodeMatrix, dataCount))
+        if (!gf.Invert(decodeMatrix, dataCount))
             return false; // MDS guarantees this cannot happen; guard anyway
 
         // Recover each original data shard = inverted-row · surviving-shard-vector.
@@ -112,7 +116,7 @@ internal static class CrossShardFec
         {
             var outShard = new byte[shardLen];
             for (int j = 0; j < dataCount; j++)
-                Gf256.MulAdd(decodeMatrix[i][j], rhs[j], outShard);
+                gf.MulAdd(decodeMatrix[i][j], rhs[j], outShard);
             result[i] = outShard;
         });
 

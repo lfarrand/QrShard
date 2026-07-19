@@ -50,7 +50,7 @@ internal static class BenchPresets
         var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity);
         long capacity = layout.UsableBytes - ShardHeader.Size(PayloadName);
         int data = (int)Math.Max(1, (sizeBytes + capacity - 1) / capacity);
-        var (stripeData, stripeParity) = Encoder.PlanStripes(data, opt.RecoveryPercent);
+        var (stripeData, stripeParity) = new StripePlanner().PlanStripes(data, opt.RecoveryPercent);
         int stripes = stripeParity > 0 ? (data + stripeData - 1) / stripeData : 0;
         return (data, stripes * stripeParity);
     }

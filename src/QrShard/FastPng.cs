@@ -15,9 +15,13 @@ namespace QrShard;
 /// general-purpose image library solves a much broader problem than "serialize pixels we
 /// just rendered", and the PNG encode was the dominant cost of the whole encoder.
 /// </summary>
-internal static class FastPng
+internal sealed class FastPng(Crc crc)
 {
     private static readonly byte[] Signature = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    public FastPng() : this(new Crc())
+    {
+    }
 
     /// <param name="upFilter">
     /// True to apply the PNG "Up" filter to every row (ideal when rows repeat, i.e. cell size
@@ -27,7 +31,7 @@ internal static class FastPng
     /// Deflate level for the zlib stream (configurable via appsettings.json; the caller passes
     /// Fastest for unfiltered noise content, where higher levels cannot help).
     /// </param>
-    public static void Write(string path, ReadOnlySpan<Rgb24> pixels, int width, int height, bool upFilter, CompressionLevel level)
+    public void Write(string path, ReadOnlySpan<Rgb24> pixels, int width, int height, bool upFilter, CompressionLevel level)
     {
         using var fs = new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.None, 1 << 16);
         fs.Write(Signature);
@@ -44,7 +48,7 @@ internal static class FastPng
         long lengthPosition = fs.Position;
         Span<byte> scratch = stackalloc byte[4];
         fs.Write(scratch); // length placeholder
-        var idat = new ChunkBodyStream(fs);
+        var idat = new ChunkBodyStream(fs, crc);
         idat.Write("IDAT"u8);
 
         int rowBytes = width * 3;
@@ -91,7 +95,7 @@ internal static class FastPng
         WriteChunk(fs, "IEND", []);
     }
 
-    private static void WriteChunk(Stream stream, string type, ReadOnlySpan<byte> data)
+    private void WriteChunk(Stream stream, string type, ReadOnlySpan<byte> data)
     {
         Span<byte> header = stackalloc byte[8];
         BinaryPrimitives.WriteUInt32BigEndian(header, (uint)data.Length);
@@ -99,23 +103,23 @@ internal static class FastPng
         stream.Write(header);
         stream.Write(data);
 
-        uint crc = Crc.Crc32Append(Crc.Crc32Begin(), header[4..]);
-        crc = Crc.Crc32Finish(Crc.Crc32Append(crc, data));
+        uint chunkCrc = crc.Crc32Append(crc.Crc32Begin(), header[4..]);
+        chunkCrc = crc.Crc32Finish(crc.Crc32Append(chunkCrc, data));
         Span<byte> crcBytes = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(crcBytes, crc);
+        BinaryPrimitives.WriteUInt32BigEndian(crcBytes, chunkCrc);
         stream.Write(crcBytes);
     }
 
     /// <summary>Pass-through stream that accumulates the PNG chunk CRC over everything written.</summary>
-    private sealed class ChunkBodyStream(Stream inner) : Stream
+    private sealed class ChunkBodyStream(Stream inner, Crc crc32) : Stream
     {
-        private uint _crc = QrShard.Crc.Crc32Begin();
+        private uint _crc = crc32.Crc32Begin();
 
-        public uint Crc => QrShard.Crc.Crc32Finish(_crc);
+        public uint Crc => crc32.Crc32Finish(_crc);
 
         public override void Write(ReadOnlySpan<byte> buffer)
         {
-            _crc = QrShard.Crc.Crc32Append(_crc, buffer);
+            _crc = crc32.Crc32Append(_crc, buffer);
             inner.Write(buffer);
         }
 

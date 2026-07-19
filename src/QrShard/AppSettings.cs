@@ -117,13 +117,13 @@ internal sealed class AppSettings
                     throw Invalid("EncodeDefaults.EccParity", d.EccParity, $"an even number 0-{Fec.MaxParity}");
 
                 d.RecoveryPercent = ReadInt(defaults, "RecoveryPercent", d.RecoveryPercent);
-                if (d.RecoveryPercent is < 0 or > Encoder.MaxRecoveryPercent)
-                    throw Invalid("EncodeDefaults.RecoveryPercent", d.RecoveryPercent, $"0-{Encoder.MaxRecoveryPercent}");
+                if (d.RecoveryPercent is < 0 or > ShardEncoder.MaxRecoveryPercent)
+                    throw Invalid("EncodeDefaults.RecoveryPercent", d.RecoveryPercent, $"0-{ShardEncoder.MaxRecoveryPercent}");
 
                 string format = ReadString(defaults, "ImageFormat", d.ImageFormat);
                 try
                 {
-                    d.ImageFormat = ShardImageFormat.Normalize(format);
+                    d.ImageFormat = new ShardImageFormat().Normalize(format);
                 }
                 catch (ArgumentException)
                 {

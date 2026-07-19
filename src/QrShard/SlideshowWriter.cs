@@ -11,13 +11,13 @@ namespace QrShard;
 /// One file, images base64-embedded, opens in any browser on any OS. The HUD overlay hides
 /// automatically in fullscreen so it never damages a recorded shard ('h' toggles it back).
 /// </summary>
-internal static class Slideshow
+internal sealed class SlideshowWriter : ISlideshowWriter
 {
     public const int DefaultIntervalMs = 500;
     public const int MinIntervalMs = 100;
 
     /// <summary>Writes slideshow.html next to the shard images; returns its path.</summary>
-    public static string Write(string outDir, IReadOnlyList<string> imageFiles, int intervalMs)
+    public string Write(string outDir, IReadOnlyList<string> imageFiles, int intervalMs)
     {
         if (intervalMs < MinIntervalMs)
             throw new ArgumentException($"Slideshow interval must be at least {MinIntervalMs} ms.");

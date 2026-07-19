@@ -17,13 +17,13 @@ public class RecoveryTests
     {
         byte[] content = TestData.Random(size, seed);
         string input = tmp.WriteFile("input.bin", content);
-        return (content, Encoder.Encode(input, tmp.Sub("shards"), Opt(recovery)));
+        return (content, new ShardEncoder().Encode(input, tmp.Sub("shards"), Opt(recovery)));
     }
 
     private static byte[] Decode(TempDir tmp, IEnumerable<string> images)
     {
         string output = tmp.File($"out-{Guid.NewGuid().ToString("N")[..8]}.bin");
-        Decoder.DecodeFolder(images, output, _ => { });
+        new ShardDecoder().DecodeFolder(images, output, _ => { });
         return File.ReadAllBytes(output);
     }
 
@@ -155,7 +155,7 @@ public class RecoveryTests
 
         var messages = new List<string>();
         string output = tmp.File("verified.bin");
-        Decoder.DecodeFolder(result.Files.Where(File.Exists), output, messages.Add);
+        new ShardDecoder().DecodeFolder(result.Files.Where(File.Exists), output, messages.Add);
         Assert.Contains(messages, m => m.Contains("recovered") && m.Contains("from parity"));
         Assert.Contains(messages, m => m.Contains("SHA-256 verified"));
         Assert.Equal(content, File.ReadAllBytes(output));
@@ -183,7 +183,7 @@ public class RecoveryTests
     {
         foreach (int recovery in new[] { 1, 10, 25, 50, 100 })
         {
-            var (s, p) = Encoder.PlanStripes(10_000, recovery);
+            var (s, p) = new StripePlanner().PlanStripes(10_000, recovery);
             Assert.True(s + p <= CrossShardFec.MaxShardsPerStripe, $"recovery {recovery}: {s}+{p}");
             Assert.True(s >= 1 && p >= 1);
         }
@@ -191,5 +191,5 @@ public class RecoveryTests
 
     [Fact]
     public void PlanStripes_ZeroRecovery_IsDisabled() =>
-        Assert.Equal((0, 0), Encoder.PlanStripes(100, 0));
+        Assert.Equal((0, 0), new StripePlanner().PlanStripes(100, 0));
 }

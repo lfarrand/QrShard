@@ -22,14 +22,14 @@ public class CameraCaptureTests
     {
         byte[] content = TestData.Random(size, seed);
         string input = tmp.WriteFile("input.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"), Camera);
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), Camera);
         return (content, result.Files);
     }
 
     private static void AssertDecodes(TempDir tmp, IEnumerable<string> images, byte[] expected)
     {
         string output = tmp.File($"out-{Guid.NewGuid().ToString("N")[..8]}.bin");
-        Decoder.DecodeFolder(images, output, _ => { });
+        new ShardDecoder().DecodeFolder(images, output, _ => { });
         Assert.Equal(expected, File.ReadAllBytes(output));
     }
 
@@ -230,10 +230,10 @@ public class CameraCaptureTests
         using var tmp = new TempDir();
         byte[] content = TestData.Random(2_000, seed: 5);
         string input = tmp.WriteFile("input.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"),
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"),
             new EncodeOptions { Width = 900, Height = 900 });
         string photo = SimulateCameraCapture(result.Files[0], tmp.File("photo.jpg"), 4, 0.05);
-        Assert.Throws<ShardDecodeException>(() => Decoder.DecodeImage(photo));
+        Assert.Throws<ShardDecodeException>(() => new ShardDecoder().DecodeImage(photo));
     }
 
     // ---------- Building blocks ----------
@@ -283,6 +283,6 @@ public class CameraCaptureTests
     {
         var px = new Rgb24[400 * 400];
         Array.Fill(px, new Rgb24(220, 220, 220));
-        Assert.Null(CameraRectifier.TryRectify(new Bitmap(px, 400, 400)));
+        Assert.Null(new CameraRectifier().TryRectify(new Bitmap(px, 400, 400)));
     }
 }

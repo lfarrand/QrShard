@@ -17,7 +17,7 @@ public class DamageRecoveryTests
     {
         byte[] content = TestData.Random(size, seed: 77);
         string input = tmp.WriteFile("input.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"), opt ?? Fast);
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), opt ?? Fast);
         return (content, result.Files);
     }
 
@@ -50,7 +50,7 @@ public class DamageRecoveryTests
         string captured = Damage(files[0], tmp.File("cap.png"), img =>
             FillRect(img, new Rectangle(img.Width / 2 + 60, img.Height / 2, 22, 30), new Rgb24(255, 255, 255)));
 
-        var shard = Decoder.DecodeImage(captured);
+        var shard = new ShardDecoder().DecodeImage(captured);
         Assert.True(shard.CorrectedBytes > 0, "expected ECC corrections to be reported");
         Assert.Equal(content[..shard.Payload.Length], shard.Payload);
     }
@@ -63,7 +63,7 @@ public class DamageRecoveryTests
         string captured = Damage(files[0], tmp.File("cap.png"), img =>
             FillRect(img, new Rectangle(120, 200, 150, 40), new Rgb24(50, 120, 220)));
 
-        var shard = Decoder.DecodeImage(captured);
+        var shard = new ShardDecoder().DecodeImage(captured);
         Assert.True(shard.CorrectedBytes > 0);
         Assert.Equal(content[..shard.Payload.Length], shard.Payload);
     }
@@ -76,7 +76,7 @@ public class DamageRecoveryTests
         string captured = Damage(files[0], tmp.File("cap.png"), img =>
             FillRect(img, new Rectangle(150, 150, 400, 400), new Rgb24(128, 128, 128)));
 
-        var ex = Assert.Throws<ShardDecodeException>(() => Decoder.DecodeImage(captured));
+        var ex = Assert.Throws<ShardDecodeException>(() => new ShardDecoder().DecodeImage(captured));
         Assert.Contains("ecapture", ex.Message); // "Recapture it." / "Recapture this image."
     }
 
@@ -93,7 +93,7 @@ public class DamageRecoveryTests
                 Layout.Border, Layout.Border + layout.Gutter, layout.InnerW, 2 * layout.MetaH), new Rgb24(10, 10, 10));
         });
 
-        var shard = Decoder.DecodeImage(captured);
+        var shard = new ShardDecoder().DecodeImage(captured);
         Assert.Equal(content[..shard.Payload.Length], shard.Payload);
     }
 
@@ -110,7 +110,7 @@ public class DamageRecoveryTests
                 layout.InnerW, 2 * layout.MetaH), new Rgb24(240, 200, 40));
         });
 
-        var shard = Decoder.DecodeImage(captured);
+        var shard = new ShardDecoder().DecodeImage(captured);
         Assert.Equal(content[..shard.Payload.Length], shard.Payload);
     }
 
@@ -125,7 +125,7 @@ public class DamageRecoveryTests
         using (var img = Image.Load<Rgb24>(files[0]))
             img.SaveAsJpeg(jpegPath, new JpegEncoder { Quality = 95 });
 
-        var shard = Decoder.DecodeImage(jpegPath);
+        var shard = new ShardDecoder().DecodeImage(jpegPath);
         Assert.Equal(content[..shard.Payload.Length], shard.Payload);
     }
 
@@ -146,7 +146,7 @@ public class DamageRecoveryTests
             }
         });
 
-        var shard = Decoder.DecodeImage(captured);
+        var shard = new ShardDecoder().DecodeImage(captured);
         Assert.True(shard.CorrectedBytes > 0);
         Assert.Equal(content[..shard.Payload.Length], shard.Payload);
     }
@@ -157,7 +157,7 @@ public class DamageRecoveryTests
         using var tmp = new TempDir();
         byte[] content = TestData.Random(100_000, seed: 5);
         string input = tmp.WriteFile("input.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"), Fast);
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), Fast);
         Assert.True(result.Files.Count >= 2);
 
         string capDir = tmp.Sub("captures");
@@ -171,7 +171,7 @@ public class DamageRecoveryTests
         }
 
         string output = tmp.File("restored.bin");
-        Decoder.DecodeFolder(Directory.EnumerateFiles(capDir), output, _ => { });
+        new ShardDecoder().DecodeFolder(Directory.EnumerateFiles(capDir), output, _ => { });
         Assert.Equal(content, File.ReadAllBytes(output));
     }
 }
