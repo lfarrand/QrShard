@@ -17,9 +17,9 @@ internal sealed class SideTrace
 /// Traces the frame's edges in the original photo with subpixel precision, capturing per-point
 /// geometric residuals against the homography plus local black/white reference colors.
 /// </summary>
-internal static class FrameEdgeTracer
+internal sealed class FrameEdgeTracer : IFrameEdgeTracer
 {
-    public static SideTrace? TraceSide(Bitmap photo, CanvasGeometry geometry,
+    public SideTrace? TraceSide(Bitmap photo, CanvasGeometry geometry,
         Func<int, (double X, double Y)> canvasPoint, (double X, double Y) outwardNormal)
     {
         var trace = new SideTrace();

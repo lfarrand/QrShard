@@ -15,9 +15,9 @@ internal sealed class FinderCluster
 /// vertically through its center, and clusters agreeing hits. The minimum-module floor
 /// rejects the (much smaller) data cells.
 /// </summary>
-internal static class FinderDetector
+internal sealed class FinderDetector : IFinderDetector
 {
-    public static List<FinderCluster> FindCandidates(Bitmap photo, bool[] dark)
+    public List<FinderCluster> FindCandidates(Bitmap photo, bool[] dark)
     {
         int w = photo.Width, h = photo.Height;
         double minModule = Math.Max(3.0, Math.Min(w, h) / 400.0);

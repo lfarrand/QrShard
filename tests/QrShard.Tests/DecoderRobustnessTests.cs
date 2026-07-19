@@ -21,14 +21,14 @@ public class DecoderRobustnessTests
     {
         byte[] content = TestData.Random(size, seed);
         string input = tmp.WriteFile("input.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"), opt ?? Fast);
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), opt ?? Fast);
         return (content, result.Files);
     }
 
     private static void AssertDecodes(TempDir tmp, IEnumerable<string> images, byte[] expected)
     {
         string output = tmp.File($"out-{Guid.NewGuid().ToString("N")[..8]}.bin");
-        Decoder.DecodeFolder(images, output, _ => { });
+        new ShardDecoder().DecodeFolder(images, output, _ => { });
         Assert.Equal(expected, File.ReadAllBytes(output));
     }
 
@@ -128,7 +128,7 @@ public class DecoderRobustnessTests
             FillRect(img, new Rectangle(img.Width / 2, img.Height / 2, 24, 24), new Rgb24(1, 254, 3));
             return img.Clone();
         });
-        var ex = Assert.Throws<ShardDecodeException>(() => Decoder.DecodeImage(bad));
+        var ex = Assert.Throws<ShardDecodeException>(() => new ShardDecoder().DecodeImage(bad));
         Assert.Contains("CRC-32 mismatch", ex.Message);
     }
 
@@ -146,7 +146,7 @@ public class DecoderRobustnessTests
                 Layout.Border, Layout.Border + layout.InnerH - layout.Gutter - layout.MetaH, layout.InnerW, layout.MetaH), new Rgb24(0, 0, 0));
             return img.Clone();
         });
-        var ex = Assert.Throws<ShardDecodeException>(() => Decoder.DecodeImage(bad));
+        var ex = Assert.Throws<ShardDecodeException>(() => new ShardDecoder().DecodeImage(bad));
         Assert.Contains("metadata strip is unreadable", ex.Message);
     }
 
@@ -161,7 +161,7 @@ public class DecoderRobustnessTests
             FillRect(img, new Rectangle(0, 0, img.Width, Layout.Border), new Rgb24(255, 255, 255));
             return img.Clone();
         });
-        var ex = Assert.Throws<ShardDecodeException>(() => Decoder.DecodeImage(bad));
+        var ex = Assert.Throws<ShardDecodeException>(() => new ShardDecoder().DecodeImage(bad));
         Assert.Contains("frame", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -172,7 +172,7 @@ public class DecoderRobustnessTests
         string plain = tmp.File("plain.png");
         using (var img = new Image<Rgb24>(400, 400, new Rgb24(200, 200, 200)))
             img.SaveAsPng(plain);
-        Assert.Throws<ShardDecodeException>(() => Decoder.DecodeImage(plain));
+        Assert.Throws<ShardDecodeException>(() => new ShardDecoder().DecodeImage(plain));
     }
 
     // ---------- Shard set handling ----------
@@ -186,7 +186,7 @@ public class DecoderRobustnessTests
         var partial = files.Where((_, i) => i != 1); // drop part 2
 
         var ex = Assert.Throws<ShardDecodeException>(
-            () => Decoder.DecodeFolder(partial, tmp.File("out.bin"), _ => { }));
+            () => new ShardDecoder().DecodeFolder(partial, tmp.File("out.bin"), _ => { }));
         Assert.Contains("missing image(s) 2", ex.Message);
     }
 
@@ -211,7 +211,7 @@ public class DecoderRobustnessTests
 
         var messages = new List<string>();
         var ex = Assert.Throws<ShardDecodeException>(
-            () => Decoder.DecodeFolder(files, tmp.File("out.bin"), messages.Add));
+            () => new ShardDecoder().DecodeFolder(files, tmp.File("out.bin"), messages.Add));
         Assert.Contains("missing image(s) 1", ex.Message);
         Assert.Contains(messages, m => m.Contains("FAILED") && m.Contains("CRC-32"));
     }
@@ -223,14 +223,14 @@ public class DecoderRobustnessTests
         byte[] contentA = TestData.Random(20_000, seed: 1);
         byte[] contentB = TestData.Random(20_000, seed: 2);
         string shardDir = tmp.Sub("shards");
-        Encoder.Encode(tmp.WriteFile("a.bin", contentA), shardDir, Fast);
-        Encoder.Encode(tmp.WriteFile("b.bin", contentB), shardDir, Fast);
+        new ShardEncoder().Encode(tmp.WriteFile("a.bin", contentA), shardDir, Fast);
+        new ShardEncoder().Encode(tmp.WriteFile("b.bin", contentB), shardDir, Fast);
 
         string cwd = Environment.CurrentDirectory;
         Environment.CurrentDirectory = tmp.Sub("out");
         try
         {
-            var restored = Decoder.DecodeFolder(Directory.EnumerateFiles(shardDir, "*.png"), null, _ => { });
+            var restored = new ShardDecoder().DecodeFolder(Directory.EnumerateFiles(shardDir, "*.png"), null, _ => { });
             Assert.Equal(2, restored.Count);
             Assert.Equal(contentA, File.ReadAllBytes(restored.Single(r => r.FileName == "a.bin").OutputPath));
             Assert.Equal(contentB, File.ReadAllBytes(restored.Single(r => r.FileName == "b.bin").OutputPath));
@@ -246,11 +246,11 @@ public class DecoderRobustnessTests
     {
         using var tmp = new TempDir();
         string shardDir = tmp.Sub("shards");
-        Encoder.Encode(tmp.WriteFile("a.bin", TestData.Random(5_000, 1)), shardDir, Fast);
-        Encoder.Encode(tmp.WriteFile("b.bin", TestData.Random(5_000, 2)), shardDir, Fast);
+        new ShardEncoder().Encode(tmp.WriteFile("a.bin", TestData.Random(5_000, 1)), shardDir, Fast);
+        new ShardEncoder().Encode(tmp.WriteFile("b.bin", TestData.Random(5_000, 2)), shardDir, Fast);
 
         var ex = Assert.Throws<ShardDecodeException>(() =>
-            Decoder.DecodeFolder(Directory.EnumerateFiles(shardDir, "*.png"), tmp.File("out.bin"), _ => { }));
+            new ShardDecoder().DecodeFolder(Directory.EnumerateFiles(shardDir, "*.png"), tmp.File("out.bin"), _ => { }));
         Assert.Contains("multiple different files", ex.Message);
     }
 
@@ -265,7 +265,7 @@ public class DecoderRobustnessTests
         try
         {
             File.WriteAllBytes("input.bin", [1, 2, 3]); // pre-existing file with the original's name
-            var restored = Decoder.DecodeFolder(files, null, _ => { });
+            var restored = new ShardDecoder().DecodeFolder(files, null, _ => { });
             Assert.EndsWith("input.restored.bin", restored[0].OutputPath);
             Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes("input.bin"));
             Assert.Equal(content, File.ReadAllBytes(restored[0].OutputPath));

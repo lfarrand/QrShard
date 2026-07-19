@@ -4,9 +4,9 @@ namespace QrShard;
 /// Integral-image adaptive threshold: photos have illumination gradients (screen falloff,
 /// glare) that defeat a single global threshold.
 /// </summary>
-internal static class AdaptiveBinarizer
+internal sealed class AdaptiveBinarizer : IAdaptiveBinarizer
 {
-    public static bool[] Threshold(Bitmap photo)
+    public bool[] Threshold(Bitmap photo)
     {
         int w = photo.Width, h = photo.Height;
         var lum = new byte[w * h];

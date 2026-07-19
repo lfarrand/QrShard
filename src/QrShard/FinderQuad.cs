@@ -10,10 +10,10 @@ internal sealed record OrientedQuad(
 /// best form the finder rectangle, then resolves which corner is which via the encoder's
 /// orientation tick.
 /// </summary>
-internal static class QuadSelector
+internal sealed class QuadSelector : IQuadSelector
 {
     /// <summary>Chooses the four clusters that best form the finder rectangle (largest valid convex quad).</summary>
-    public static FinderQuad? ChooseQuad(List<FinderCluster> clusters)
+    public FinderQuad? ChooseQuad(List<FinderCluster> clusters)
     {
         var strong = clusters.Where(c => c.Count >= 2).OrderByDescending(c => c.Count).Take(12).ToList();
         if (strong.Count < 4)
@@ -87,7 +87,7 @@ internal static class QuadSelector
     /// edge from the top-left finder center, so exactly one of the four cyclic assignments
     /// shows dark there and light at the mirrored position near the top-right finder.
     /// </summary>
-    public static OrientedQuad? ResolveOrientation(Bitmap photo, bool[] dark, FinderQuad quad)
+    public OrientedQuad? ResolveOrientation(Bitmap photo, bool[] dark, FinderQuad quad)
     {
         OrientedQuad? resolved = null;
         for (int rot = 0; rot < 4; rot++)

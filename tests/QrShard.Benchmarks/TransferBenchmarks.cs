@@ -81,7 +81,7 @@ public class TransferBenchmarks
     {
         CommonSetup();
         _decodeShardDir = Path.Combine(_root, "shards");
-        Encoder.Encode(_inputPath, _decodeShardDir, _options);
+        new ShardEncoder().Encode(_inputPath, _decodeShardDir, _options);
     }
 
     [GlobalCleanup]
@@ -104,7 +104,7 @@ public class TransferBenchmarks
         _encodeOutDir = Path.Combine(_root, $"enc-{Guid.NewGuid().ToString("N")[..8]}");
 
     [Benchmark]
-    public int Encode() => Encoder.Encode(_inputPath, _encodeOutDir, _options).ImageCount;
+    public int Encode() => new ShardEncoder().Encode(_inputPath, _encodeOutDir, _options).ImageCount;
 
     [IterationCleanup(Target = nameof(Encode))]
     public void IterationCleanupEncode()
@@ -122,7 +122,7 @@ public class TransferBenchmarks
     [Benchmark]
     public long Decode()
     {
-        var restored = Decoder.DecodeFolder(
+        var restored = new ShardDecoder().DecodeFolder(
             Directory.EnumerateFiles(_decodeShardDir, "*.png"), _decodeOutPath, _ => { });
         return restored[0].Length;
     }

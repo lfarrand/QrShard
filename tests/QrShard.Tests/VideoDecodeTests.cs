@@ -18,7 +18,7 @@ public class VideoDecodeTests
     {
         byte[] content = TestData.Random(size, seed);
         string input = tmp.WriteFile("input.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"), opt ?? Fast);
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), opt ?? Fast);
         return (content, result.Files);
     }
 
@@ -182,15 +182,15 @@ public class VideoDecodeTests
         using var tmp = new TempDir();
         var (_, files) = Encode(tmp, opt: Fast with { RecoveryPercent = 25 });
         var scratch = new DecodeScratch();
-        var all = files.Select(f => Decoder.DecodeImage(f, scratch)).ToList();
+        var all = files.Select(f => new ShardDecoder().DecodeImage(f, scratch)).ToList();
         var data = all.Where(s => !s.Header.IsParity).ToList();
         var parity = all.Where(s => s.Header.IsParity).ToList();
         Assert.True(parity.Count >= 1);
 
-        Assert.True(Decoder.IsSetComplete(data));                                  // all data, no parity needed
-        Assert.False(Decoder.IsSetComplete(data.Skip(1).ToList()));                // one missing, no parity
-        Assert.True(Decoder.IsSetComplete(data.Skip(1).Concat(parity).ToList())); // parity covers the hole
-        Assert.False(Decoder.IsSetComplete([]));
+        Assert.True(new ParityReassembler().IsSetComplete(data));                                  // all data, no parity needed
+        Assert.False(new ParityReassembler().IsSetComplete(data.Skip(1).ToList()));                // one missing, no parity
+        Assert.True(new ParityReassembler().IsSetComplete(data.Skip(1).Concat(parity).ToList())); // parity covers the hole
+        Assert.False(new ParityReassembler().IsSetComplete([]));
     }
 
     // ---------- Slideshow generation ----------
@@ -200,7 +200,7 @@ public class VideoDecodeTests
     {
         using var tmp = new TempDir();
         var (_, files) = Encode(tmp, size: 30_000);
-        string path = Slideshow.Write(Path.GetDirectoryName(files[0])!, files, 350);
+        string path = new SlideshowWriter().Write(Path.GetDirectoryName(files[0])!, files, 350);
 
         string html = File.ReadAllText(path);
         Assert.Equal(files.Count, html.Split("data:image/png;base64,").Length - 1);
@@ -211,7 +211,7 @@ public class VideoDecodeTests
 
     [Fact]
     public void Slideshow_RejectsSillyIntervals() =>
-        Assert.Throws<ArgumentException>(() => Slideshow.Write(Path.GetTempPath(), [], 20));
+        Assert.Throws<ArgumentException>(() => new SlideshowWriter().Write(Path.GetTempPath(), [], 20));
 
     [Fact]
     public void Cli_EncodeVideo_WritesSlideshow()
@@ -220,7 +220,7 @@ public class VideoDecodeTests
         string input = tmp.WriteFile("f.bin", TestData.Random(30_000));
         string outDir = tmp.File("shards");
         var stdout = new StringWriter();
-        int code = Cli.Run(["encode", input, "-o", outDir, "-r", "900", "--video", "--interval", "250"], stdout, new StringWriter());
+        int code = new Cli().Run(["encode", input, "-o", outDir, "-r", "900", "--video", "--interval", "250"], stdout, new StringWriter());
         Assert.Equal(0, code);
         Assert.Contains("slideshow.html", stdout.ToString());
         Assert.Contains("250 ms/image", stdout.ToString());

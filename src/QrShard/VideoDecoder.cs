@@ -15,7 +15,9 @@ internal sealed record VideoDecodeStats(int FramesExamined, int FramesDecoded, i
 /// Torn mid-transition frames simply fail CRC/ECC and are skipped; the loop guarantees the
 /// same shard comes around again.
 /// </summary>
-internal sealed class VideoDecoder(IShardDecoder decoder, IFrameSource frameSource) : IVideoDecoder
+internal sealed class VideoDecoder(
+    IShardDecoder decoder, IFrameSource frameSource, IShardAssembler assembler,
+    IParityReassembler parityReassembler) : IVideoDecoder
 {
     private static readonly string[] VideoExtensions = [".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"];
 
@@ -23,7 +25,10 @@ internal sealed class VideoDecoder(IShardDecoder decoder, IFrameSource frameSour
     private const double DuplicateThreshold = 3.0;
 
     /// <summary>Default wiring for tests and non-DI callers.</summary>
-    public VideoDecoder() : this(new ShardDecoder(AppSettings.Current, new CameraRectifier()), new RecordingFrameSource()) { }
+    public VideoDecoder() : this(new ShardDecoder(), new RecordingFrameSource(),
+        new ShardAssembler(new ParityReassembler()), new ParityReassembler())
+    {
+    }
 
     public static bool IsVideoFile(string path) =>
         VideoExtensions.Contains(Path.GetExtension(path).ToLowerInvariant());
@@ -51,7 +56,7 @@ internal sealed class VideoDecoder(IShardDecoder decoder, IFrameSource frameSour
             $"collected {stats.ShardsCollected} shard(s){(stats.StoppedEarly ? ", stopped early — set complete" : "")}");
         if (shards.Count == 0)
             throw new ShardDecodeException("No decodable shard images were found in the video.");
-        return ShardAssembler.Assemble(shards, outputPath, log);
+        return assembler.Assemble(shards, outputPath, log);
     }
 
     // ---------- Shard collection with dedupe + early stop ----------
@@ -86,7 +91,7 @@ internal sealed class VideoDecoder(IShardDecoder decoder, IFrameSource frameSour
                         : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
                     log($"  ok      frame {examined}  ({which}, {shard.Payload.Length:N0} bytes)");
 
-                    if (ParityReassembler.IsSetComplete(shards))
+                    if (parityReassembler.IsSetComplete(shards))
                     {
                         stoppedEarly = true;
                         break;

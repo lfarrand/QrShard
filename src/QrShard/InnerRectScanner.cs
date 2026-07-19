@@ -3,14 +3,14 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace QrShard;
 
 /// <summary>Measures the frame's inner (white) edge with subpixel precision.</summary>
-internal static class InnerRectScanner
+internal sealed class InnerRectScanner : IInnerRectScanner
 {
     /// <summary>
     /// Scans inward from the frame's outer box to its inner (white) edge with subpixel precision:
     /// the dark-to-light luminance crossing is linearly interpolated, and the median over five
     /// scan lines per side rejects outliers. Precision here directly bounds far-edge cell drift.
     /// </summary>
-    public static InnerRect FindInnerRect(Bitmap bmp, PixelRect frame)
+    public InnerRect FindInnerRect(Bitmap bmp, PixelRect frame)
     {
         int[] ys = Enumerable.Range(0, 5).Select(i => frame.Y0 + frame.H * (3 + i) / 10).ToArray();
         int[] xs = Enumerable.Range(0, 5).Select(i => frame.X0 + frame.W * (3 + i) / 10).ToArray();

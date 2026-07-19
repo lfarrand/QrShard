@@ -4,14 +4,14 @@ namespace QrShard;
 /// Cross-shard-parity reassembly: reconstructs missing data images from parity images stripe
 /// by stripe, plus the completeness check that shares its stripe math.
 /// </summary>
-internal static class ParityReassembler
+internal sealed class ParityReassembler : IParityReassembler
 {
     /// <summary>
     /// True when every file in the shard set can be fully reassembled — all data images
     /// present, or (with cross-shard parity) every stripe holds at least StripeData of its
     /// StripeData+StripeParity images. Used by video decoding to stop consuming frames early.
     /// </summary>
-    public static bool IsSetComplete(IReadOnlyCollection<DecodedShard> shards)
+    public bool IsSetComplete(IReadOnlyCollection<DecodedShard> shards)
     {
         if (shards.Count == 0)
             return false;
@@ -58,7 +58,7 @@ internal static class ParityReassembler
     }
 
     /// <summary>Tolerates losing up to StripeParity images per stripe.</summary>
-    public static byte[] ReassembleWithParity(List<DecodedShard> shards, ShardHeader first, Action<string> log)
+    public byte[] ReassembleWithParity(List<DecodedShard> shards, ShardHeader first, Action<string> log)
     {
         int count = first.Count, s = first.StripeData, p = first.StripeParity;
         int stripes = (count + s - 1) / s;
@@ -146,7 +146,7 @@ internal static class ParityReassembler
         if (lastLen < 0 || lastLen > cap)
             throw new ShardDecodeException($"'{first.FileName}': reassembled length does not match expected {first.TotalLength:N0}.");
 
-        var data = new byte[first.TotalLength]; // offsets fit int: TotalLength <= Encoder.MaxFileBytes
+        var data = new byte[first.TotalLength]; // offsets fit int: TotalLength <= ShardEncoder.MaxFileBytes
         for (int i = 0; i < count; i++)
         {
             int len = i < count - 1 ? cap : (int)lastLen;

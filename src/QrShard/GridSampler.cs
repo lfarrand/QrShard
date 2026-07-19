@@ -3,9 +3,9 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace QrShard;
 
 /// <summary>Samples every data cell and classifies it against the measured palette.</summary>
-internal static class GridSampler
+internal sealed class GridSampler : IGridSampler
 {
-    public static byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette, DecodeScratch scratch)
+    public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette, DecodeScratch scratch)
     {
         double sx = inner.W / layout.InnerW;
         double sy = inner.H / layout.InnerH;

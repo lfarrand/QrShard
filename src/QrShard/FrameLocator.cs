@@ -4,10 +4,10 @@ namespace QrShard;
 /// Locates the shard's black locator frame in a capture: enumerates ring-shaped dark-component
 /// candidates and validates each against the metadata strip until one decodes.
 /// </summary>
-internal static class FrameLocator
+internal sealed class FrameLocator(IInnerRectScanner innerRectScanner, IStripReader stripReader) : IFrameLocator
 {
     /// <summary>The validated frame: its layout (from the metadata strip) and inner rectangle.</summary>
-    public static (Layout Layout, InnerRect Inner) Locate(Bitmap bmp, DecodeScratch scratch)
+    public (Layout Layout, InnerRect Inner) Locate(Bitmap bmp, DecodeScratch scratch)
     {
         // Several dark rings can plausibly be the locator frame (e.g. a dark desktop border
         // around the capture also forms a ring); try candidates largest-first until the
@@ -21,13 +21,13 @@ internal static class FrameLocator
             InnerRect inner;
             try
             {
-                inner = InnerRectScanner.FindInnerRect(bmp, frame);
+                inner = innerRectScanner.FindInnerRect(bmp, frame);
             }
             catch (ShardDecodeException)
             {
                 continue;
             }
-            var layout = StripReader.ReadMetadata(bmp, inner);
+            var layout = stripReader.ReadMetadata(bmp, inner);
             if (layout is not null)
                 return (layout, inner);
         }
@@ -39,7 +39,7 @@ internal static class FrameLocator
     /// square, ring-shaped (low fill density), and covers its own bounding-box edges.
     /// Returned largest-first; the caller validates each against the metadata strip.
     /// </summary>
-    public static List<PixelRect> FindFrameCandidates(Bitmap bmp, bool[] visited)
+    private static List<PixelRect> FindFrameCandidates(Bitmap bmp, bool[] visited)
     {
         int w = bmp.Width, h = bmp.Height;
         var stack = new Stack<int>();

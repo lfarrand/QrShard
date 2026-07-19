@@ -21,12 +21,12 @@ public class ImageFormatTests
         using var tmp = new TempDir();
         byte[] content = TestData.Random(25_000, seed: format.GetHashCode());
         string input = tmp.WriteFile("input.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"), Fast with { ImageFormat = format });
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), Fast with { ImageFormat = format });
 
         Assert.All(result.Files, f => Assert.EndsWith("." + format, f));
 
         string output = tmp.File("restored.bin");
-        Decoder.DecodeFolder(result.Files, output, _ => { });
+        new ShardDecoder().DecodeFolder(result.Files, output, _ => { });
         Assert.Equal(content, File.ReadAllBytes(output));
     }
 
@@ -39,7 +39,7 @@ public class ImageFormatTests
         using var tmp = new TempDir();
         byte[] content = TestData.Random(20_000, seed: 9);
         string input = tmp.WriteFile("input.bin", content);
-        var result = Encoder.Encode(input, tmp.Sub("shards"), Fast with { ImageFormat = format });
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), Fast with { ImageFormat = format });
 
         string damaged = tmp.File("damaged." + format);
         using (var img = Image.Load<Rgb24>(result.Files[0]))
@@ -56,7 +56,7 @@ public class ImageFormatTests
             img.Save(damaged);
         }
 
-        var shard = Decoder.DecodeImage(damaged);
+        var shard = new ShardDecoder().DecodeImage(damaged);
         Assert.True(shard.CorrectedBytes > 0);
         Assert.Equal(content[..shard.Payload.Length], shard.Payload);
     }

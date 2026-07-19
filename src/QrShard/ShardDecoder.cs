@@ -9,8 +9,17 @@ namespace QrShard;
 /// composes (frame location, strip reading, grid sampling, FEC, reassembly) are pure static
 /// components; this class carries the injected configuration and camera dependency.
 /// </summary>
-internal sealed class ShardDecoder(AppSettings settings, ICameraRectifier cameraRectifier) : IShardDecoder
+internal sealed class ShardDecoder(
+    AppSettings settings, ICameraRectifier cameraRectifier, IFrameLocator frameLocator,
+    IStripReader stripReader, IGridSampler gridSampler, IShardAssembler assembler) : IShardDecoder
 {
+    /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
+    public ShardDecoder() : this(
+        AppSettings.Current, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
+        new StripReader(), new GridSampler(), new ShardAssembler(new ParityReassembler()))
+    {
+    }
+
     public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log)
     {
         var ordered = imagePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
@@ -62,8 +71,10 @@ internal sealed class ShardDecoder(AppSettings settings, ICameraRectifier camera
         if (shards.Count == 0)
             throw new ShardDecodeException("No decodable shard images were found.");
 
-        return ShardAssembler.Assemble(shards, outputPath, log);
+        return assembler.Assemble(shards, outputPath, log);
     }
+
+    public DecodedShard DecodeImage(string path) => DecodeImage(path, new DecodeScratch());
 
     public DecodedShard DecodeImage(string path, DecodeScratch scratch)
     {
@@ -120,9 +131,9 @@ internal sealed class ShardDecoder(AppSettings settings, ICameraRectifier camera
 
     public DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path)
     {
-        var (layout, inner) = FrameLocator.Locate(bmp, scratch);
-        var palette = StripReader.ReadPalette(bmp, inner, layout);
-        byte[] cells = GridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch);
+        var (layout, inner) = frameLocator.Locate(bmp, scratch);
+        var palette = stripReader.ReadPalette(bmp, inner, layout);
+        byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch);
 
         byte[] stream;
         int correctedBytes = 0;

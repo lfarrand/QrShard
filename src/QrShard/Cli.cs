@@ -4,12 +4,13 @@ namespace QrShard;
 
 /// <summary>Command handlers with their dependencies resolved from the composition root.</summary>
 internal sealed record CliServices(
-    IShardEncoder Encoder, IShardDecoder Decoder, IVideoDecoder VideoDecoder, ISlideshowWriter Slideshow);
+    IShardEncoder Encoder, IShardDecoder Decoder, IVideoDecoder VideoDecoder,
+    ISlideshowWriter Slideshow, ISelfTest SelfTest);
 
 /// <summary>Command-line interface, separated from Program for testability.</summary>
-internal static class Cli
+internal sealed class Cli(AppSettings? settings = null)
 {
-    public static int Run(string[] args, TextWriter? stdout = null, TextWriter? stderr = null, AppSettings? settings = null)
+    public int Run(string[] args, TextWriter? stdout = null, TextWriter? stderr = null)
     {
         var @out = stdout ?? Console.Out;
         var err = stderr ?? Console.Error;
@@ -21,7 +22,8 @@ internal static class Cli
                 provider.GetRequiredService<IShardEncoder>(),
                 provider.GetRequiredService<IShardDecoder>(),
                 provider.GetRequiredService<IVideoDecoder>(),
-                provider.GetRequiredService<ISlideshowWriter>());
+                provider.GetRequiredService<ISlideshowWriter>(),
+                provider.GetRequiredService<ISelfTest>());
             return RunCore(args, @out, err, cfg, services);
         }
         catch (ShardDecodeException ex)
@@ -88,7 +90,7 @@ internal static class Cli
 
                 if (flags.Contains("--video"))
                 {
-                    int intervalMs = GetInt(named, "-i", "--interval", Slideshow.DefaultIntervalMs);
+                    int intervalMs = GetInt(named, "-i", "--interval", SlideshowWriter.DefaultIntervalMs);
                     string slideshow = services.Slideshow.Write(outDir, result.Files, intervalMs);
                     @out.WriteLine($"Slideshow: {slideshow} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
                     @out.WriteLine("  Open it in a browser, press F11, and record the screen for at least one full cycle.");
@@ -153,7 +155,7 @@ internal static class Cli
             }
 
             case "test":
-                return SelfTest.Run() ? 0 : 1;
+                return services.SelfTest.Run() ? 0 : 1;
 
             default:
                 return Help(@out, err, $"unknown command: {args[0]}");

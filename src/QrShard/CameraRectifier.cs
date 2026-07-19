@@ -21,23 +21,32 @@ internal sealed record CanvasGeometry(Homography H, int Width, int Height, doubl
 /// rectified pixel per channel (vignette, glare gradients, white-balance shifts). If refinement
 /// cannot lock onto the frame, the phase-1 homography result is used as-is.
 /// </summary>
-internal sealed class CameraRectifier : ICameraRectifier
+internal sealed class CameraRectifier(
+    IAdaptiveBinarizer binarizer, IFinderDetector finderDetector, IQuadSelector quadSelector,
+    ICoarseFrameScanner coarseFrameScanner, IFrameEdgeTracer edgeTracer) : ICameraRectifier
 {
     private const int MaxCanvasDimension = 12000;
+
+    /// <summary>Default wiring for tests and non-DI callers.</summary>
+    public CameraRectifier() : this(
+        new AdaptiveBinarizer(), new FinderDetector(), new QuadSelector(),
+        new CoarseFrameScanner(), new FrameEdgeTracer())
+    {
+    }
 
     /// <summary>Rectified bitmap, or null when the image carries no detectable finder patterns.</summary>
     public Bitmap? TryRectify(Bitmap photo)
     {
-        bool[] dark = AdaptiveBinarizer.Threshold(photo);
-        var clusters = FinderDetector.FindCandidates(photo, dark);
+        bool[] dark = binarizer.Threshold(photo);
+        var clusters = finderDetector.FindCandidates(photo, dark);
         if (clusters.Count < 4)
             return null;
 
-        var quad = QuadSelector.ChooseQuad(clusters);
+        var quad = quadSelector.ChooseQuad(clusters);
         if (quad is null)
             return null;
 
-        var oriented = QuadSelector.ResolveOrientation(photo, dark, quad);
+        var oriented = quadSelector.ResolveOrientation(photo, dark, quad);
         if (oriented is null)
             return null;
 
@@ -91,18 +100,18 @@ internal sealed class CameraRectifier : ICameraRectifier
     /// normalization. Returns null (caller keeps the phase-1 result) when the frame cannot be
     /// traced confidently.
     /// </summary>
-    private static Bitmap? TryRefine(Bitmap photo, Bitmap coarse, CanvasGeometry geometry)
+    private Bitmap? TryRefine(Bitmap photo, Bitmap coarse, CanvasGeometry geometry)
     {
-        var box = CoarseFrameScanner.FindFrameBox(coarse, geometry.Module);
+        var box = coarseFrameScanner.FindFrameBox(coarse, geometry.Module);
         if (box is null)
             return null;
         var (bx0, by0, bx1, by1) = box.Value;
 
         const int n = SideTrace.SamplesPerSide;
-        var top = FrameEdgeTracer.TraceSide(photo, geometry, i => (CameraMath.Lerp(bx0, bx1, (i + 0.5) / n), by0), (0, -1));
-        var bottom = FrameEdgeTracer.TraceSide(photo, geometry, i => (CameraMath.Lerp(bx0, bx1, (i + 0.5) / n), by1), (0, 1));
-        var left = FrameEdgeTracer.TraceSide(photo, geometry, i => (bx0, CameraMath.Lerp(by0, by1, (i + 0.5) / n)), (-1, 0));
-        var right = FrameEdgeTracer.TraceSide(photo, geometry, i => (bx1, CameraMath.Lerp(by0, by1, (i + 0.5) / n)), (1, 0));
+        var top = edgeTracer.TraceSide(photo, geometry, i => (CameraMath.Lerp(bx0, bx1, (i + 0.5) / n), by0), (0, -1));
+        var bottom = edgeTracer.TraceSide(photo, geometry, i => (CameraMath.Lerp(bx0, bx1, (i + 0.5) / n), by1), (0, 1));
+        var left = edgeTracer.TraceSide(photo, geometry, i => (bx0, CameraMath.Lerp(by0, by1, (i + 0.5) / n)), (-1, 0));
+        var right = edgeTracer.TraceSide(photo, geometry, i => (bx1, CameraMath.Lerp(by0, by1, (i + 0.5) / n)), (1, 0));
         if (top is null || bottom is null || left is null || right is null)
             return null;
 

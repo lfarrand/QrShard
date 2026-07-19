@@ -5,5 +5,5 @@ namespace QrShard;
 [ExcludeFromCodeCoverage]
 internal static class Program
 {
-    private static int Main(string[] args) => Cli.Run(args);
+    private static int Main(string[] args) => new Cli().Run(args);
 }

@@ -5,9 +5,9 @@ namespace QrShard;
 /// bars from outside inward. Deliberately loose (bowed edges under lens distortion don't
 /// form clean rows) — every edge sample re-searches around it in the photo.
 /// </summary>
-internal static class CoarseFrameScanner
+internal sealed class CoarseFrameScanner : ICoarseFrameScanner
 {
-    public static (double X0, double Y0, double X1, double Y1)? FindFrameBox(Bitmap coarse, double module)
+    public (double X0, double Y0, double X1, double Y1)? FindFrameBox(Bitmap coarse, double module)
     {
         int w = coarse.Width, h = coarse.Height;
         // Finder centers sit at (8m, 8m)-style margins by canvas construction; the content

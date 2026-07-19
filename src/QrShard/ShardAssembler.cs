@@ -4,10 +4,10 @@ using System.Security.Cryptography;
 namespace QrShard;
 
 /// <summary>Reassembles decoded shards into output files (contiguous path + shared plumbing).</summary>
-internal static class ShardAssembler
+internal sealed class ShardAssembler(IParityReassembler parityReassembler) : IShardAssembler
 {
     /// <summary>Reassembles already-decoded shards into output file(s). Shared by folder and video decoding.</summary>
-    public static List<RestoredFile> Assemble(List<DecodedShard> shards, string? outputPath, Action<string> log)
+    public List<RestoredFile> Assemble(List<DecodedShard> shards, string? outputPath, Action<string> log)
     {
         var groups = shards.GroupBy(s => s.Header.FileId).ToList();
         if (outputPath is not null && groups.Count > 1)
@@ -19,7 +19,7 @@ internal static class ShardAssembler
         return restored;
     }
 
-    private static RestoredFile Reassemble(List<DecodedShard> shards, string? outputPath, Action<string> log)
+    private RestoredFile Reassemble(List<DecodedShard> shards, string? outputPath, Action<string> log)
     {
         var first = shards[0].Header;
         int count = first.Count;
@@ -28,11 +28,11 @@ internal static class ShardAssembler
                 throw new ShardDecodeException($"Inconsistent shard set for '{first.FileName}': image counts differ.");
 
         // Both reassembly paths allocate the exact output size up front, so bound it first.
-        if (first.TotalLength is < 0 or > Encoder.MaxFileBytes || first.OriginalLength is < 0 or > Encoder.MaxFileBytes)
+        if (first.TotalLength is < 0 or > ShardEncoder.MaxFileBytes || first.OriginalLength is < 0 or > ShardEncoder.MaxFileBytes)
             throw new ShardDecodeException($"'{first.FileName}': shard header declares an implausible file size.");
 
         byte[] data = first.StripeParity > 0
-            ? ParityReassembler.ReassembleWithParity(shards, first, log)
+            ? parityReassembler.ReassembleWithParity(shards, first, log)
             : ReassembleContiguous(shards, first);
 
         if ((first.Flags & ShardHeader.FlagCompressed) != 0)
