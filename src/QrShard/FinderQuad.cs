@@ -10,8 +10,12 @@ internal sealed record OrientedQuad(
 /// best form the finder rectangle, then resolves which corner is which via the encoder's
 /// orientation tick.
 /// </summary>
-internal sealed class QuadSelector : IQuadSelector
+internal sealed class QuadSelector(CameraMath math) : IQuadSelector
 {
+    public QuadSelector() : this(new CameraMath())
+    {
+    }
+
     /// <summary>Chooses the four clusters that best form the finder rectangle (largest valid convex quad).</summary>
     public FinderQuad? ChooseQuad(List<FinderCluster> clusters)
     {
@@ -35,8 +39,8 @@ internal sealed class QuadSelector : IQuadSelector
             if (pts is null)
                 continue;
 
-            double e0 = CameraMath.Dist(pts[0], pts[1]), e1 = CameraMath.Dist(pts[1], pts[2]);
-            double e2 = CameraMath.Dist(pts[2], pts[3]), e3 = CameraMath.Dist(pts[3], pts[0]);
+            double e0 = math.Dist(pts[0], pts[1]), e1 = math.Dist(pts[1], pts[2]);
+            double e2 = math.Dist(pts[2], pts[3]), e3 = math.Dist(pts[3], pts[0]);
             double avgModule = set.Average(s => s.Module);
             if (Math.Min(e0, e2) * 1.8 < Math.Max(e0, e2) || Math.Min(e1, e3) * 1.8 < Math.Max(e1, e3))
                 continue; // opposite edges wildly different — not a perspective view of a rectangle
@@ -97,7 +101,7 @@ internal sealed class QuadSelector : IQuadSelector
             var br = quad.Points[(rot + 2) % 4];
             var bl = quad.Points[(rot + 3) % 4];
 
-            double topLen = CameraMath.Dist(tl, tr);
+            double topLen = math.Dist(tl, tr);
             if (topLen < 1)
                 continue;
             double step = Layout.OrientationTickOffsetModules * quad.Module / topLen;

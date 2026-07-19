@@ -11,12 +11,14 @@ namespace QrShard;
 /// </summary>
 internal sealed class ShardDecoder(
     AppSettings settings, ICameraRectifier cameraRectifier, IFrameLocator frameLocator,
-    IStripReader stripReader, IGridSampler gridSampler, IShardAssembler assembler) : IShardDecoder
+    IStripReader stripReader, IGridSampler gridSampler, IShardAssembler assembler,
+    Fec fec, Crc crc) : IShardDecoder
 {
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
     public ShardDecoder() : this(
         AppSettings.Current, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
-        new StripReader(), new GridSampler(), new ShardAssembler(new ParityReassembler()))
+        new StripReader(), new GridSampler(), new ShardAssembler(new ParityReassembler()),
+        new Fec(), new Crc())
     {
     }
 
@@ -140,7 +142,7 @@ internal sealed class ShardDecoder(
         if (layout.EccParity > 0)
         {
             stream = scratch.Recovered(layout.CodewordCount * Fec.DataLength(layout.EccParity));
-            if (!Fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes))
+            if (!fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes))
                 throw new ShardDecodeException("Damage exceeds the error-correction capacity of this image. Recapture it.");
         }
         else
@@ -152,7 +154,7 @@ internal sealed class ShardDecoder(
         if (headerLen + header.PayloadLength > stream.Length)
             throw new ShardDecodeException("Shard header declares more payload than the image holds.");
         byte[] payload = stream[headerLen..(headerLen + header.PayloadLength)];
-        if (Crc.Crc32(payload) != header.PayloadCrc32)
+        if (crc.Crc32(payload) != header.PayloadCrc32)
             throw new ShardDecodeException($"Payload CRC-32 mismatch (part {header.Index + 1}/{header.Count}). Recapture this image.");
         return new DecodedShard(header, payload, path, layout.EccParity, correctedBytes);
     }

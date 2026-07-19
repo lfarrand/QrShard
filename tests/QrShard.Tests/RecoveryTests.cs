@@ -183,7 +183,7 @@ public class RecoveryTests
     {
         foreach (int recovery in new[] { 1, 10, 25, 50, 100 })
         {
-            var (s, p) = ShardEncoder.PlanStripes(10_000, recovery);
+            var (s, p) = new StripePlanner().PlanStripes(10_000, recovery);
             Assert.True(s + p <= CrossShardFec.MaxShardsPerStripe, $"recovery {recovery}: {s}+{p}");
             Assert.True(s >= 1 && p >= 1);
         }
@@ -191,5 +191,5 @@ public class RecoveryTests
 
     [Fact]
     public void PlanStripes_ZeroRecovery_IsDisabled() =>
-        Assert.Equal((0, 0), ShardEncoder.PlanStripes(100, 0));
+        Assert.Equal((0, 0), new StripePlanner().PlanStripes(100, 0));
 }

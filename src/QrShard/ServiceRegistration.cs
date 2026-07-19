@@ -2,16 +2,24 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace QrShard;
 
-/// <summary>
-/// Composition root: the one place that wires interfaces to implementations. DI lives at this
-/// level only — the numeric primitives (Gf256, Fec, Crc, BitStream, Homography, CameraMath,
-/// FastPng) remain static pure functions, so testing seams cost nothing in the hot loops.
-/// </summary>
+/// <summary>Composition root: the one place that wires interfaces to implementations.</summary>
 internal static class ServiceRegistration
 {
     public static ServiceProvider BuildProvider(AppSettings settings) =>
         new ServiceCollection()
             .AddSingleton(settings)
+            // Codec and raster primitives (registered as concrete sealed types: their calls sit
+            // in hot loops, and non-virtual calls on concrete receivers inline like statics did)
+            .AddSingleton<Gf256>()
+            .AddSingleton<ReedSolomon>()
+            .AddSingleton<Fec>()
+            .AddSingleton<CrossShardFec>()
+            .AddSingleton<Crc>()
+            .AddSingleton<BitStream>()
+            .AddSingleton<Palette>()
+            .AddSingleton<FastPng>()
+            .AddSingleton<ShardImageFormat>()
+            .AddSingleton<CameraMath>()
             // Decode pipeline
             .AddSingleton<IInnerRectScanner, InnerRectScanner>()
             .AddSingleton<IStripReader, StripReader>()
@@ -31,6 +39,9 @@ internal static class ServiceRegistration
             .AddSingleton<IFrameSource, RecordingFrameSource>()
             .AddSingleton<IVideoDecoder, VideoDecoder>()
             // Encode + tooling
+            .AddSingleton<IPayloadPreparer, PayloadPreparer>()
+            .AddSingleton<IStripePlanner, StripePlanner>()
+            .AddSingleton<IShardRenderer, ShardRenderer>()
             .AddSingleton<IShardEncoder, ShardEncoder>()
             .AddSingleton<ISlideshowWriter, SlideshowWriter>()
             .AddSingleton<ISelfTest, SelfTest>()

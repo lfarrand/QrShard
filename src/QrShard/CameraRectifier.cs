@@ -23,14 +23,14 @@ internal sealed record CanvasGeometry(Homography H, int Width, int Height, doubl
 /// </summary>
 internal sealed class CameraRectifier(
     IAdaptiveBinarizer binarizer, IFinderDetector finderDetector, IQuadSelector quadSelector,
-    ICoarseFrameScanner coarseFrameScanner, IFrameEdgeTracer edgeTracer) : ICameraRectifier
+    ICoarseFrameScanner coarseFrameScanner, IFrameEdgeTracer edgeTracer, CameraMath math) : ICameraRectifier
 {
     private const int MaxCanvasDimension = 12000;
 
     /// <summary>Default wiring for tests and non-DI callers.</summary>
     public CameraRectifier() : this(
         new AdaptiveBinarizer(), new FinderDetector(), new QuadSelector(),
-        new CoarseFrameScanner(), new FrameEdgeTracer())
+        new CoarseFrameScanner(), new FrameEdgeTracer(), new CameraMath())
     {
     }
 
@@ -55,13 +55,13 @@ internal sealed class CameraRectifier(
         return TryRefine(photo, coarse, geometry) ?? coarse;
     }
 
-    private static CanvasGeometry BuildGeometry(OrientedQuad q)
+    private CanvasGeometry BuildGeometry(OrientedQuad q)
     {
         // Canvas geometry: finder centers at the corners of a (margin-inset) rectangle whose
         // size comes from the photographed edge lengths, so canvas scale ≈ photo scale and no
         // resolution is thrown away. Downstream tolerates unequal x/y scale by design.
-        double wc = (CameraMath.Dist(q.Tl, q.Tr) + CameraMath.Dist(q.Bl, q.Br)) / 2;
-        double hc = (CameraMath.Dist(q.Tl, q.Bl) + CameraMath.Dist(q.Tr, q.Br)) / 2;
+        double wc = (math.Dist(q.Tl, q.Tr) + math.Dist(q.Bl, q.Br)) / 2;
+        double hc = (math.Dist(q.Tl, q.Bl) + math.Dist(q.Tr, q.Br)) / 2;
         double margin = 8 * q.Module;
 
         double scale = Math.Min(1.0, MaxCanvasDimension / Math.Max(wc + 2 * margin, hc + 2 * margin));
@@ -108,14 +108,14 @@ internal sealed class CameraRectifier(
         var (bx0, by0, bx1, by1) = box.Value;
 
         const int n = SideTrace.SamplesPerSide;
-        var top = edgeTracer.TraceSide(photo, geometry, i => (CameraMath.Lerp(bx0, bx1, (i + 0.5) / n), by0), (0, -1));
-        var bottom = edgeTracer.TraceSide(photo, geometry, i => (CameraMath.Lerp(bx0, bx1, (i + 0.5) / n), by1), (0, 1));
-        var left = edgeTracer.TraceSide(photo, geometry, i => (bx0, CameraMath.Lerp(by0, by1, (i + 0.5) / n)), (-1, 0));
-        var right = edgeTracer.TraceSide(photo, geometry, i => (bx1, CameraMath.Lerp(by0, by1, (i + 0.5) / n)), (1, 0));
+        var top = edgeTracer.TraceSide(photo, geometry, i => (math.Lerp(bx0, bx1, (i + 0.5) / n), by0), (0, -1));
+        var bottom = edgeTracer.TraceSide(photo, geometry, i => (math.Lerp(bx0, bx1, (i + 0.5) / n), by1), (0, 1));
+        var left = edgeTracer.TraceSide(photo, geometry, i => (bx0, math.Lerp(by0, by1, (i + 0.5) / n)), (-1, 0));
+        var right = edgeTracer.TraceSide(photo, geometry, i => (bx1, math.Lerp(by0, by1, (i + 0.5) / n)), (1, 0));
         if (top is null || bottom is null || left is null || right is null)
             return null;
 
-        var map = new RefinedMap(geometry.H, bx0, by0, bx1, by1, top, bottom, left, right);
+        var map = new RefinedMap(math, geometry.H, bx0, by0, bx1, by1, top, bottom, left, right);
         return WarpRefined(photo, map, geometry.Width, geometry.Height);
     }
 

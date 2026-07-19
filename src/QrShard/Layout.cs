@@ -143,7 +143,7 @@ internal sealed class Layout
         bits.Write((uint)InnerH, 16);
         bits.Write((uint)EccParity, 8);
         byte[] payload = bits.ToArray(); // 14 bytes
-        bits.Write(Crc.Crc16Ccitt(payload), 16);
+        bits.Write(new Crc().Crc16Ccitt(payload), 16);
         return bits.ToArray(); // 16 bytes = 128 module bits
     }
 
@@ -168,7 +168,7 @@ internal sealed class Layout
         int innerH = (int)reader.Read(16);
         int eccParity = (int)reader.Read(8);
         ushort crc = (ushort)reader.Read(16);
-        if (crc != Crc.Crc16Ccitt(bytes.AsSpan(0, 14)))
+        if (crc != new Crc().Crc16Ccitt(bytes.AsSpan(0, 14)))
             return null;
         if (bitsPerCell is < Palette.MinBits or > Palette.MaxBits || gridW < 1 || gridH < 1 || cellPx < 1 || metaH < 1)
             return null;

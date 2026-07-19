@@ -1,7 +1,7 @@
 namespace QrShard;
 
 /// <summary>CRC implementations used for image payload (CRC-32/IEEE) and metadata strip (CRC-16/CCITT).</summary>
-internal static class Crc
+internal sealed class Crc
 {
     private static readonly uint[] Table32 = BuildTable32();
 
@@ -18,21 +18,21 @@ internal static class Crc
         return table;
     }
 
-    public static uint Crc32(ReadOnlySpan<byte> data) => Crc32Finish(Crc32Append(Crc32Begin(), data));
+    public uint Crc32(ReadOnlySpan<byte> data) => Crc32Finish(Crc32Append(Crc32Begin(), data));
 
     // Incremental CRC-32 (for streamed writers, e.g. the PNG chunk CRC).
-    public static uint Crc32Begin() => 0xFFFFFFFFu;
+    public uint Crc32Begin() => 0xFFFFFFFFu;
 
-    public static uint Crc32Append(uint state, ReadOnlySpan<byte> data)
+    public uint Crc32Append(uint state, ReadOnlySpan<byte> data)
     {
         foreach (byte b in data)
             state = Table32[(state ^ b) & 0xFF] ^ (state >> 8);
         return state;
     }
 
-    public static uint Crc32Finish(uint state) => state ^ 0xFFFFFFFFu;
+    public uint Crc32Finish(uint state) => state ^ 0xFFFFFFFFu;
 
-    public static ushort Crc16Ccitt(ReadOnlySpan<byte> data)
+    public ushort Crc16Ccitt(ReadOnlySpan<byte> data)
     {
         ushort crc = 0xFFFF;
         foreach (byte b in data)

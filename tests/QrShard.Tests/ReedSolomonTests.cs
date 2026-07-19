@@ -8,7 +8,7 @@ public class ReedSolomonTests
     {
         var cw = new byte[length];
         new Random(seed).NextBytes(cw.AsSpan(0, length - parity));
-        ReedSolomon.Encode(cw.AsSpan(0, length - parity), cw.AsSpan(length - parity));
+        new ReedSolomon().Encode(cw.AsSpan(0, length - parity), cw.AsSpan(length - parity));
         return cw;
     }
 
@@ -22,7 +22,7 @@ public class ReedSolomonTests
     {
         byte[] cw = MakeCodeword(255, parity, seed: parity);
         byte[] original = [.. cw];
-        Assert.True(ReedSolomon.TryDecode(cw, parity, out int corrected));
+        Assert.True(new ReedSolomon().TryDecode(cw, parity, out int corrected));
         Assert.Equal(0, corrected);
         Assert.Equal(original, cw);
     }
@@ -44,7 +44,7 @@ public class ReedSolomonTests
         foreach (int p in positions)
             cw[p] ^= (byte)rng.Next(1, 256);
 
-        Assert.True(ReedSolomon.TryDecode(cw, parity, out int corrected));
+        Assert.True(new ReedSolomon().TryDecode(cw, parity, out int corrected));
         Assert.Equal(parity / 2, corrected);
         Assert.Equal(original, cw);
     }
@@ -58,7 +58,7 @@ public class ReedSolomonTests
         foreach (int p in Enumerable.Range(0, 255).OrderBy(_ => rng.Next()).Take(12))
             cw[p] ^= (byte)rng.Next(1, 256);
 
-        Assert.False(ReedSolomon.TryDecode(cw, parity, out _));
+        Assert.False(new ReedSolomon().TryDecode(cw, parity, out _));
     }
 
     [Fact]
@@ -72,7 +72,7 @@ public class ReedSolomonTests
         foreach (int p in Enumerable.Range(0, length).OrderBy(_ => rng.Next()).Take(8))
             cw[p] ^= (byte)rng.Next(1, 256);
 
-        Assert.True(ReedSolomon.TryDecode(cw, parity, out int corrected));
+        Assert.True(new ReedSolomon().TryDecode(cw, parity, out int corrected));
         Assert.Equal(8, corrected);
         Assert.Equal(original, cw);
     }
@@ -83,8 +83,8 @@ public class ReedSolomonTests
         var data = new byte[100];
         new Random(5).NextBytes(data);
         byte[] copy = [.. data];
-        ReedSolomon.Encode(data, Span<byte>.Empty);
-        Assert.True(ReedSolomon.TryDecode(data, 0, out int corrected));
+        new ReedSolomon().Encode(data, Span<byte>.Empty);
+        Assert.True(new ReedSolomon().TryDecode(data, 0, out int corrected));
         Assert.Equal(0, corrected);
         Assert.Equal(copy, data);
     }
@@ -93,11 +93,11 @@ public class ReedSolomonTests
     public void AllZeroData_RoundTrips()
     {
         var cw = new byte[255];
-        ReedSolomon.Encode(cw.AsSpan(0, 239), cw.AsSpan(239));
+        new ReedSolomon().Encode(cw.AsSpan(0, 239), cw.AsSpan(239));
         Assert.All(cw, b => Assert.Equal(0, b)); // zero data → zero parity
         cw[17] = 0xAA;
         cw[200] = 0x55;
-        Assert.True(ReedSolomon.TryDecode(cw, 16, out int corrected));
+        Assert.True(new ReedSolomon().TryDecode(cw, 16, out int corrected));
         Assert.Equal(2, corrected);
         Assert.All(cw, b => Assert.Equal(0, b));
     }
@@ -111,7 +111,7 @@ public class ReedSolomonTests
         {
             byte[] cw = [.. pristine];
             cw[pos] ^= 0x42;
-            Assert.True(ReedSolomon.TryDecode(cw, parity, out int corrected), $"position {pos}");
+            Assert.True(new ReedSolomon().TryDecode(cw, parity, out int corrected), $"position {pos}");
             Assert.Equal(1, corrected);
             Assert.Equal(pristine, cw);
         }

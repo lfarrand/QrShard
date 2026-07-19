@@ -40,10 +40,10 @@ internal sealed class BitReader(byte[] data)
     }
 }
 
-internal static class BitStream
+internal sealed class BitStream
 {
     /// <summary>Reads <paramref name="bits"/> bits MSB-first starting at an absolute bit offset; missing bytes read as 0.</summary>
-    public static int ReadCell(byte[] data, long bitOffset, int bits)
+    public int ReadCell(byte[] data, long bitOffset, int bits)
     {
         if (bits <= 8)
         {
@@ -69,7 +69,7 @@ internal static class BitStream
     }
 
     /// <summary>Writes <paramref name="bits"/> bits MSB-first at an absolute bit offset; bits past the buffer are dropped.</summary>
-    public static void WriteCell(byte[] data, long bitOffset, int bits, int value)
+    public void WriteCell(byte[] data, long bitOffset, int bits, int value)
     {
         if (bits <= 8)
         {

@@ -17,8 +17,12 @@ internal sealed class SideTrace
 /// Traces the frame's edges in the original photo with subpixel precision, capturing per-point
 /// geometric residuals against the homography plus local black/white reference colors.
 /// </summary>
-internal sealed class FrameEdgeTracer : IFrameEdgeTracer
+internal sealed class FrameEdgeTracer(CameraMath math) : IFrameEdgeTracer
 {
+    public FrameEdgeTracer() : this(new CameraMath())
+    {
+    }
+
     public SideTrace? TraceSide(Bitmap photo, CanvasGeometry geometry,
         Func<int, (double X, double Y)> canvasPoint, (double X, double Y) outwardNormal)
     {
@@ -138,7 +142,7 @@ internal sealed class FrameEdgeTracer : IFrameEdgeTracer
         return [r / n, g / n, b / n];
     }
 
-    private static void FillInvalid(SideTrace trace)
+    private void FillInvalid(SideTrace trace)
     {
         for (int i = 0; i < SideTrace.SamplesPerSide; i++)
         {
@@ -152,13 +156,13 @@ internal sealed class FrameEdgeTracer : IFrameEdgeTracer
             int source = prev >= 0 ? prev : next;
             int other = next < SideTrace.SamplesPerSide ? next : source;
             double t = prev >= 0 && next < SideTrace.SamplesPerSide ? (double)(i - prev) / (next - prev) : 0;
-            trace.Dx[i] = CameraMath.Lerp(trace.Dx[source], trace.Dx[other], t);
-            trace.Dy[i] = CameraMath.Lerp(trace.Dy[source], trace.Dy[other], t);
+            trace.Dx[i] = math.Lerp(trace.Dx[source], trace.Dx[other], t);
+            trace.Dy[i] = math.Lerp(trace.Dy[source], trace.Dy[other], t);
             trace.Black[i] = LerpVec(trace.Black[source], trace.Black[other], t);
             trace.White[i] = LerpVec(trace.White[source], trace.White[other], t);
         }
 
-        static double[] LerpVec(double[] a, double[] b, double t) =>
-            [CameraMath.Lerp(a[0], b[0], t), CameraMath.Lerp(a[1], b[1], t), CameraMath.Lerp(a[2], b[2], t)];
+        double[] LerpVec(double[] a, double[] b, double t) =>
+            [math.Lerp(a[0], b[0], t), math.Lerp(a[1], b[1], t), math.Lerp(a[2], b[2], t)];
     }
 }

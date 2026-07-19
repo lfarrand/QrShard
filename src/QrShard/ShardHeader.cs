@@ -59,7 +59,7 @@ internal sealed class ShardHeader
         w.Write(name);
         w.Flush();
         byte[] body = ms.ToArray();
-        w.Write(Crc.Crc32(body));
+        w.Write(new Crc().Crc32(body));
         w.Flush();
         return ms.ToArray();
     }
@@ -95,7 +95,7 @@ internal sealed class ShardHeader
             string name = Encoding.UTF8.GetString(r.ReadBytes(nameLen));
             int bodyLen = (int)ms.Position;
             uint headerCrc = r.ReadUInt32();
-            if (headerCrc != Crc.Crc32(stream.AsSpan(0, bodyLen)))
+            if (headerCrc != new Crc().Crc32(stream.AsSpan(0, bodyLen)))
                 return null;
 
             bool isParity = (flags & FlagParity) != 0;

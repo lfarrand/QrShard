@@ -4,7 +4,7 @@ namespace QrShard;
 /// Homography plus a Coons-patch field interpolated from the four traced sides: geometric
 /// residual (dx, dy) and local black/white colors, evaluated per canvas pixel.
 /// </summary>
-internal sealed class RefinedMap(Homography h, double x0, double y0, double x1, double y1,
+internal sealed class RefinedMap(CameraMath math, Homography h, double x0, double y0, double x1, double y1,
     SideTrace top, SideTrace bottom, SideTrace left, SideTrace right)
 {
     public (double X, double Y) Apply(double x, double y)
@@ -48,7 +48,7 @@ internal sealed class RefinedMap(Homography h, double x0, double y0, double x1, 
     }
 
     /// <summary>Transfinite (Coons) interpolation from four boundary sample arrays.</summary>
-    private static double Coons(double u, double v, double[] top, double[] bottom, double[] left, double[] right)
+    private double Coons(double u, double v, double[] top, double[] bottom, double[] left, double[] right)
     {
         double t = SideValue(top, u), b = SideValue(bottom, u);
         double l = SideValue(left, v), r = SideValue(right, v);
@@ -60,11 +60,11 @@ internal sealed class RefinedMap(Homography h, double x0, double y0, double x1, 
              - ((1 - u) * (1 - v) * c00 + u * (1 - v) * c10 + (1 - u) * v * c01 + u * v * c11);
     }
 
-    private static double SideValue(double[] samples, double t)
+    private double SideValue(double[] samples, double t)
     {
         double pos = t * SideTrace.SamplesPerSide - 0.5;
         int i0 = Math.Clamp((int)Math.Floor(pos), 0, SideTrace.SamplesPerSide - 1);
         int i1 = Math.Min(i0 + 1, SideTrace.SamplesPerSide - 1);
-        return CameraMath.Lerp(samples[i0], samples[i1], Math.Clamp(pos - i0, 0, 1));
+        return math.Lerp(samples[i0], samples[i1], Math.Clamp(pos - i0, 0, 1));
     }
 }

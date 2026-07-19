@@ -11,10 +11,14 @@ namespace QrShard;
 /// Byte k of the interleaved buffer holds symbol k / cwCount of codeword k % cwCount;
 /// codeword j carries the contiguous data slice [j*dataLen, (j+1)*dataLen).
 /// </summary>
-internal static class Fec
+internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
 {
     public const int CodewordLength = 255;
     public const int MaxParity = 64;
+
+    public Fec() : this(new Gf256(), new ReedSolomon())
+    {
+    }
 
     public static int DataLength(int parity) => CodewordLength - parity;
 
@@ -23,7 +27,7 @@ internal static class Fec
     /// Sequential by design: callers already parallelize per image, and nested
     /// Parallel.For loops only add scheduler contention.
     /// </summary>
-    public static byte[] Protect(byte[] stream, int parity, int cwCount)
+    public byte[] Protect(byte[] stream, int parity, int cwCount)
     {
         var buffer = new byte[cwCount * CodewordLength];
         ProtectInto(stream, stream.Length, parity, cwCount, buffer);
@@ -36,7 +40,7 @@ internal static class Fec
     /// <paramref name="streamLength"/> bytes of <paramref name="stream"/> are payload;
     /// the remainder of each codeword is zero-padded.
     /// </summary>
-    public static void ProtectInto(byte[] stream, int streamLength, int parity, int cwCount, byte[] dest)
+    public void ProtectInto(byte[] stream, int streamLength, int parity, int cwCount, byte[] dest)
     {
         int dataLen = DataLength(parity);
         if (streamLength > (long)cwCount * dataLen)
@@ -52,7 +56,7 @@ internal static class Fec
                 int src = j * dataLen + i;
                 cw[i] = src < streamLength ? stream[src] : (byte)0;
             }
-            ReedSolomon.Encode(cw[..dataLen], cw[dataLen..]);
+            reedSolomon.Encode(cw[..dataLen], cw[dataLen..]);
             for (int i = 0; i < CodewordLength; i++)
                 dest[i * cwCount + j] = cw[i];
         }
@@ -62,14 +66,14 @@ internal static class Fec
     /// De-interleaves and error-corrects a captured cell buffer back into the data stream.
     /// Returns false when any codeword is damaged beyond correction.
     /// </summary>
-    public static bool TryRecover(byte[] buffer, int parity, int cwCount, out byte[] stream, out int correctedBytes)
+    public bool TryRecover(byte[] buffer, int parity, int cwCount, out byte[] stream, out int correctedBytes)
     {
         stream = new byte[cwCount * DataLength(parity)];
         return TryRecoverInto(buffer, parity, cwCount, stream, out correctedBytes);
     }
 
     /// <summary>Pooled-buffer variant of <see cref="TryRecover"/>; dest may be longer than needed.</summary>
-    public static bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes)
+    public bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes)
     {
         int dataLen = DataLength(parity);
         if (dest.Length < cwCount * dataLen)
@@ -89,7 +93,7 @@ internal static class Fec
             var tableLo = new Vector128<byte>[parity];
             var tableHi = new Vector128<byte>[parity];
             for (int i = 0; i < parity; i++)
-                (tableLo[i], tableHi[i]) = Gf256.MulTables(Gf256.AlphaPower(i));
+                (tableLo[i], tableHi[i]) = gf.MulTables(gf.AlphaPower(i));
             var synd = new Vector128<byte>[parity];
 
             for (; j + 16 <= cwCount; j += 16)
@@ -99,7 +103,7 @@ internal static class Fec
                 {
                     var c = Vector128.Create<byte>(buffer.AsSpan(k * cwCount + j, 16));
                     for (int i = 0; i < parity; i++)
-                        synd[i] = Gf256.MulVec(synd[i], tableLo[i], tableHi[i]) ^ c;
+                        synd[i] = gf.MulVec(synd[i], tableLo[i], tableHi[i]) ^ c;
                 }
 
                 var dirty = Vector128<byte>.Zero;
@@ -129,13 +133,13 @@ internal static class Fec
             dest[j * dataLen + i] = buffer[i * cwCount + j];
     }
 
-    private static void DecodeCodeword(byte[] buffer, int parity, int cwCount, int j, int dataLen, byte[] dest,
+    private void DecodeCodeword(byte[] buffer, int parity, int cwCount, int j, int dataLen, byte[] dest,
         byte[] cwScratch, ref int corrected, ref int failures)
     {
         for (int i = 0; i < CodewordLength; i++)
             cwScratch[i] = buffer[i * cwCount + j];
 
-        if (ReedSolomon.TryDecode(cwScratch, parity, out int errors))
+        if (reedSolomon.TryDecode(cwScratch, parity, out int errors))
         {
             cwScratch.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
             corrected += errors;

@@ -4,8 +4,12 @@ namespace QrShard;
 /// Cross-shard-parity reassembly: reconstructs missing data images from parity images stripe
 /// by stripe, plus the completeness check that shares its stripe math.
 /// </summary>
-internal sealed class ParityReassembler : IParityReassembler
+internal sealed class ParityReassembler(CrossShardFec crossShardFec) : IParityReassembler
 {
+    public ParityReassembler() : this(new CrossShardFec())
+    {
+    }
+
     /// <summary>
     /// True when every file in the shard set can be fully reassembled — all data images
     /// present, or (with cross-shard parity) every stripe holds at least StripeData of its
@@ -117,7 +121,7 @@ internal sealed class ParityReassembler : IParityReassembler
                 continue;
             }
 
-            if (have < sData || !CrossShardFec.TryReconstruct(present, sData, p, cap, out byte[][] recovered))
+            if (have < sData || !crossShardFec.TryReconstruct(present, sData, p, cap, out byte[][] recovered))
             {
                 for (int t = 0; t < sData; t++)
                     if (dataByIndex[first0 + t] is null)

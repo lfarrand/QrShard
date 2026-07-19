@@ -123,7 +123,7 @@ internal sealed class AppSettings
                 string format = ReadString(defaults, "ImageFormat", d.ImageFormat);
                 try
                 {
-                    d.ImageFormat = ShardImageFormat.Normalize(format);
+                    d.ImageFormat = new ShardImageFormat().Normalize(format);
                 }
                 catch (ArgumentException)
                 {

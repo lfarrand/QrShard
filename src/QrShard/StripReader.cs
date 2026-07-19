@@ -3,8 +3,12 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace QrShard;
 
 /// <summary>Reads the self-describing metadata strip and the palette calibration strips.</summary>
-internal sealed class StripReader : IStripReader
+internal sealed class StripReader(Palette palette) : IStripReader
 {
+    public StripReader() : this(new Palette())
+    {
+    }
+
     public Layout? ReadMetadata(Bitmap bmp, InnerRect inner)
     {
         // Before the metadata is read, gutter and strip height are only known via the shared
@@ -46,7 +50,7 @@ internal sealed class StripReader : IStripReader
     {
         // Two calibration strips exist (top and bottom). Measure both and keep the one whose
         // colors track the theoretical palette best — an overlay across one strip then costs nothing.
-        var theoretical = Palette.Build(layout.BitsPerCell);
+        var theoretical = palette.Build(layout.BitsPerCell);
         var top = MeasurePaletteStrip(bmp, inner, layout, layout.Gutter + layout.MetaH * 1.5);
         var bottom = MeasurePaletteStrip(bmp, inner, layout, layout.InnerH - layout.Gutter - layout.MetaH * 1.5);
         return StripScore(top, theoretical) <= StripScore(bottom, theoretical) ? top : bottom;

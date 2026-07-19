@@ -58,26 +58,26 @@ public class BitIoTests
         for (int i = 0; i < cells; i++)
         {
             expected[i] = rng.Next(1 << bits);
-            BitStream.WriteCell(buffer, (long)i * bits, bits, expected[i]);
+            new BitStream().WriteCell(buffer, (long)i * bits, bits, expected[i]);
         }
         for (int i = 0; i < cells; i++)
-            Assert.Equal(expected[i], BitStream.ReadCell(buffer, (long)i * bits, bits));
+            Assert.Equal(expected[i], new BitStream().ReadCell(buffer, (long)i * bits, bits));
     }
 
     [Fact]
     public void BitStream_ReadCell_PastBuffer_ReturnsZero()
     {
         var buffer = new byte[] { 0xFF };
-        Assert.Equal(0, BitStream.ReadCell(buffer, 8, 8));
-        Assert.Equal(0b1100, BitStream.ReadCell(buffer, 6, 4)); // straddles the end
+        Assert.Equal(0, new BitStream().ReadCell(buffer, 8, 8));
+        Assert.Equal(0b1100, new BitStream().ReadCell(buffer, 6, 4)); // straddles the end
     }
 
     [Fact]
     public void BitStream_WriteCell_PastBuffer_IsDropped()
     {
         var buffer = new byte[1];
-        BitStream.WriteCell(buffer, 8, 8, 0xFF);  // fully out of range
-        BitStream.WriteCell(buffer, 6, 4, 0b1111); // straddles: only first 2 bits land
+        new BitStream().WriteCell(buffer, 8, 8, 0xFF);  // fully out of range
+        new BitStream().WriteCell(buffer, 6, 4, 0b1111); // straddles: only first 2 bits land
         Assert.Equal(0b0000_0011, buffer[0]);
     }
 
@@ -86,7 +86,7 @@ public class BitIoTests
     {
         // A value wider than `bits` must not bleed into neighboring cells.
         var buffer = new byte[2];
-        BitStream.WriteCell(buffer, 4, 4, 0xFFF); // only the low 4 bits may land
+        new BitStream().WriteCell(buffer, 4, 4, 0xFFF); // only the low 4 bits may land
         Assert.Equal(0b0000_1111, buffer[0]);
         Assert.Equal(0, buffer[1]);
     }
@@ -101,8 +101,8 @@ public class BitIoTests
         byte[] viaWriter = w.ToArray();
 
         var viaStream = new byte[2];
-        BitStream.WriteCell(viaStream, 0, 8, 0xAB);
-        BitStream.WriteCell(viaStream, 8, 8, 0xCD);
+        new BitStream().WriteCell(viaStream, 0, 8, 0xAB);
+        new BitStream().WriteCell(viaStream, 8, 8, 0xCD);
         Assert.Equal(viaWriter, viaStream);
     }
 }

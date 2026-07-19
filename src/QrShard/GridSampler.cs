@@ -3,8 +3,12 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace QrShard;
 
 /// <summary>Samples every data cell and classifies it against the measured palette.</summary>
-internal sealed class GridSampler : IGridSampler
+internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IGridSampler
 {
+    public GridSampler() : this(new Palette(), new BitStream())
+    {
+    }
+
     public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette, DecodeScratch scratch)
     {
         double sx = inner.W / layout.InnerW;
@@ -41,7 +45,7 @@ internal sealed class GridSampler : IGridSampler
                     int key = (c.R >> 3 << 10) | (c.G >> 3 << 5) | (c.B >> 3);
                     int v = lut[key];
                     if (v < 0)
-                        lut[key] = v = Palette.Nearest(palette, c.R, c.G, c.B);
+                        lut[key] = v = paletteMath.Nearest(palette, c.R, c.G, c.B);
                     long dr = c.R - palette[v].R, dg = c.G - palette[v].G, db = c.B - palette[v].B;
                     long dist = dr * dr + dg * dg + db * db;
                     if (dist < bestDist)
@@ -52,7 +56,7 @@ internal sealed class GridSampler : IGridSampler
                             break;
                     }
                 }
-                BitStream.WriteCell(stream, cellIndex * bits, bits, best);
+                bitStream.WriteCell(stream, cellIndex * bits, bits, best);
             }
         }
         return stream;

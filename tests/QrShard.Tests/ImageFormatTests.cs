@@ -66,11 +66,11 @@ public class ImageFormatTests
     [InlineData("jpeg")]
     [InlineData("avif")]
     public void UnsupportedFormats_AreRejected(string format) =>
-        Assert.Throws<ArgumentException>(() => ShardImageFormat.Normalize(format));
+        Assert.Throws<ArgumentException>(() => new ShardImageFormat().Normalize(format));
 
     [Fact]
     public void TifAlias_NormalizesToTiff() =>
-        Assert.Equal("tiff", ShardImageFormat.Normalize("TIF"));
+        Assert.Equal("tiff", new ShardImageFormat().Normalize("TIF"));
 
     // ---------- FastPng: our own PNG writer must be standard-compliant and lossless ----------
 
@@ -91,7 +91,7 @@ public class ImageFormatTests
             pixels[i] = new Rgb24((byte)rng.Next(256), (byte)rng.Next(256), (byte)rng.Next(256));
 
         string path = tmp.File("out.png");
-        FastPng.Write(path, pixels, w, h, upFilter, level);
+        new FastPng().Write(path, pixels, w, h, upFilter, level);
 
         using var decoded = Image.Load<Rgb24>(path);
         Assert.Equal(w, decoded.Width);
@@ -111,7 +111,7 @@ public class ImageFormatTests
             for (int i = 0; i < pixels.Length; i++)
                 pixels[i] = new Rgb24((byte)(i * 7), (byte)(i * 13), (byte)(i * 29));
             string path = tmp.File($"tiny-{w}x{h}.png");
-            FastPng.Write(path, pixels, w, h, upFilter: true, System.IO.Compression.CompressionLevel.Optimal);
+            new FastPng().Write(path, pixels, w, h, upFilter: true, System.IO.Compression.CompressionLevel.Optimal);
 
             using var decoded = Image.Load<Rgb24>(path);
             var roundTripped = new Rgb24[w * h];

@@ -6,12 +6,12 @@ namespace QrShard;
 /// Builds the color palette for a given bits-per-cell density. Colors are spread across the RGB
 /// cube with maximal per-channel spacing so that nearest-color classification is robust.
 /// </summary>
-internal static class Palette
+internal sealed class Palette
 {
     public const int MinBits = 1;
     public const int MaxBits = 8;
 
-    public static Rgb24[] Build(int bitsPerCell)
+    public Rgb24[] Build(int bitsPerCell)
     {
         if (bitsPerCell is < MinBits or > MaxBits)
             throw new ArgumentOutOfRangeException(nameof(bitsPerCell));
@@ -40,7 +40,7 @@ internal static class Palette
         count == 1 ? (byte)0 : (byte)(index * 255 / (count - 1));
 
     /// <summary>Index of the palette color nearest (squared RGB distance) to the sample.</summary>
-    public static int Nearest(Rgb24[] palette, int r, int g, int b)
+    public int Nearest(Rgb24[] palette, int r, int g, int b)
     {
         int best = 0, bestDist = int.MaxValue;
         for (int i = 0; i < palette.Length; i++)

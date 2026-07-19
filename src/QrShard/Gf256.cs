@@ -8,7 +8,7 @@ namespace QrShard;
 /// which reconstructs whole missing images from parity images and therefore needs to solve linear
 /// systems over the field — something the syndrome-based <see cref="ReedSolomon"/> path does not do.
 /// </summary>
-internal static class Gf256
+internal sealed class Gf256
 {
     private static readonly byte[] Exp = new byte[512];
     private static readonly byte[] Log = new byte[256];
@@ -28,16 +28,16 @@ internal static class Gf256
             Exp[i] = Exp[i - 255];
     }
 
-    public static byte Mul(byte a, byte b) => a == 0 || b == 0 ? (byte)0 : Exp[Log[a] + Log[b]];
+    public byte Mul(byte a, byte b) => a == 0 || b == 0 ? (byte)0 : Exp[Log[a] + Log[b]];
 
-    public static byte Div(byte a, byte b)
+    public byte Div(byte a, byte b)
     {
         if (b == 0)
             throw new DivideByZeroException("GF(256) division by zero.");
         return a == 0 ? (byte)0 : Exp[Log[a] - Log[b] + 255];
     }
 
-    public static byte Inv(byte a)
+    public byte Inv(byte a)
     {
         if (a == 0)
             throw new DivideByZeroException("GF(256) has no inverse of zero.");
@@ -45,13 +45,13 @@ internal static class Gf256
     }
 
     /// <summary>α^i for the field's generator α.</summary>
-    public static byte AlphaPower(int i) => Exp[i % 255];
+    public byte AlphaPower(int i) => Exp[i % 255];
 
     /// <summary>
     /// Builds the two 16-entry nibble product tables for multiplication by a fixed coefficient:
     /// coef*b = coef*(b_hi·16) ^ coef*b_lo, so a pair of byte shuffles multiplies 16 lanes at once.
     /// </summary>
-    public static (Vector128<byte> Lo, Vector128<byte> Hi) MulTables(byte coef)
+    public (Vector128<byte> Lo, Vector128<byte> Hi) MulTables(byte coef)
     {
         Span<byte> lo = stackalloc byte[16];
         Span<byte> hi = stackalloc byte[16];
@@ -64,7 +64,7 @@ internal static class Gf256
     }
 
     /// <summary>Multiplies all 16 lanes by the fixed coefficient encoded in the nibble tables.</summary>
-    public static Vector128<byte> MulVec(Vector128<byte> v, Vector128<byte> tableLo, Vector128<byte> tableHi)
+    public Vector128<byte> MulVec(Vector128<byte> v, Vector128<byte> tableLo, Vector128<byte> tableHi)
     {
         var nibble = Vector128.Create((byte)0x0F);
         return Vector128.ShuffleNative(tableLo, v & nibble)
@@ -79,7 +79,7 @@ internal static class Gf256
     /// splits as coef*b = coef*(b_hi·16) ^ coef*b_lo, so two 16-entry product tables used as
     /// byte-shuffle sources multiply 16 bytes per step.
     /// </summary>
-    public static void MulAdd(byte coef, ReadOnlySpan<byte> src, Span<byte> dst)
+    public void MulAdd(byte coef, ReadOnlySpan<byte> src, Span<byte> dst)
     {
         if (coef == 0)
             return;
@@ -109,7 +109,7 @@ internal static class Gf256
     /// Inverts an n x n matrix in place via Gauss-Jordan elimination over GF(2^8).
     /// Returns false if the matrix is singular (should never happen for a Cauchy submatrix).
     /// </summary>
-    public static bool Invert(byte[][] matrix, int n)
+    public bool Invert(byte[][] matrix, int n)
     {
         // Augment with identity.
         var aug = new byte[n][];

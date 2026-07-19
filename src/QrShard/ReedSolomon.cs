@@ -6,7 +6,7 @@ namespace QrShard;
 /// Reed-Solomon codec over GF(2^8) with polynomial 0x11D and first consecutive root α^0.
 /// A codeword of n symbols with nsym parity symbols corrects up to nsym/2 unknown byte errors.
 /// </summary>
-internal static class ReedSolomon
+internal sealed class ReedSolomon
 {
     private static readonly byte[] Exp = new byte[512];
     private static readonly byte[] Log = new byte[256];
@@ -77,7 +77,7 @@ internal static class ReedSolomon
     });
 
     /// <summary>Computes parity symbols for the data (systematic encoding, LFSR division).</summary>
-    public static void Encode(ReadOnlySpan<byte> data, Span<byte> parity)
+    public void Encode(ReadOnlySpan<byte> data, Span<byte> parity)
     {
         int nsym = parity.Length;
         if (nsym == 0)
@@ -102,7 +102,7 @@ internal static class ReedSolomon
     /// Corrects up to nsym/2 byte errors in place. The last nsym bytes of the codeword are parity.
     /// Returns false when the damage is uncorrectable (the codeword is left unspecified).
     /// </summary>
-    public static bool TryDecode(Span<byte> codeword, int nsym, out int correctedErrors)
+    public bool TryDecode(Span<byte> codeword, int nsym, out int correctedErrors)
     {
         correctedErrors = 0;
         if (nsym == 0)
