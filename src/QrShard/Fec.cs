@@ -48,8 +48,50 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
         if (dest.Length < cwCount * CodewordLength)
             throw new ArgumentException("Destination buffer is too small.");
 
+        int j = 0;
+
+        // SIMD fast path, mirroring the decode-side syndrome scan: encode 16 codewords at
+        // once, one Vector128 lane per codeword. The LFSR step multiplies every lane's
+        // feedback coefficient by the FIXED generator coefficient gen[k+1], which is exactly
+        // the nibble-shuffle-table case. The interleaved output layout also turns the
+        // write-out into contiguous 16-byte stores.
+        if (Vector128.IsHardwareAccelerated && parity > 0 && cwCount >= 16)
+        {
+            byte[] genTail = reedSolomon.GeneratorTail(parity);
+            var tableLo = new Vector128<byte>[parity];
+            var tableHi = new Vector128<byte>[parity];
+            for (int i = 0; i < parity; i++)
+                (tableLo[i], tableHi[i]) = gf.MulTables(genTail[i]);
+            var register = new Vector128<byte>[parity];
+            Span<byte> lanes = stackalloc byte[16];
+
+            for (; j + 16 <= cwCount; j += 16)
+            {
+                Array.Clear(register);
+                for (int i = 0; i < dataLen; i++)
+                {
+                    for (int lane = 0; lane < 16; lane++)
+                    {
+                        int src = (j + lane) * dataLen + i;
+                        lanes[lane] = src < streamLength ? stream[src] : (byte)0;
+                    }
+                    var d = Vector128.Create<byte>(lanes);
+                    d.CopyTo(dest.AsSpan(i * cwCount + j, 16));
+
+                    var coef = d ^ register[0];
+                    for (int k = 0; k < parity - 1; k++)
+                        register[k] = register[k + 1];
+                    register[parity - 1] = Vector128<byte>.Zero;
+                    for (int k = 0; k < parity; k++)
+                        register[k] ^= gf.MulVec(coef, tableLo[k], tableHi[k]);
+                }
+                for (int i = 0; i < parity; i++)
+                    register[i].CopyTo(dest.AsSpan((dataLen + i) * cwCount + j, 16));
+            }
+        }
+
         Span<byte> cw = stackalloc byte[CodewordLength];
-        for (int j = 0; j < cwCount; j++)
+        for (; j < cwCount; j++)
         {
             for (int i = 0; i < dataLen; i++)
             {

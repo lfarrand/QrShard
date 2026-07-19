@@ -12,13 +12,13 @@ namespace QrShard;
 internal sealed class ShardDecoder(
     AppSettings settings, ICameraRectifier cameraRectifier, IFrameLocator frameLocator,
     IStripReader stripReader, IGridSampler gridSampler, IShardAssembler assembler,
-    Fec fec, Crc crc) : IShardDecoder
+    Fec fec, Crc crc, FastPngReader pngReader) : IShardDecoder
 {
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
     public ShardDecoder() : this(
         AppSettings.Current, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
         new StripReader(), new GridSampler(), new ShardAssembler(new ParityReassembler()),
-        new Fec(), new Crc())
+        new Fec(), new Crc(), new FastPngReader())
     {
     }
 
@@ -80,22 +80,26 @@ internal sealed class ShardDecoder(
 
     public DecodedShard DecodeImage(string path, DecodeScratch scratch)
     {
-        Image<Rgb24> image;
-        try
+        // Fast path: our own truecolor-PNG reader. Anything it can't handle (other formats,
+        // palette/16-bit/interlaced PNGs, corrupt files) falls through to ImageSharp.
+        if (!pngReader.TryRead(path, scratch, out Bitmap bmp))
         {
-            image = Image.Load<Rgb24>(path);
-        }
-        catch (ImageFormatException ex)
-        {
-            throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
-        }
+            Image<Rgb24> image;
+            try
+            {
+                image = Image.Load<Rgb24>(path);
+            }
+            catch (ImageFormatException ex)
+            {
+                throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
+            }
 
-        Bitmap bmp;
-        using (image)
-        {
-            var px = scratch.Pixels(image.Width * image.Height);
-            image.CopyPixelDataTo(px.AsSpan(0, image.Width * image.Height));
-            bmp = new Bitmap(px, image.Width, image.Height);
+            using (image)
+            {
+                var px = scratch.Pixels(image.Width * image.Height);
+                image.CopyPixelDataTo(px.AsSpan(0, image.Width * image.Height));
+                bmp = new Bitmap(px, image.Width, image.Height);
+            }
         }
 
         try

@@ -18,6 +18,7 @@ internal static class ServiceRegistration
             .AddSingleton<BitStream>()
             .AddSingleton<Palette>()
             .AddSingleton<FastPng>()
+            .AddSingleton<FastPngReader>()
             .AddSingleton<ShardImageFormat>()
             .AddSingleton<CameraMath>()
             // Decode pipeline
