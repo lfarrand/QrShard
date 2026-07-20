@@ -53,31 +53,31 @@ internal sealed class FastPng(Crc crc)
 
         int rowBytes = width * 3;
         ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(pixels[..(width * height)]);
-        var filtered = new byte[1 + rowBytes];
-        using (var zlib = new ZLibStream(idat, level, leaveOpen: true))
+        if (!upFilter)
         {
+            // 1 px noise cells are incompressible by construction: deflate at any level burns
+            // CPU to save ~nothing. Emit spec-legal STORED deflate blocks instead — the write
+            // becomes memcpy plus an Adler-32, and every PNG decoder reads it unchanged.
+            WriteStoredZlib(idat, src, rowBytes, height);
+        }
+        else
+        {
+            var filtered = new byte[1 + rowBytes];
+            using var zlib = new ZLibStream(idat, level, leaveOpen: true);
             for (int y = 0; y < height; y++)
             {
                 ReadOnlySpan<byte> row = src.Slice(y * rowBytes, rowBytes);
-                if (upFilter)
+                // Up filter: raw - prior (prior row is all zeros for y == 0 per spec).
+                filtered[0] = 2;
+                if (y == 0)
                 {
-                    // Up filter: raw - prior (prior row is all zeros for y == 0 per spec).
-                    filtered[0] = 2;
-                    if (y == 0)
-                    {
-                        row.CopyTo(filtered.AsSpan(1));
-                    }
-                    else
-                    {
-                        ReadOnlySpan<byte> prior = src.Slice((y - 1) * rowBytes, rowBytes);
-                        for (int x = 0; x < rowBytes; x++)
-                            filtered[1 + x] = (byte)(row[x] - prior[x]);
-                    }
+                    row.CopyTo(filtered.AsSpan(1));
                 }
                 else
                 {
-                    filtered[0] = 0;
-                    row.CopyTo(filtered.AsSpan(1));
+                    ReadOnlySpan<byte> prior = src.Slice((y - 1) * rowBytes, rowBytes);
+                    for (int x = 0; x < rowBytes; x++)
+                        filtered[1 + x] = (byte)(row[x] - prior[x]);
                 }
                 zlib.Write(filtered);
             }
@@ -93,6 +93,75 @@ internal sealed class FastPng(Crc crc)
         fs.Write(scratch);
 
         WriteChunk(fs, "IEND", []);
+    }
+
+    /// <summary>Hand-rolled zlib stream of STORED deflate blocks over [filter byte 0][raw row] rows.</summary>
+    private static void WriteStoredZlib(Stream output, ReadOnlySpan<byte> src, int rowBytes, int height)
+    {
+        output.WriteByte(0x78); // zlib CMF: deflate, 32K window
+        output.WriteByte(0x01); // FLG: check bits, no dict, fastest
+
+        const int MaxBlock = 65535;
+        var block = new byte[MaxBlock];
+        Span<byte> blockHeader = stackalloc byte[5];
+        long remaining = (long)(rowBytes + 1) * height;
+        uint s1 = 1, s2 = 0; // Adler-32 state
+        int row = 0, posInRow = -1; // -1 = this row's filter byte not yet emitted
+
+        while (remaining > 0)
+        {
+            int fill = 0;
+            while (fill < MaxBlock && row < height)
+            {
+                if (posInRow < 0)
+                {
+                    block[fill++] = 0; // filter: None
+                    posInRow = 0;
+                }
+                else
+                {
+                    int n = Math.Min(MaxBlock - fill, rowBytes - posInRow);
+                    src.Slice(row * rowBytes + posInRow, n).CopyTo(block.AsSpan(fill));
+                    fill += n;
+                    posInRow += n;
+                    if (posInRow == rowBytes)
+                    {
+                        row++;
+                        posInRow = -1;
+                    }
+                }
+            }
+
+            bool final = remaining == fill;
+            blockHeader[0] = (byte)(final ? 1 : 0); // BFINAL, BTYPE=00 (stored)
+            BinaryPrimitives.WriteUInt16LittleEndian(blockHeader[1..], (ushort)fill);
+            BinaryPrimitives.WriteUInt16LittleEndian(blockHeader[3..], (ushort)~fill);
+            output.Write(blockHeader);
+            output.Write(block, 0, fill);
+            UpdateAdler(ref s1, ref s2, block.AsSpan(0, fill));
+            remaining -= fill;
+        }
+
+        Span<byte> adler = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(adler, (s2 << 16) | s1);
+        output.Write(adler);
+    }
+
+    private static void UpdateAdler(ref uint s1, ref uint s2, ReadOnlySpan<byte> data)
+    {
+        const int NMax = 5552; // max bytes before the sums can overflow uint
+        int i = 0;
+        while (i < data.Length)
+        {
+            int end = Math.Min(i + NMax, data.Length);
+            for (; i < end; i++)
+            {
+                s1 += data[i];
+                s2 += s1;
+            }
+            s1 %= 65521;
+            s2 %= 65521;
+        }
     }
 
     private void WriteChunk(Stream stream, string type, ReadOnlySpan<byte> data)
