@@ -40,6 +40,7 @@ internal sealed class FastPngReader
 
         const uint Ihdr = 0x49484452, Idat = 0x49444154, Iend = 0x49454E44;
         Span<byte> chunkHeader = stackalloc byte[8];
+        Span<byte> ihdr = stackalloc byte[13]; // outside the loop: stackalloc in a loop never frees (CA2014)
         int width = 0, height = 0, bytesPerPixel = 0;
         bool haveHeader = false;
         var idatRanges = new List<(long Offset, int Length)>();
@@ -55,7 +56,6 @@ internal sealed class FastPngReader
 
             if (type == Ihdr)
             {
-                Span<byte> ihdr = stackalloc byte[13];
                 if (length != 13 || fs.Read(ihdr) != 13)
                     return false;
                 width = BinaryPrimitives.ReadInt32BigEndian(ihdr);
