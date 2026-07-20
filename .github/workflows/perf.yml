@@ -1,0 +1,59 @@
+name: Perf gate
+
+on:
+  pull_request:
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    env:
+      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      # Shared-runner clocks are noisy in absolute terms, so the gate is RELATIVE: build the
+      # PR base and head side by side, run the same 30 MB round trip three times each, and
+      # fail only on a >30% median regression — real regressions, not runner weather.
+      - name: Build base and head
+        run: |
+          git worktree add ../base ${{ github.event.pull_request.base.sha }}
+          dotnet build ../base/src/QrShard/QrShard.csproj -c Release
+          dotnet build src/QrShard/QrShard.csproj -c Release
+
+      - name: Compare round-trip times
+        shell: bash
+        run: |
+          set -e
+          head -c 31457280 /dev/urandom > input.bin
+          run_trip() { # $1 = dll path; echoes "encodeMs decodeMs"
+            rm -rf shards out.bin
+            local e0=$(date +%s%3N)
+            dotnet "$1" encode input.bin -o shards -r 2160 > /dev/null
+            local e1=$(date +%s%3N)
+            dotnet "$1" decode shards -o out.bin > /dev/null
+            local e2=$(date +%s%3N)
+            cmp -s input.bin out.bin
+            echo "$((e1-e0)) $((e2-e1))"
+          }
+          BASE=../base/src/QrShard/bin/Release/net10.0/QrShard.dll
+          HEAD=src/QrShard/bin/Release/net10.0/QrShard.dll
+          for i in 1 2 3; do
+            read be bd <<< "$(run_trip $BASE)"; base_enc[$i]=$be; base_dec[$i]=$bd
+            read he hd <<< "$(run_trip $HEAD)"; head_enc[$i]=$he; head_dec[$i]=$hd
+          done
+          median() { printf '%s\n' "$@" | sort -n | sed -n 2p; }
+          BE=$(median "${base_enc[@]}"); BD=$(median "${base_dec[@]}")
+          HE=$(median "${head_enc[@]}"); HD=$(median "${head_dec[@]}")
+          echo "encode: base ${BE}ms head ${HE}ms | decode: base ${BD}ms head ${HD}ms"
+          fail=0
+          [ "$HE" -gt "$((BE * 13 / 10))" ] && { echo "::error::encode regressed >30% (${BE}ms -> ${HE}ms)"; fail=1; }
+          [ "$HD" -gt "$((BD * 13 / 10))" ] && { echo "::error::decode regressed >30% (${BD}ms -> ${HD}ms)"; fail=1; }
+          exit $fail

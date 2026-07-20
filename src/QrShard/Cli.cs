@@ -585,9 +585,23 @@ internal sealed class Cli(AppSettings? settings = null)
                 --session <file>         Accumulate shards across capture sittings: incomplete
                                          sets persist to the session file (exit code 3) and the
                                          next run resumes from the union; deleted on success
-              qrshard verify <folder|images...> [--session f]
+                --watch                  Keep watching the folder: decode captures as they land
+                                         and assemble the moment the set completes (Ctrl+C
+                                         stops; progress persists when --session is given)
+              qrshard receive [--device d] [--format f] [--fps n] [-o file] [-p pw]
+                                         LIVE receiver: read a webcam via ffmpeg, point it at
+                                         the sender's slideshow, and decode in real time —
+                                         stops automatically when the transfer completes
+                                         (Windows: --device "<webcam name>"; list with
+                                         ffmpeg -list_devices true -f dshow -i dummy)
+              qrshard calibrate [-o dir] [-r res]
+                                         Write a ladder of density probes; capture them like a
+                                         real transfer, then run qrshard calibrate <folder> to
+                                         get recommended -c/-b settings for YOUR setup
+              qrshard verify <folder|images...> [--session f] [--json]
                                          Report per-file completeness (missing images, parity
                                          coverage) without writing output; exit 0 when complete
+                                         (--json for machine-readable output, also on info)
               qrshard info <image> [--heatmap <out.png>]
                                          Show and validate a single shard image; --heatmap renders
                                          a per-cell ECC damage map (green=clean, red=corrected,

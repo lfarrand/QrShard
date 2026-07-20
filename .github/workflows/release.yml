@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            asset: qrshard-win-x64.zip
+          - os: ubuntu-latest
+            rid: linux-x64
+            asset: qrshard-linux-x64.tar.gz
+          - os: macos-latest
+            rid: osx-arm64
+            asset: qrshard-osx-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    env:
+      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test
+        run: dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release
+
+      # Native AOT: single self-contained binary, ~20ms startup. The runners carry the
+      # platform C++ toolchains; the trimmed IL analysis is warning-clean.
+      - name: Publish (Native AOT)
+        run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false
+
+      - name: Archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path src/QrShard/bin/Release/net10.0/${{ matrix.rid }}/publish/* -DestinationPath ${{ matrix.asset }}
+
+      - name: Archive (Unix)
+        if: runner.os != 'Windows'
+        run: tar -czf ${{ matrix.asset }} -C src/QrShard/bin/Release/net10.0/${{ matrix.rid }}/publish .
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "${{ github.ref_name }}" "${{ matrix.asset }}" --clobber || gh release create "${{ github.ref_name }}" "${{ matrix.asset }}" --generate-notes
+
+  nuget:
+    runs-on: ubuntu-latest
+    env:
+      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      DOTNET_NOLOGO: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Pack tool
+        run: dotnet pack src/QrShard/QrShard.csproj -c Release -o nupkg -p:Version=${GITHUB_REF_NAME#v}
+
+      - name: Push to NuGet (needs NUGET_API_KEY secret)
+        if: env.NUGET_API_KEY != ''
+        run: dotnet nuget push "nupkg/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
