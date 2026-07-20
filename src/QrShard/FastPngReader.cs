@@ -87,15 +87,26 @@ internal sealed class FastPngReader
             return false;
 
         var px = scratch.Pixels(width * height);
-        using var zlib = new ZLibStream(new ChunkRangeStream(fs, idatRanges), CompressionMode.Decompress);
+
+        // Peek the first deflate block type: our own max-density shards are written as STORED
+        // blocks, which a direct copier serves at memcpy speed — the zlib state machine only
+        // runs for genuinely compressed streams.
+        Span<byte> head = stackalloc byte[3]; // 2-byte zlib header + first block-type byte
+        if (!ReadFully(new ChunkRangeStream(fs, idatRanges), head))
+            return false;
+        bool stored = (head[2] & 0x06) == 0; // BTYPE bits (1-2, LSB-first) == 00
+        using Stream inflate = stored
+            ? new StoredInflateStream(new ChunkRangeStream(fs, idatRanges))
+            : new ZLibStream(new ChunkRangeStream(fs, idatRanges), CompressionMode.Decompress);
+
         int rowBytes = width * bytesPerPixel;
         var row = new byte[rowBytes];
         var prior = new byte[rowBytes]; // all-zero for y == 0, per spec
         var filterByte = new byte[1];
         for (int y = 0; y < height; y++)
         {
-            zlib.ReadExactly(filterByte);
-            zlib.ReadExactly(row);
+            inflate.ReadExactly(filterByte);
+            inflate.ReadExactly(row);
             Unfilter(filterByte[0], row, prior, bytesPerPixel);
             if (bytesPerPixel == 3)
             {
@@ -150,6 +161,87 @@ internal sealed class FastPngReader
         int p = a + b - c;
         int pa = Math.Abs(p - a), pb = Math.Abs(p - b), pc = Math.Abs(p - c);
         return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+    }
+
+    private static bool ReadFully(Stream stream, Span<byte> buffer)
+    {
+        int offset = 0;
+        while (offset < buffer.Length)
+        {
+            int n = stream.Read(buffer[offset..]);
+            if (n == 0)
+                return false;
+            offset += n;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Serves a zlib stream consisting purely of STORED deflate blocks by direct copy — the
+    /// decode-side twin of the writer's stored-block fast path. A non-stored block mid-stream
+    /// throws InvalidDataException, which the outer TryRead turns into an ImageSharp fallback.
+    /// </summary>
+    private sealed class StoredInflateStream : Stream
+    {
+        private readonly Stream _inner;
+        private int _remainingInBlock;
+        private bool _finalSeen;
+
+        public StoredInflateStream(Stream inner)
+        {
+            _inner = inner;
+            Span<byte> zlibHeader = stackalloc byte[2];
+            if (!ReadFully(inner, zlibHeader))
+                throw new InvalidDataException("Truncated zlib stream.");
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            while (true)
+            {
+                if (_remainingInBlock > 0)
+                {
+                    int n = _inner.Read(buffer[..Math.Min(buffer.Length, _remainingInBlock)]);
+                    _remainingInBlock -= n;
+                    return n;
+                }
+                if (_finalSeen)
+                    return 0;
+
+                Span<byte> header = stackalloc byte[5];
+                if (!ReadFully(_inner, header))
+                    return 0; // truncated — surfaces as EndOfStreamException at the row reader
+                if ((header[0] & 0x06) != 0)
+                    throw new InvalidDataException("Mixed stored/compressed deflate blocks."); // fall back
+                _finalSeen = (header[0] & 1) != 0;
+                int length = BinaryPrimitives.ReadUInt16LittleEndian(header[1..]);
+                if (length != (ushort)~BinaryPrimitives.ReadUInt16LittleEndian(header[3..]))
+                    throw new InvalidDataException("Corrupt stored-block length.");
+                _remainingInBlock = length;
+                if (length == 0 && _finalSeen)
+                    return 0;
+            }
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     /// <summary>Reads the concatenated IDAT payloads as one stream without copying them out first.</summary>

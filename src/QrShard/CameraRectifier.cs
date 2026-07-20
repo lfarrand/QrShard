@@ -98,14 +98,14 @@ internal sealed class CameraRectifier(
     private static Bitmap WarpHomography(Bitmap photo, CanvasGeometry geometry)
     {
         var px = new Rgb24[geometry.Width * geometry.Height];
-        for (int y = 0; y < geometry.Height; y++)
+        Parallel.For(0, geometry.Height, y =>
         {
             for (int x = 0; x < geometry.Width; x++)
             {
                 var (sx, sy) = geometry.H.Apply(x + 0.5, y + 0.5);
                 px[y * geometry.Width + x] = photo.SampleBilinear(sx - 0.5, sy - 0.5);
             }
-        }
+        });
         return new Bitmap(px, geometry.Width, geometry.Height);
     }
 
@@ -137,22 +137,22 @@ internal sealed class CameraRectifier(
     private static Bitmap WarpRefined(Bitmap photo, RefinedMap map, int canvasW, int canvasH)
     {
         var px = new Rgb24[canvasW * canvasH];
-        Span<double> black = stackalloc double[3];
-        Span<double> white = stackalloc double[3];
-        for (int y = 0; y < canvasH; y++)
+        Parallel.For(0, canvasH, y =>
         {
-            map.BeginRow(y + 0.5);
+            var row = map.CreateRow(y + 0.5);
+            Span<double> black = stackalloc double[3];
+            Span<double> white = stackalloc double[3];
             for (int x = 0; x < canvasW; x++)
             {
-                var (sx, sy) = map.Apply(x + 0.5, y + 0.5);
+                var (sx, sy) = map.Apply(row, x + 0.5, y + 0.5);
                 var sample = photo.SampleBilinear(sx - 0.5, sy - 0.5);
-                map.Illumination(x + 0.5, black, white);
+                map.Illumination(row, x + 0.5, black, white);
                 px[y * canvasW + x] = new Rgb24(
                     Normalize(sample.R, black[0], white[0]),
                     Normalize(sample.G, black[1], white[1]),
                     Normalize(sample.B, black[2], white[2]));
             }
-        }
+        });
         return new Bitmap(px, canvasW, canvasH);
 
         // Linear per-channel remap against the locally interpolated black/white references —
