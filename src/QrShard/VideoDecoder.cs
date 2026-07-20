@@ -17,16 +17,24 @@ internal sealed record VideoDecodeStats(int FramesExamined, int FramesDecoded, i
 /// </summary>
 internal sealed class VideoDecoder(
     IShardDecoder decoder, IFrameSource frameSource, IShardAssembler assembler,
-    IParityReassembler parityReassembler) : IVideoDecoder
+    IParityReassembler parityReassembler, ICameraRectifier cameraRectifier) : IVideoDecoder
 {
     private static readonly string[] VideoExtensions = [".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"];
 
     /// <summary>Mean-abs-luminance difference (0-255) below which a frame is treated as a duplicate.</summary>
     private const double DuplicateThreshold = 3.0;
 
+    /// <summary>Whether the recording shows the screen directly or through a camera.</summary>
+    private enum CaptureMode
+    {
+        Unknown,
+        AxisAligned,
+        Camera,
+    }
+
     /// <summary>Default wiring for tests and non-DI callers.</summary>
     public VideoDecoder() : this(new ShardDecoder(), new RecordingFrameSource(),
-        new ShardAssembler(), new ParityReassembler())
+        new ShardAssembler(), new ParityReassembler(), new CameraRectifier())
     {
     }
 
@@ -69,6 +77,8 @@ internal sealed class VideoDecoder(
         byte[]? previousSignature = null;
         int examined = 0, decoded = 0;
         bool stoppedEarly = false;
+        var mode = CaptureMode.Unknown;
+        CameraPose? cachedPose = null;
 
         foreach (var frame in frames)
         {
@@ -82,7 +92,7 @@ internal sealed class VideoDecoder(
             decoded++;
             try
             {
-                var shard = decoder.DecodeBitmap(frame, scratch, $"frame {examined}");
+                var shard = DecodeFrame(frame, scratch, examined, ref mode, ref cachedPose);
                 if (seen.Add((shard.Header.FileId, shard.Header.Index, shard.Header.IsParity)))
                 {
                     shards.Add(shard);
@@ -107,6 +117,54 @@ internal sealed class VideoDecoder(
 
         stats = new VideoDecodeStats(examined, decoded, shards.Count, stoppedEarly);
         return shards;
+    }
+
+    /// <summary>
+    /// Per-frame decode with a capture-mode latch: once frames prove to be direct screen
+    /// recordings, camera detection never runs; once they prove to be camera footage, the
+    /// axis-aligned attempt is skipped and the detected pose is CACHED — consecutive frames of
+    /// a handheld recording share nearly the same pose, and phase-2 refinement absorbs the
+    /// drift, so full finder detection only reruns when a cached pose stops decoding.
+    /// </summary>
+    private DecodedShard DecodeFrame(Bitmap frame, DecodeScratch scratch, int examined,
+        ref CaptureMode mode, ref CameraPose? cachedPose)
+    {
+        if (mode == CaptureMode.Camera)
+            return DecodeCameraFrame(frame, scratch, examined, ref cachedPose);
+
+        try
+        {
+            var shard = decoder.DecodeBitmap(frame, scratch, $"frame {examined}");
+            mode = CaptureMode.AxisAligned;
+            return shard;
+        }
+        catch (ShardDecodeException) when (mode == CaptureMode.Unknown)
+        {
+            var shard = DecodeCameraFrame(frame, scratch, examined, ref cachedPose);
+            mode = CaptureMode.Camera; // only reached when the camera path succeeded
+            return shard;
+        }
+    }
+
+    private DecodedShard DecodeCameraFrame(Bitmap frame, DecodeScratch scratch, int examined, ref CameraPose? cachedPose)
+    {
+        if (cachedPose is not null)
+        {
+            try
+            {
+                return decoder.DecodeBitmap(cameraRectifier.RectifyWithPose(frame, cachedPose), scratch, $"frame {examined}");
+            }
+            catch (ShardDecodeException)
+            {
+                cachedPose = null; // drifted too far — fall through to full detection
+            }
+        }
+
+        var pose = cameraRectifier.DetectPose(frame)
+            ?? throw new ShardDecodeException("No finder patterns in this frame.");
+        var shard = decoder.DecodeBitmap(cameraRectifier.RectifyWithPose(frame, pose), scratch, $"frame {examined}");
+        cachedPose = pose; // latch only after a successful decode
+        return shard;
     }
 
     /// <summary>

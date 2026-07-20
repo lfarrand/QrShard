@@ -15,6 +15,9 @@ internal sealed record PaletteSet(Rgb24[] Best, Rgb24[] Top, Rgb24[] Bottom, boo
 /// <summary>A capture whose cells were read but whose ECC/CRC failed — raw material for fusion.</summary>
 internal sealed record FailedCapture(Layout Layout, byte[] Cells, string SourceFile);
 
+/// <summary>A detected camera pose (the oriented finder quad), cacheable across video frames.</summary>
+internal sealed record CameraPose(OrientedQuad Quad);
+
 /// <summary>One file written by a decode run.</summary>
 internal sealed record RestoredFile(string FileName, string OutputPath, long Length);
 

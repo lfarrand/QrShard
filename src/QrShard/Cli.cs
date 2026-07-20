@@ -6,7 +6,7 @@ namespace QrShard;
 internal sealed record CliServices(
     IShardEncoder Encoder, IShardDecoder Decoder, IVideoDecoder VideoDecoder,
     ISlideshowWriter Slideshow, ISelfTest SelfTest, ISessionStore Sessions,
-    IParityReassembler Parity, IShardAssembler Assembler, HeatmapRenderer Heatmap);
+    IParityReassembler Parity, IShardAssembler Assembler, HeatmapRenderer Heatmap, ICalibration Calibration);
 
 /// <summary>Command-line interface, separated from Program for testability.</summary>
 internal sealed class Cli(AppSettings? settings = null)
@@ -28,7 +28,8 @@ internal sealed class Cli(AppSettings? settings = null)
                 provider.GetRequiredService<ISessionStore>(),
                 provider.GetRequiredService<IParityReassembler>(),
                 provider.GetRequiredService<IShardAssembler>(),
-                provider.GetRequiredService<HeatmapRenderer>());
+                provider.GetRequiredService<HeatmapRenderer>(),
+                provider.GetRequiredService<ICalibration>());
             return RunCore(args, @out, err, cfg, services);
         }
         catch (ShardDecodeException ex)
@@ -272,6 +273,20 @@ internal sealed class Cli(AppSettings? settings = null)
                 @out.WriteLine($"original  : {h.OriginalLength:N0} bytes{((h.Flags & ShardHeader.FlagCompressed) != 0 ? $", deflate-compressed to {h.TotalLength:N0}" : "")}");
                 @out.WriteLine($"sha-256   : {Convert.ToHexStringLower(h.Sha256)}");
                 return 0;
+            }
+
+            case "calibrate":
+            {
+                var (positional, named, _) = ParseArgs(args[1..]);
+                if (positional.Count == 1 && Directory.Exists(positional[0]))
+                    return services.Calibration.Analyze(positional[0], @out);
+                if (positional.Count != 0)
+                    return Help(@out, err, "calibrate takes no arguments (generate) or one captured folder (analyze).");
+                var (width, height, note) = ResolveResolution(Get(named, "-r", "--resolution") ?? "auto");
+                string outDir = Get(named, "-o", "--out") ?? Path.Combine(Environment.CurrentDirectory, "qrshard-calibration");
+                if (note.Length > 0)
+                    @out.WriteLine($"Resolution {width}x{height}{note}");
+                return services.Calibration.Generate(outDir, width, height, @out);
             }
 
             case "test":

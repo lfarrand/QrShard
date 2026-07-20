@@ -50,6 +50,7 @@ internal static class ServiceRegistration
             .AddSingleton<ISlideshowWriter, SlideshowWriter>()
             .AddSingleton<ISelfTest, SelfTest>()
             .AddSingleton<ISessionStore, SessionStore>()
+            .AddSingleton<ICalibration, CalibrationRunner>()
             .AddSingleton<HeatmapRenderer>()
             .BuildServiceProvider();
 }
