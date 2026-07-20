@@ -229,6 +229,9 @@ internal sealed class ShardDecoder(
             Salvage();
             throw new ShardDecodeException("Shard header is corrupt. Recapture this image.");
         }
+        if ((header.Flags & ~ShardHeader.KnownFlags) != 0)
+            throw new ShardDecodeException(
+                $"This shard uses features from a newer QrShard (unknown flags 0x{header.Flags & ~ShardHeader.KnownFlags:X2}). Update QrShard to decode it.");
         if (headerLen + header.PayloadLength > stream.Length)
         {
             Salvage();

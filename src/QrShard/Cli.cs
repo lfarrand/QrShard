@@ -177,7 +177,8 @@ internal sealed class Cli(AppSettings? settings = null)
 
             case "verify":
             {
-                var (positional, named, _) = ParseArgs(args[1..]);
+                var (positional, named, vflags) = ParseArgs(args[1..]);
+                bool json = vflags.Contains("--json");
                 var images = new List<string>();
                 foreach (string p in positional)
                 {
@@ -192,7 +193,9 @@ internal sealed class Cli(AppSettings? settings = null)
                 if (images.Count == 0 && session is null)
                     return Help(@out, err, "verify requires a folder, image files, or --session.");
 
-                var shards = images.Count > 0 ? services.Decoder.CollectShards(images, @out.WriteLine) : [];
+                var shards = images.Count > 0
+                    ? services.Decoder.CollectShards(images, json ? _ => { } : @out.WriteLine)
+                    : [];
                 if (session is not null)
                     shards = MergeShards(services.Sessions.Load(session), shards);
                 if (shards.Count == 0)
@@ -201,8 +204,13 @@ internal sealed class Cli(AppSettings? settings = null)
                     return 1;
                 }
 
-                PrintSetStatus(@out, shards, services.Parity);
                 bool complete = services.Parity.IsSetComplete(shards);
+                if (json)
+                {
+                    @out.WriteLine(new JsonReports().VerifyReport(shards, services.Parity));
+                    return complete ? 0 : 1;
+                }
+                PrintSetStatus(@out, shards, services.Parity);
                 @out.WriteLine(complete
                     ? "Complete: every file can be fully reassembled."
                     : "Incomplete: capture the missing images and verify again.");
@@ -211,20 +219,25 @@ internal sealed class Cli(AppSettings? settings = null)
 
             case "info":
             {
-                var (positional, named, _) = ParseArgs(args[1..]);
+                var (positional, named, iflags) = ParseArgs(args[1..]);
                 if (positional.Count != 1 || !File.Exists(positional[0]))
                     return Help(@out, err, "info requires one shard image.");
+                bool json = iflags.Contains("--json");
                 DecodedShard shard;
                 string? heatmapPath = Get(named, "--heatmap");
+                string? renderedHeatmap = null;
+                int correctedCw = 0, failedCw = 0;
                 if (heatmapPath is not null)
                 {
                     var diag = services.Decoder.Diagnose(positional[0]);
                     if (diag.Layout is not null && diag.Layout.EccParity > 0)
                     {
                         services.Heatmap.Render(diag.Layout, diag.CodewordErrors, heatmapPath);
-                        int corrected = diag.CodewordErrors.Count(e => e > 0);
-                        int failed = diag.CodewordErrors.Count(e => e < 0);
-                        @out.WriteLine($"heatmap   : {heatmapPath} ({corrected} codeword(s) needed correction, {failed} beyond correction)");
+                        renderedHeatmap = heatmapPath;
+                        correctedCw = diag.CodewordErrors.Count(e => e > 0);
+                        failedCw = diag.CodewordErrors.Count(e => e < 0);
+                        if (!json)
+                            @out.WriteLine($"heatmap   : {heatmapPath} ({correctedCw} codeword(s) needed correction, {failedCw} beyond correction)");
                     }
                     else
                     {
@@ -242,6 +255,11 @@ internal sealed class Cli(AppSettings? settings = null)
                 else
                 {
                     shard = services.Decoder.DecodeImage(positional[0], new DecodeScratch());
+                }
+                if (json)
+                {
+                    @out.WriteLine(new JsonReports().InfoReport(shard, renderedHeatmap, correctedCw, failedCw));
+                    return 0;
                 }
                 var h = shard.Header;
                 @out.WriteLine($"file      : {h.FileName}");
@@ -372,7 +390,7 @@ internal sealed class Cli(AppSettings? settings = null)
         var flags = new HashSet<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--no-compress" or "--camera" or "--video")
+            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch")
                 flags.Add(args[i]);
             else if (args[i].StartsWith('-') && i + 1 < args.Length)
                 named[args[i]] = args[++i];
