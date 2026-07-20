@@ -116,13 +116,15 @@ public class PayloadFeatureTests
         File.WriteAllBytes(Path.Combine(dir, "sub", "b.bin"), contentB);
 
         string shardDir = tmp.File("shards");
-        int code = new Cli().Run(["encode", dir, "-o", shardDir, "-r", "900"], new StringWriter(), new StringWriter());
-        Assert.Equal(0, code);
+        var encodeErr = new StringWriter();
+        int code = new Cli().Run(["encode", dir, "-o", shardDir, "-r", "900"], new StringWriter(), encodeErr);
+        Assert.True(code == 0, $"encode failed (exit {code}): {encodeErr}");
 
         string destDir = tmp.File("restored");
         var stdout = new StringWriter();
-        code = new Cli().Run(["decode", shardDir, "-o", destDir], stdout, new StringWriter());
-        Assert.Equal(0, code);
+        var decodeErr = new StringWriter();
+        code = new Cli().Run(["decode", shardDir, "-o", destDir], stdout, decodeErr);
+        Assert.True(code == 0, $"decode failed (exit {code}): {decodeErr}");
         Assert.Contains("extracted", stdout.ToString());
         Assert.Equal(contentA, File.ReadAllBytes(Path.Combine(destDir, "a.bin")));
         Assert.Equal(contentB, File.ReadAllBytes(Path.Combine(destDir, "sub", "b.bin")));
