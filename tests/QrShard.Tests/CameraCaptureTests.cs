@@ -39,7 +39,7 @@ public class CameraCaptureTests
     /// radial lens distortion (barrel > 0, pincushion < 0), vignette darkening toward the
     /// corners, a lateral glare/brightness gradient, then optical blur and JPEG compression.
     /// </summary>
-    private static string SimulateCameraCapture(string srcPath, string dstPath,
+    internal static string SimulateCameraCapture(string srcPath, string dstPath,
         double rotationDegrees, double perspective, float blurSigma = 0.6f, int jpegQuality = 88,
         double barrel = 0, double vignette = 0, double glare = 0)
     {

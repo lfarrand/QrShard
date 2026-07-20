@@ -46,7 +46,8 @@ internal interface IStripReader
 /// <summary>Samples every data cell and classifies it against the measured palette.</summary>
 internal interface IGridSampler
 {
-    byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch);
+    byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
+        out bool[]? suspectBytes);
 }
 
 /// <summary>Reassembles decoded shards into output files.</summary>
@@ -81,6 +82,20 @@ internal interface ICameraRectifier
 {
     /// <summary>Rectified bitmap, or null when the image carries no detectable finder patterns.</summary>
     Bitmap? TryRectify(Bitmap photo);
+
+    /// <summary>Finder detection only — cacheable across video frames.</summary>
+    CameraPose? DetectPose(Bitmap photo);
+
+    /// <summary>Warp + refinement under a known (possibly cached) pose.</summary>
+    Bitmap RectifyWithPose(Bitmap photo, CameraPose pose);
+}
+
+/// <summary>Guides encode-setting selection: emits density probes, analyzes their captures.</summary>
+internal interface ICalibration
+{
+    int Generate(string outDir, int width, int height, TextWriter output);
+
+    int Analyze(string capturedFolder, TextWriter output);
 }
 
 /// <summary>Illumination-adaptive dark/light binarization of a photo.</summary>

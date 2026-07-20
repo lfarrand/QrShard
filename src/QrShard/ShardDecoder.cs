@@ -193,7 +193,7 @@ internal sealed class ShardDecoder(
         if (diagnostics is not null)
             diagnostics.Layout = layout;
         var palette = stripReader.ReadPalette(bmp, inner, layout);
-        byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch);
+        byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch, out bool[]? suspectBytes);
 
         // Copy the sampled cells into the diagnostics on failure — the raw material for
         // multi-capture fusion. First failing attempt wins (scratch buffers are reused).
@@ -209,7 +209,7 @@ internal sealed class ShardDecoder(
         {
             stream = scratch.Recovered(layout.CodewordCount * Fec.DataLength(layout.EccParity));
             int[]? codewordErrors = diagnostics is not null ? new int[layout.CodewordCount] : null;
-            bool recovered = fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes, codewordErrors);
+            bool recovered = fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes, codewordErrors, suspectBytes);
             if (diagnostics is not null)
                 diagnostics.CodewordErrors = codewordErrors!;
             if (!recovered)
@@ -229,6 +229,9 @@ internal sealed class ShardDecoder(
             Salvage();
             throw new ShardDecodeException("Shard header is corrupt. Recapture this image.");
         }
+        if ((header.Flags & ~ShardHeader.KnownFlags) != 0)
+            throw new ShardDecodeException(
+                $"This shard uses features from a newer QrShard (unknown flags 0x{header.Flags & ~ShardHeader.KnownFlags:X2}). Update QrShard to decode it.");
         if (headerLen + header.PayloadLength > stream.Length)
         {
             Salvage();

@@ -120,8 +120,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     /// that codeword's corrected-byte count, or -1 if it was damaged beyond correction — the
     /// data behind the diagnostic heatmap.
     /// </summary>
+    /// <param name="suspectBytes">
+    /// Optional per-byte suspicion flags in interleaved indexing (byte k = symbol k/cwCount of
+    /// codeword k%cwCount) — cells whose color classification was ambiguous. Flagged symbols
+    /// are retried as ERASURES when errors-only decoding fails: RS corrects 2x as many known
+    /// positions as unknown ones, so borderline captures gain real capacity.
+    /// </param>
     public bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes,
-        int[]? codewordErrors = null)
+        int[]? codewordErrors = null, bool[]? suspectBytes = null)
     {
         int dataLen = DataLength(parity);
         if (dest.Length < cwCount * dataLen)
@@ -163,13 +169,13 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     if (dirty.GetElement(lane) == 0)
                         CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
                     else
-                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors);
+                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes);
                 }
             }
         }
 
         for (; j < cwCount; j++)
-            DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors);
+            DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes);
 
         correctedBytes = corrected;
         return failures == 0;
@@ -252,23 +258,61 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     }
 
     private void DecodeCodeword(byte[] buffer, int parity, int cwCount, int j, int dataLen, byte[] dest,
-        byte[] cwScratch, ref int corrected, ref int failures, int[]? codewordErrors)
+        byte[] cwScratch, ref int corrected, ref int failures, int[]? codewordErrors, bool[]? suspectBytes)
     {
         for (int i = 0; i < CodewordLength; i++)
             cwScratch[i] = buffer[i * cwCount + j];
 
+        // Errors-only first: it is the proven path and erasure marks can be wrong (a wrongly
+        // flagged good symbol eats capacity). Only when that fails do the flags get their say.
         if (reedSolomon.TryDecode(cwScratch, parity, out int errors))
         {
             cwScratch.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
             corrected += errors;
             if (codewordErrors is not null)
                 codewordErrors[j] = errors;
+            return;
         }
-        else
+
+        if (suspectBytes is not null && TryErasureRetry(buffer, parity, cwCount, j, cwScratch, suspectBytes, out errors))
         {
-            failures++;
+            cwScratch.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
+            corrected += errors;
             if (codewordErrors is not null)
-                codewordErrors[j] = -1;
+                codewordErrors[j] = errors;
+            return;
         }
+
+        failures++;
+        if (codewordErrors is not null)
+            codewordErrors[j] = -1;
+    }
+
+    private bool TryErasureRetry(byte[] buffer, int parity, int cwCount, int j, byte[] cwScratch,
+        bool[] suspectBytes, out int errors)
+    {
+        errors = 0;
+
+        // Collect this codeword's flagged symbols. Leave slack for one unmarked error
+        // (2·1 + f ≤ parity); more flags than that means the marks are useless here.
+        Span<int> erasures = stackalloc int[MaxParity];
+        int f = 0;
+        int limit = parity - 2;
+        for (int i = 0; i < CodewordLength; i++)
+        {
+            int idx = i * cwCount + j;
+            if (idx >= suspectBytes.Length || !suspectBytes[idx])
+                continue;
+            if (f == limit)
+                return false; // over-flagged codeword — erasure info not usable
+            erasures[f++] = i;
+        }
+        if (f == 0)
+            return false;
+
+        // The failed errors-only attempt may have scribbled on the scratch — re-extract.
+        for (int i = 0; i < CodewordLength; i++)
+            cwScratch[i] = buffer[i * cwCount + j];
+        return reedSolomon.TryDecodeWithErasures(cwScratch, parity, erasures[..f], out errors);
     }
 }

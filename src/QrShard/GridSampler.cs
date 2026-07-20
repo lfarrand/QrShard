@@ -9,7 +9,14 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     {
     }
 
-    public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch)
+    /// <summary>Squared-distance floor below which a classification is trusted outright.</summary>
+    private const long ConfidentDist = 200;
+
+    /// <summary>Squared distance beyond which a sample is suspect regardless of margin.</summary>
+    private const long AbsoluteSuspectDist = 4000;
+
+    public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
+        out bool[]? suspectBytes)
     {
         double sx = inner.W / layout.InnerW;
         double sy = inner.H / layout.InnerH;
@@ -23,36 +30,86 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
             offsets.AddRange([(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]);
 
         int bits = layout.BitsPerCell;
-        byte[] stream = scratch.ClearedCells((int)((layout.TotalBits + 7) / 8));
+        int streamLength = (int)((layout.TotalBits + 7) / 8);
+        byte[] stream = scratch.ClearedCells(streamLength);
+        // Ambiguity flags feed erasure decoding — only meaningful when ECC is present.
+        bool[]? suspects = layout.EccParity > 0 ? scratch.ClearedSuspects(streamLength) : null;
 
         if (palettes.Interpolate)
-            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, sx, sy, bits);
+            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, sx, sy, bits);
         else
-            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, scratch, sx, sy, bits);
+            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, scratch, sx, sy, bits);
+        suspectBytes = suspects;
         return stream;
     }
 
+    /// <summary>
+    /// Flags a cell whose winning classification was uncertain: far from every palette color,
+    /// or nearly equidistant to a second color. Its bytes become Reed-Solomon erasure
+    /// candidates — a wrong flag only costs capacity on codewords that already need help.
+    /// </summary>
+    private void MarkIfAmbiguous(bool[]? suspects, Rgb24[] palette, int best, long bestDist,
+        byte r, byte g, byte b, long cellIndex, int bits)
+    {
+        if (suspects is null || bestDist <= ConfidentDist)
+            return;
+        bool ambiguous = bestDist > AbsoluteSuspectDist
+            || paletteMath.SecondNearestDistance(palette, r, g, b, best) < bestDist * 2;
+        if (!ambiguous)
+            return;
+        long firstBit = cellIndex * bits;
+        long firstByte = firstBit >> 3, lastByte = (firstBit + bits - 1) >> 3;
+        for (long i = firstByte; i <= lastByte && i < suspects.Length; i++)
+            suspects[i] = true;
+    }
+
+    /// <summary>
+    /// Precomputed pixel coordinates: x depends only on the column and y only on the row, so
+    /// the per-cell work collapses to array lookups instead of floating-point math.
+    /// </summary>
+    private static int[] ColumnPixels(InnerRect inner, Layout layout, double sx, int width)
+    {
+        var cols = new int[layout.GridW];
+        for (int gx = 0; gx < layout.GridW; gx++)
+        {
+            double xEnc = layout.DataLeft + (gx + 0.5) * layout.CellPx;
+            cols[gx] = Math.Clamp((int)Math.Floor(inner.X0 + xEnc * sx), 0, width - 1);
+        }
+        return cols;
+    }
+
+    private static int RowPixel(InnerRect inner, Layout layout, double sy, int height, int gy)
+    {
+        double yEnc = layout.DataTop + (gy + 0.5) * layout.CellPx;
+        return Math.Clamp((int)Math.Floor(inner.Y0 + yEnc * sy), 0, height - 1);
+    }
+
     private void ReadUniform(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette,
-        List<(int dx, int dy)> offsets, byte[] stream, DecodeScratch scratch, double sx, double sy, int bits)
+        List<(int dx, int dy)> offsets, byte[] stream, bool[]? suspects, DecodeScratch scratch,
+        double sx, double sy, int bits)
     {
         // Lazy nearest-color lookup keyed on 5-bit-per-channel quantized RGB.
         int[] lut = scratch.ResetNearestColorLut();
+        int width = bmp.Width, height = bmp.Height;
+        var px = bmp.Px;
+        int[] cols = ColumnPixels(inner, layout, sx, width);
+        var offsetArray = offsets.ToArray();
 
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {
-            double yEnc = layout.DataTop + (gy + 0.5) * layout.CellPx;
-            double y = inner.Y0 + yEnc * sy;
+            int rowY = RowPixel(inner, layout, sy, height, gy);
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
             {
-                double xEnc = layout.DataLeft + (gx + 0.5) * layout.CellPx;
-                double x = inner.X0 + xEnc * sx;
-
+                int colX = cols[gx];
                 int best = 0;
                 long bestDist = long.MaxValue;
-                foreach (var (dx, dy) in offsets)
+                byte bR = 0, bG = 0, bB = 0;
+                foreach (var (dx, dy) in offsetArray)
                 {
-                    var c = bmp.SampleBox(x + dx, y + dy, 0, 0);
+                    int xi = Math.Clamp(colX + dx, 0, width - 1);
+                    int yi = Math.Clamp(rowY + dy, 0, height - 1);
+                    var c = px[yi * width + xi];
                     int key = (c.R >> 3 << 10) | (c.G >> 3 << 5) | (c.B >> 3);
                     int v = lut[key];
                     if (v < 0)
@@ -63,11 +120,13 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     {
                         bestDist = dist;
                         best = v;
+                        (bR, bG, bB) = (c.R, c.G, c.B);
                         if (dist == 0)
                             break;
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
+                MarkIfAmbiguous(suspects, palette, best, bestDist, bR, bG, bB, cellIndex, bits);
             }
         }
     }
@@ -78,11 +137,15 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// a photo) moves the classification targets with it. No LUT — the palette changes per row.
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
-        List<(int dx, int dy)> offsets, byte[] stream, double sx, double sy, int bits)
+        List<(int dx, int dy)> offsets, byte[] stream, bool[]? suspects, double sx, double sy, int bits)
     {
         double yTopStrip = layout.Gutter + layout.MetaH * 1.5;
         double yBottomStrip = layout.InnerH - layout.Gutter - layout.MetaH * 1.5;
         var rowPalette = new Rgb24[palettes.Best.Length];
+        int width = bmp.Width, height = bmp.Height;
+        var px = bmp.Px;
+        int[] cols = ColumnPixels(inner, layout, sx, width);
+        var offsetArray = offsets.ToArray();
 
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
@@ -92,17 +155,18 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
             for (int c = 0; c < rowPalette.Length; c++)
                 rowPalette[c] = Lerp(palettes.Top[c], palettes.Bottom[c], t);
 
-            double y = inner.Y0 + yEnc * sy;
+            int rowY = RowPixel(inner, layout, sy, height, gy);
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
             {
-                double xEnc = layout.DataLeft + (gx + 0.5) * layout.CellPx;
-                double x = inner.X0 + xEnc * sx;
-
+                int colX = cols[gx];
                 int best = 0;
                 long bestDist = long.MaxValue;
-                foreach (var (dx, dy) in offsets)
+                byte bR = 0, bG = 0, bB = 0;
+                foreach (var (dx, dy) in offsetArray)
                 {
-                    var c = bmp.SampleBox(x + dx, y + dy, 0, 0);
+                    int xi = Math.Clamp(colX + dx, 0, width - 1);
+                    int yi = Math.Clamp(rowY + dy, 0, height - 1);
+                    var c = px[yi * width + xi];
                     int v = paletteMath.Nearest(rowPalette, c.R, c.G, c.B);
                     long dr = c.R - rowPalette[v].R, dg = c.G - rowPalette[v].G, db = c.B - rowPalette[v].B;
                     long dist = dr * dr + dg * dg + db * db;
@@ -110,11 +174,13 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     {
                         bestDist = dist;
                         best = v;
+                        (bR, bG, bB) = (c.R, c.G, c.B);
                         if (dist == 0)
                             break;
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
+                MarkIfAmbiguous(suspects, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits);
             }
         }
     }

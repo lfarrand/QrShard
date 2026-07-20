@@ -49,4 +49,15 @@ internal sealed class DecodeScratch
         Array.Fill(_lut, -1);
         return _lut;
     }
+
+    private bool[]? _suspects;
+
+    public bool[] ClearedSuspects(int length)
+    {
+        if (_suspects is null || _suspects.Length < length)
+            _suspects = new bool[length];
+        else
+            Array.Clear(_suspects, 0, length);
+        return _suspects;
+    }
 }

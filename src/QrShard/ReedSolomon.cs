@@ -219,6 +219,146 @@ internal sealed class ReedSolomon
         return true;
     }
 
+    /// <summary>
+    /// Errors-AND-erasures decoding: positions in <paramref name="erasures"/> are known-suspect
+    /// symbols (their received values may still be right — magnitude 0 corrections are fine).
+    /// Capacity: 2·errors + erasures ≤ nsym, i.e. a flagged symbol costs half an unknown error.
+    /// Implemented as Berlekamp-Massey seeded with the erasure locator Γ(x) = Π(1 - X_k x)
+    /// (Blahut), after which Chien/Forney/verify run exactly as in <see cref="TryDecode"/>.
+    /// </summary>
+    public bool TryDecodeWithErasures(Span<byte> codeword, int nsym, ReadOnlySpan<int> erasures, out int correctedErrors)
+    {
+        correctedErrors = 0;
+        if (nsym == 0)
+            return true;
+        if (erasures.Length == 0)
+            return TryDecode(codeword, nsym, out correctedErrors);
+        if (erasures.Length > nsym)
+            return false;
+        int n = codeword.Length;
+
+        Span<byte> synd = stackalloc byte[nsym];
+        bool clean = true;
+        for (int i = 0; i < nsym; i++)
+        {
+            byte[] mulA = AlphaMul[i];
+            byte s = 0;
+            foreach (byte c in codeword)
+                s = (byte)(mulA[s] ^ c);
+            synd[i] = s;
+            clean &= s == 0;
+        }
+        if (clean)
+            return true; // the "erasures" carried correct values after all
+
+        // Erasure locator Γ(x) = Π (1 - X_k x), ascending coefficients (minus = plus in GF(2^8)).
+        int f = erasures.Length;
+        var gamma = new byte[] { 1 };
+        foreach (int k in erasures)
+        {
+            if (k < 0 || k >= n)
+                return false;
+            byte xk = Exp[(n - 1 - k) % 255];
+            var next = new byte[gamma.Length + 1];
+            for (int j = 0; j < gamma.Length; j++)
+            {
+                next[j] ^= gamma[j];
+                next[j + 1] ^= Mul(gamma[j], xk);
+            }
+            gamma = next;
+        }
+
+        // BM seeded with Γ: iterate the nsym - f remaining syndromes; L counts total errata.
+        var sigma = (byte[])gamma.Clone();
+        var prev = (byte[])gamma.Clone();
+        int total = f, shift = 1;
+        byte prevDelta = 1;
+        for (int i = f; i < nsym; i++)
+        {
+            byte delta = 0;
+            for (int j = 0; j < sigma.Length && j <= i; j++)
+                delta ^= Mul(sigma[j], synd[i - j]);
+
+            if (delta == 0)
+            {
+                shift++;
+            }
+            else if (2 * total <= i + f)
+            {
+                byte[] t = sigma;
+                sigma = AddScaledShifted(sigma, prev, Div(delta, prevDelta), shift);
+                total = i + 1 - total + f;
+                prev = t;
+                prevDelta = delta;
+                shift = 1;
+            }
+            else
+            {
+                sigma = AddScaledShifted(sigma, prev, Div(delta, prevDelta), shift);
+                shift++;
+            }
+        }
+        if (2 * total - f > nsym)
+            return false; // errors beyond the erasure-adjusted capacity
+
+        // Chien search for the combined errata locator's roots.
+        Span<int> errPos = stackalloc int[nsym];
+        int found = 0;
+        for (int k = 0; k < n; k++)
+        {
+            byte xInv = Exp[(255 - (n - 1 - k) % 255) % 255];
+            if (EvalPoly(sigma, xInv) == 0)
+            {
+                if (found == total)
+                    return false;
+                errPos[found++] = k;
+            }
+        }
+        if (found != total)
+            return false;
+
+        // Forney (fcr = 0), identical to the errors-only path.
+        Span<byte> omega = stackalloc byte[nsym];
+        for (int i = 0; i < nsym; i++)
+        {
+            byte acc = 0;
+            for (int j = 0; j <= i && j < sigma.Length; j++)
+                acc ^= Mul(sigma[j], synd[i - j]);
+            omega[i] = acc;
+        }
+        int nonZero = 0;
+        foreach (int k in errPos[..found])
+        {
+            int logX = (n - 1 - k) % 255;
+            byte xk = Exp[logX];
+            byte xInv = Exp[(255 - logX) % 255];
+
+            byte num = EvalPoly(omega, xInv);
+            byte den = 0;
+            for (int j = 1; j < sigma.Length; j += 2)
+                den ^= Mul(sigma[j], PowAt(xInv, j - 1));
+            if (den == 0)
+                return false;
+            byte magnitude = Mul(xk, Div(num, den));
+            if (magnitude != 0)
+                nonZero++;
+            codeword[k] ^= magnitude;
+        }
+
+        // Verify: all syndromes of the corrected codeword must vanish.
+        for (int i = 0; i < nsym; i++)
+        {
+            byte[] mulA = AlphaMul[i];
+            byte s = 0;
+            foreach (byte c in codeword)
+                s = (byte)(mulA[s] ^ c);
+            if (s != 0)
+                return false;
+        }
+        correctedErrors = nonZero;
+        return true;
+    }
+
     /// <summary>σ + scale * x^shift * prev (ascending-coefficient polynomials).</summary>
     private static byte[] AddScaledShifted(byte[] sigma, byte[] prev, byte scale, int shift)
     {

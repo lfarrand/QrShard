@@ -37,6 +37,17 @@ internal sealed class CameraRectifier(
     /// <summary>Rectified bitmap, or null when the image carries no detectable finder patterns.</summary>
     public Bitmap? TryRectify(Bitmap photo)
     {
+        var pose = DetectPose(photo);
+        return pose is null ? null : RectifyWithPose(photo, pose);
+    }
+
+    /// <summary>
+    /// Finder detection only — the expensive part of rectification. Video decoding caches the
+    /// pose across consecutive frames (a handheld recording barely moves between frames) and
+    /// re-detects only when a cached pose stops decoding.
+    /// </summary>
+    public CameraPose? DetectPose(Bitmap photo)
+    {
         bool[] dark = binarizer.Threshold(photo);
         var clusters = finderDetector.FindCandidates(photo, dark);
         if (clusters.Count < 4)
@@ -47,10 +58,14 @@ internal sealed class CameraRectifier(
             return null;
 
         var oriented = quadSelector.ResolveOrientation(photo, dark, quad);
-        if (oriented is null)
-            return null;
+        return oriented is null ? null : new CameraPose(oriented);
+    }
 
-        var geometry = BuildGeometry(oriented);
+    /// <summary>Warp + phase-2 refinement under a known pose. Refinement re-traces the frame in
+    /// THIS photo, so it absorbs the small drift between a cached pose and the current frame.</summary>
+    public Bitmap RectifyWithPose(Bitmap photo, CameraPose pose)
+    {
+        var geometry = BuildGeometry(pose.Quad);
         var coarse = WarpHomography(photo, geometry);
         return TryRefine(photo, coarse, geometry) ?? coarse;
     }
@@ -122,13 +137,16 @@ internal sealed class CameraRectifier(
     private static Bitmap WarpRefined(Bitmap photo, RefinedMap map, int canvasW, int canvasH)
     {
         var px = new Rgb24[canvasW * canvasH];
+        Span<double> black = stackalloc double[3];
+        Span<double> white = stackalloc double[3];
         for (int y = 0; y < canvasH; y++)
         {
+            map.BeginRow(y + 0.5);
             for (int x = 0; x < canvasW; x++)
             {
                 var (sx, sy) = map.Apply(x + 0.5, y + 0.5);
                 var sample = photo.SampleBilinear(sx - 0.5, sy - 0.5);
-                var (black, white) = map.Illumination(x + 0.5, y + 0.5);
+                map.Illumination(x + 0.5, black, white);
                 px[y * canvasW + x] = new Rgb24(
                     Normalize(sample.R, black[0], white[0]),
                     Normalize(sample.G, black[1], white[1]),

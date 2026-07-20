@@ -6,7 +6,7 @@ namespace QrShard;
 internal sealed record CliServices(
     IShardEncoder Encoder, IShardDecoder Decoder, IVideoDecoder VideoDecoder,
     ISlideshowWriter Slideshow, ISelfTest SelfTest, ISessionStore Sessions,
-    IParityReassembler Parity, IShardAssembler Assembler, HeatmapRenderer Heatmap);
+    IParityReassembler Parity, IShardAssembler Assembler, HeatmapRenderer Heatmap, ICalibration Calibration);
 
 /// <summary>Command-line interface, separated from Program for testability.</summary>
 internal sealed class Cli(AppSettings? settings = null)
@@ -28,7 +28,8 @@ internal sealed class Cli(AppSettings? settings = null)
                 provider.GetRequiredService<ISessionStore>(),
                 provider.GetRequiredService<IParityReassembler>(),
                 provider.GetRequiredService<IShardAssembler>(),
-                provider.GetRequiredService<HeatmapRenderer>());
+                provider.GetRequiredService<HeatmapRenderer>(),
+                provider.GetRequiredService<ICalibration>());
             return RunCore(args, @out, err, cfg, services);
         }
         catch (ShardDecodeException ex)
@@ -135,12 +136,20 @@ internal sealed class Cli(AppSettings? settings = null)
 
             case "decode":
             {
-                var (positional, named, _) = ParseArgs(args[1..]);
+                var (positional, named, dflags) = ParseArgs(args[1..]);
                 if (positional.Count == 0)
                     return Help(@out, err, "decode requires a folder, image files, or a video recording.");
 
-                // A single video file (or animated image) is a recording of the slideshow.
                 string? password = Get(named, "-p", "--password");
+                if (dflags.Contains("--watch"))
+                {
+                    if (positional.Count != 1 || !Directory.Exists(positional[0]))
+                        return Help(@out, err, "--watch requires exactly one folder to watch.");
+                    return DecodeWatch(services, positional[0], Get(named, "--session"),
+                        Get(named, "-o", "--out"), password, @out);
+                }
+
+                // A single video file (or animated image) is a recording of the slideshow.
                 if (positional.Count == 1 && File.Exists(positional[0]) &&
                     (VideoDecoder.IsVideoFile(positional[0]) ||
                      (IsImageFile(positional[0]) && VideoDecoder.IsAnimatedImage(positional[0]))))
@@ -177,7 +186,8 @@ internal sealed class Cli(AppSettings? settings = null)
 
             case "verify":
             {
-                var (positional, named, _) = ParseArgs(args[1..]);
+                var (positional, named, vflags) = ParseArgs(args[1..]);
+                bool json = vflags.Contains("--json");
                 var images = new List<string>();
                 foreach (string p in positional)
                 {
@@ -192,7 +202,9 @@ internal sealed class Cli(AppSettings? settings = null)
                 if (images.Count == 0 && session is null)
                     return Help(@out, err, "verify requires a folder, image files, or --session.");
 
-                var shards = images.Count > 0 ? services.Decoder.CollectShards(images, @out.WriteLine) : [];
+                var shards = images.Count > 0
+                    ? services.Decoder.CollectShards(images, json ? _ => { } : @out.WriteLine)
+                    : [];
                 if (session is not null)
                     shards = MergeShards(services.Sessions.Load(session), shards);
                 if (shards.Count == 0)
@@ -201,8 +213,13 @@ internal sealed class Cli(AppSettings? settings = null)
                     return 1;
                 }
 
-                PrintSetStatus(@out, shards, services.Parity);
                 bool complete = services.Parity.IsSetComplete(shards);
+                if (json)
+                {
+                    @out.WriteLine(new JsonReports().VerifyReport(shards, services.Parity));
+                    return complete ? 0 : 1;
+                }
+                PrintSetStatus(@out, shards, services.Parity);
                 @out.WriteLine(complete
                     ? "Complete: every file can be fully reassembled."
                     : "Incomplete: capture the missing images and verify again.");
@@ -211,20 +228,25 @@ internal sealed class Cli(AppSettings? settings = null)
 
             case "info":
             {
-                var (positional, named, _) = ParseArgs(args[1..]);
+                var (positional, named, iflags) = ParseArgs(args[1..]);
                 if (positional.Count != 1 || !File.Exists(positional[0]))
                     return Help(@out, err, "info requires one shard image.");
+                bool json = iflags.Contains("--json");
                 DecodedShard shard;
                 string? heatmapPath = Get(named, "--heatmap");
+                string? renderedHeatmap = null;
+                int correctedCw = 0, failedCw = 0;
                 if (heatmapPath is not null)
                 {
                     var diag = services.Decoder.Diagnose(positional[0]);
                     if (diag.Layout is not null && diag.Layout.EccParity > 0)
                     {
                         services.Heatmap.Render(diag.Layout, diag.CodewordErrors, heatmapPath);
-                        int corrected = diag.CodewordErrors.Count(e => e > 0);
-                        int failed = diag.CodewordErrors.Count(e => e < 0);
-                        @out.WriteLine($"heatmap   : {heatmapPath} ({corrected} codeword(s) needed correction, {failed} beyond correction)");
+                        renderedHeatmap = heatmapPath;
+                        correctedCw = diag.CodewordErrors.Count(e => e > 0);
+                        failedCw = diag.CodewordErrors.Count(e => e < 0);
+                        if (!json)
+                            @out.WriteLine($"heatmap   : {heatmapPath} ({correctedCw} codeword(s) needed correction, {failedCw} beyond correction)");
                     }
                     else
                     {
@@ -243,6 +265,11 @@ internal sealed class Cli(AppSettings? settings = null)
                 {
                     shard = services.Decoder.DecodeImage(positional[0], new DecodeScratch());
                 }
+                if (json)
+                {
+                    @out.WriteLine(new JsonReports().InfoReport(shard, renderedHeatmap, correctedCw, failedCw));
+                    return 0;
+                }
                 var h = shard.Header;
                 @out.WriteLine($"file      : {h.FileName}");
                 @out.WriteLine($"file id   : {h.FileId:X16}");
@@ -254,6 +281,40 @@ internal sealed class Cli(AppSettings? settings = null)
                 @out.WriteLine($"original  : {h.OriginalLength:N0} bytes{((h.Flags & ShardHeader.FlagCompressed) != 0 ? $", deflate-compressed to {h.TotalLength:N0}" : "")}");
                 @out.WriteLine($"sha-256   : {Convert.ToHexStringLower(h.Sha256)}");
                 return 0;
+            }
+
+            case "receive":
+            {
+                var (_, named, _) = ParseArgs(args[1..]);
+                string? device = Get(named, "--device") ?? LiveFrameSource.DefaultDevice();
+                if (device is null)
+                    return Help(@out, err,
+                        "receive on Windows needs --device \"<webcam name>\" (list devices with: ffmpeg -list_devices true -f dshow -i dummy)");
+                double fps = GetDouble(named, "--fps", 10.0);
+                @out.WriteLine($"Receiving from '{device}' at {fps} fps — point the camera at the sender's slideshow.");
+                @out.WriteLine("Decoding stops automatically the moment the transfer is complete.");
+
+                // Same decoder, different frame source: the live pipe instead of a recording.
+                var live = new VideoDecoder(services.Decoder, new LiveFrameSource(Get(named, "--format")),
+                    services.Assembler, services.Parity, new CameraRectifier());
+                var received = live.Decode(device, Get(named, "-o", "--out"), fps, @out.WriteLine, out var liveStats,
+                    Get(named, "-p", "--password"));
+                @out.WriteLine($"Restored {received.Count} file(s) after examining {liveStats.FramesExamined} frame(s).");
+                return 0;
+            }
+
+            case "calibrate":
+            {
+                var (positional, named, _) = ParseArgs(args[1..]);
+                if (positional.Count == 1 && Directory.Exists(positional[0]))
+                    return services.Calibration.Analyze(positional[0], @out);
+                if (positional.Count != 0)
+                    return Help(@out, err, "calibrate takes no arguments (generate) or one captured folder (analyze).");
+                var (width, height, note) = ResolveResolution(Get(named, "-r", "--resolution") ?? "auto");
+                string outDir = Get(named, "-o", "--out") ?? Path.Combine(Environment.CurrentDirectory, "qrshard-calibration");
+                if (note.Length > 0)
+                    @out.WriteLine($"Resolution {width}x{height}{note}");
+                return services.Calibration.Generate(outDir, width, height, @out);
             }
 
             case "test":
@@ -293,6 +354,80 @@ internal sealed class Cli(AppSettings? settings = null)
         services.Sessions.Save(sessionPath, merged);
         PrintSetStatus(@out, merged, services.Parity);
         @out.WriteLine($"Set incomplete — {merged.Count} shard(s) saved to {sessionPath}; capture the missing images and decode again with --session.");
+        return 3;
+    }
+
+    /// <summary>
+    /// Watch mode: poll a folder for new captures, decode each as it lands (with a settle
+    /// delay so half-written screenshots are left for the next poll), and assemble the moment
+    /// the set completes. Ctrl+C stops the watch, persisting progress when a session is given.
+    /// </summary>
+    private static int DecodeWatch(CliServices services, string folder, string? sessionPath,
+        string? outputPath, string? password, TextWriter @out)
+    {
+        var shards = sessionPath is not null ? services.Sessions.Load(sessionPath) : [];
+        if (shards.Count > 0)
+            @out.WriteLine($"  session: resuming with {shards.Count} previously collected shard(s)");
+        var seen = shards.Select(s => (s.Header.FileId, s.Header.Index, s.Header.IsParity)).ToHashSet();
+        var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        @out.WriteLine($"Watching {folder} — drop captures in; Ctrl+C stops" +
+                       (sessionPath is not null ? " (progress persists to the session)." : "."));
+
+        bool cancelled = false;
+        ConsoleCancelEventHandler onCancel = (_, e) =>
+        {
+            e.Cancel = true;
+            cancelled = true;
+        };
+        Console.CancelKeyPress += onCancel;
+        try
+        {
+            while (!cancelled)
+            {
+                var settled = DateTime.UtcNow - TimeSpan.FromMilliseconds(500);
+                var fresh = Directory.EnumerateFiles(folder)
+                    .Where(IsImageFile)
+                    .Where(f => !processed.Contains(f) && File.GetLastWriteTimeUtc(f) < settled)
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (fresh.Count > 0)
+                {
+                    processed.UnionWith(fresh);
+                    bool added = false;
+                    foreach (var s in services.Decoder.CollectShards(fresh, @out.WriteLine))
+                        if (seen.Add((s.Header.FileId, s.Header.Index, s.Header.IsParity)))
+                        {
+                            shards.Add(s);
+                            added = true;
+                        }
+                    if (added)
+                    {
+                        if (sessionPath is not null)
+                            services.Sessions.Save(sessionPath, shards);
+                        PrintSetStatus(@out, shards, services.Parity);
+                        if (services.Parity.IsSetComplete(shards))
+                        {
+                            var restored = services.Assembler.Assemble(shards, outputPath, @out.WriteLine, password);
+                            @out.WriteLine($"Restored {restored.Count} file(s).");
+                            if (sessionPath is not null && File.Exists(sessionPath))
+                                File.Delete(sessionPath);
+                            return 0;
+                        }
+                    }
+                }
+                Thread.Sleep(250);
+            }
+        }
+        finally
+        {
+            Console.CancelKeyPress -= onCancel;
+        }
+
+        if (sessionPath is not null && shards.Count > 0)
+        {
+            services.Sessions.Save(sessionPath, shards);
+            @out.WriteLine($"Stopped — {shards.Count} shard(s) saved to {sessionPath}.");
+        }
         return 3;
     }
 
@@ -372,7 +507,7 @@ internal sealed class Cli(AppSettings? settings = null)
         var flags = new HashSet<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--no-compress" or "--camera" or "--video")
+            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch")
                 flags.Add(args[i]);
             else if (args[i].StartsWith('-') && i + 1 < args.Length)
                 named[args[i]] = args[++i];
@@ -450,9 +585,23 @@ internal sealed class Cli(AppSettings? settings = null)
                 --session <file>         Accumulate shards across capture sittings: incomplete
                                          sets persist to the session file (exit code 3) and the
                                          next run resumes from the union; deleted on success
-              qrshard verify <folder|images...> [--session f]
+                --watch                  Keep watching the folder: decode captures as they land
+                                         and assemble the moment the set completes (Ctrl+C
+                                         stops; progress persists when --session is given)
+              qrshard receive [--device d] [--format f] [--fps n] [-o file] [-p pw]
+                                         LIVE receiver: read a webcam via ffmpeg, point it at
+                                         the sender's slideshow, and decode in real time —
+                                         stops automatically when the transfer completes
+                                         (Windows: --device "<webcam name>"; list with
+                                         ffmpeg -list_devices true -f dshow -i dummy)
+              qrshard calibrate [-o dir] [-r res]
+                                         Write a ladder of density probes; capture them like a
+                                         real transfer, then run qrshard calibrate <folder> to
+                                         get recommended -c/-b settings for YOUR setup
+              qrshard verify <folder|images...> [--session f] [--json]
                                          Report per-file completeness (missing images, parity
                                          coverage) without writing output; exit 0 when complete
+                                         (--json for machine-readable output, also on info)
               qrshard info <image> [--heatmap <out.png>]
                                          Show and validate a single shard image; --heatmap renders
                                          a per-cell ECC damage map (green=clean, red=corrected,
