@@ -29,6 +29,7 @@ internal static class ServiceRegistration
             .AddSingleton<IGridSampler, GridSampler>()
             .AddSingleton<IParityReassembler, ParityReassembler>()
             .AddSingleton<IShardAssembler, ShardAssembler>()
+            .AddSingleton<IPhotoFusion, PhotoFusion>()
             .AddSingleton<IShardDecoder, ShardDecoder>()
             // Camera rectification
             .AddSingleton<IAdaptiveBinarizer, AdaptiveBinarizer>()

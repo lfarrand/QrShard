@@ -181,6 +181,76 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
             dest[j * dataLen + i] = buffer[i * cwCount + j];
     }
 
+    /// <summary>
+    /// Multi-capture recovery: several captures of the SAME shard, each individually damaged
+    /// beyond correction, are decoded codeword by codeword — each codeword takes the first
+    /// capture whose copy corrects, falling back to a per-byte majority vote across captures.
+    /// Glare or reflections rarely sit in the same place twice, so photos that fail alone
+    /// often succeed together.
+    /// </summary>
+    public bool TryRecoverFused(IReadOnlyList<byte[]> buffers, int parity, int cwCount, byte[] dest, out int correctedBytes)
+    {
+        int dataLen = DataLength(parity);
+        if (dest.Length < cwCount * dataLen)
+            throw new ArgumentException("Destination buffer is too small.");
+        correctedBytes = 0;
+        var cw = new byte[CodewordLength];
+
+        for (int j = 0; j < cwCount; j++)
+        {
+            bool solved = false;
+            foreach (byte[] buffer in buffers)
+            {
+                for (int i = 0; i < CodewordLength; i++)
+                    cw[i] = buffer[i * cwCount + j];
+                if (reedSolomon.TryDecode(cw, parity, out int errors))
+                {
+                    cw.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
+                    correctedBytes += errors;
+                    solved = true;
+                    break;
+                }
+            }
+            if (solved)
+                continue;
+
+            if (buffers.Count >= 3)
+            {
+                for (int i = 0; i < CodewordLength; i++)
+                    cw[i] = MajorityByte(buffers, i * cwCount + j);
+                if (reedSolomon.TryDecode(cw, parity, out int errors))
+                {
+                    cw.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
+                    correctedBytes += errors;
+                    continue;
+                }
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static byte MajorityByte(IReadOnlyList<byte[]> buffers, int index)
+    {
+        // Tiny N (a handful of captures): count agreements pairwise.
+        byte best = buffers[0][index];
+        int bestVotes = 1;
+        for (int a = 0; a < buffers.Count; a++)
+        {
+            byte candidate = buffers[a][index];
+            int votes = 0;
+            for (int b = 0; b < buffers.Count; b++)
+                if (buffers[b][index] == candidate)
+                    votes++;
+            if (votes > bestVotes)
+            {
+                bestVotes = votes;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
     private void DecodeCodeword(byte[] buffer, int parity, int cwCount, int j, int dataLen, byte[] dest,
         byte[] cwScratch, ref int corrected, ref int failures, int[]? codewordErrors)
     {

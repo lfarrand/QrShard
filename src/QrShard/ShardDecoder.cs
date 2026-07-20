@@ -12,13 +12,13 @@ namespace QrShard;
 internal sealed class ShardDecoder(
     AppSettings settings, ICameraRectifier cameraRectifier, IFrameLocator frameLocator,
     IStripReader stripReader, IGridSampler gridSampler, IShardAssembler assembler,
-    Fec fec, Crc crc, FastPngReader pngReader) : IShardDecoder
+    Fec fec, Crc crc, FastPngReader pngReader, IPhotoFusion photoFusion) : IShardDecoder
 {
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
     public ShardDecoder() : this(
         AppSettings.Current, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
         new StripReader(), new GridSampler(), new ShardAssembler(),
-        new Fec(), new Crc(), new FastPngReader())
+        new Fec(), new Crc(), new FastPngReader(), new PhotoFusion())
     {
     }
 
@@ -44,18 +44,22 @@ internal sealed class ShardDecoder(
         int parallelism = settings.DecodeMaxParallelism;
         if (parallelism <= 0)
             parallelism = Math.Min(Environment.ProcessorCount, 16);
+        var failures = new FailedCapture?[ordered.Count];
         Parallel.For(0, ordered.Count,
             new ParallelOptions { MaxDegreeOfParallelism = parallelism },
             () => new DecodeScratch(),
             (i, _, scratch) =>
             {
+                var diagnostics = new DecodeDiagnostics();
                 try
                 {
-                    results[i] = (DecodeImage(ordered[i], scratch), null);
+                    results[i] = (DecodeImage(ordered[i], scratch, diagnostics), null);
                 }
                 catch (ShardDecodeException ex)
                 {
                     results[i] = (null, ex.Message);
+                    if (diagnostics is { Layout: not null, Cells: not null })
+                        failures[i] = new FailedCapture(diagnostics.Layout, diagnostics.Cells, ordered[i]);
                 }
                 return scratch;
             },
@@ -77,6 +81,20 @@ internal sealed class ShardDecoder(
             else
             {
                 log($"  FAILED  {Path.GetFileName(ordered[i])}: {error}");
+            }
+        }
+
+        // Multi-capture fusion: several failed captures of the same shard may still combine
+        // into a valid one (glare and reflections move between shots).
+        var failed = failures.OfType<FailedCapture>().ToList();
+        if (failed.Count >= 2)
+        {
+            foreach (var shard in photoFusion.Fuse(failed, log))
+            {
+                if (!shards.Any(s => s.Header.FileId == shard.Header.FileId &&
+                                     s.Header.Index == shard.Header.Index &&
+                                     s.Header.IsParity == shard.Header.IsParity))
+                    shards.Add(shard);
             }
         }
         return shards;
@@ -102,13 +120,15 @@ internal sealed class ShardDecoder(
         return diagnostics;
     }
 
-    public DecodedShard DecodeImage(string path, DecodeScratch scratch)
+    public DecodedShard DecodeImage(string path, DecodeScratch scratch) => DecodeImage(path, scratch, null);
+
+    private DecodedShard DecodeImage(string path, DecodeScratch scratch, DecodeDiagnostics? diagnostics)
     {
         Bitmap bmp = LoadBitmap(path, scratch);
 
         try
         {
-            return DecodeBitmap(bmp, scratch, path);
+            return DecodeBitmap(bmp, scratch, path, diagnostics);
         }
         catch (ShardDecodeException axisAlignedError)
         {
@@ -129,7 +149,7 @@ internal sealed class ShardDecoder(
 
             try
             {
-                return DecodeBitmap(rectified, scratch, path);
+                return DecodeBitmap(rectified, scratch, path, diagnostics);
             }
             catch (ShardDecodeException cameraError)
             {
@@ -175,6 +195,14 @@ internal sealed class ShardDecoder(
         var palette = stripReader.ReadPalette(bmp, inner, layout);
         byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch);
 
+        // Copy the sampled cells into the diagnostics on failure — the raw material for
+        // multi-capture fusion. First failing attempt wins (scratch buffers are reused).
+        void Salvage()
+        {
+            if (diagnostics is not null && diagnostics.Cells is null)
+                diagnostics.Cells = cells.AsSpan(0, (int)((layout.TotalBits + 7) / 8)).ToArray();
+        }
+
         byte[] stream;
         int correctedBytes = 0;
         if (layout.EccParity > 0)
@@ -185,19 +213,33 @@ internal sealed class ShardDecoder(
             if (diagnostics is not null)
                 diagnostics.CodewordErrors = codewordErrors!;
             if (!recovered)
+            {
+                Salvage();
                 throw new ShardDecodeException("Damage exceeds the error-correction capacity of this image. Recapture it.");
+            }
         }
         else
         {
             stream = cells;
         }
 
-        var header = ShardHeader.Deserialize(stream, out int headerLen) ?? throw new ShardDecodeException("Shard header is corrupt. Recapture this image.");
+        var header = ShardHeader.Deserialize(stream, out int headerLen);
+        if (header is null)
+        {
+            Salvage();
+            throw new ShardDecodeException("Shard header is corrupt. Recapture this image.");
+        }
         if (headerLen + header.PayloadLength > stream.Length)
+        {
+            Salvage();
             throw new ShardDecodeException("Shard header declares more payload than the image holds.");
+        }
         byte[] payload = stream[headerLen..(headerLen + header.PayloadLength)];
         if (crc.Crc32(payload) != header.PayloadCrc32)
+        {
+            Salvage();
             throw new ShardDecodeException($"Payload CRC-32 mismatch (part {header.Index + 1}/{header.Count}). Recapture this image.");
+        }
         return new DecodedShard(header, payload, path, layout.EccParity, correctedBytes);
     }
 }

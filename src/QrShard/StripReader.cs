@@ -46,14 +46,68 @@ internal sealed class StripReader(Palette palette) : IStripReader
         return Layout.UnpackMetadata(modules);
     }
 
-    public Rgb24[] ReadPalette(Bitmap bmp, InnerRect inner, Layout layout)
+    public PaletteSet ReadPalette(Bitmap bmp, InnerRect inner, Layout layout)
     {
-        // Two calibration strips exist (top and bottom). Measure both and keep the one whose
-        // colors track the theoretical palette best — an overlay across one strip then costs nothing.
+        // Two calibration strips exist (top and bottom). The better one (closest to the
+        // theoretical palette) drives the classic path — an overlay across one strip then
+        // costs nothing. When both strips are individually plausible but differ materially,
+        // the capture has a vertical illumination gradient and per-row interpolation between
+        // them tracks it.
         var theoretical = palette.Build(layout.BitsPerCell);
         var top = MeasurePaletteStrip(bmp, inner, layout, layout.Gutter + layout.MetaH * 1.5);
         var bottom = MeasurePaletteStrip(bmp, inner, layout, layout.InnerH - layout.Gutter - layout.MetaH * 1.5);
-        return StripScore(top, theoretical) <= StripScore(bottom, theoretical) ? top : bottom;
+        long topScore = StripScore(top, theoretical), bottomScore = StripScore(bottom, theoretical);
+        var best = topScore <= bottomScore ? top : bottom;
+
+        // Trustworthy = the strip is explainable as per-channel GAIN applied to the theoretical
+        // palette. Illumination (screen falloff, room light) is gain-like at any strength, so
+        // this accepts even strong gradients — while an overlay or damaged strip fits a pure
+        // gain poorly and must not poison interpolation.
+        bool interpolate = FitsAsIllumination(top, theoretical) && FitsAsIllumination(bottom, theoretical)
+                           && MaxChannelDelta(top, bottom) >= 8;
+        return new PaletteSet(best, top, bottom, interpolate);
+    }
+
+    private static bool FitsAsIllumination(Rgb24[] measured, Rgb24[] theoretical)
+    {
+        Span<double> gain = stackalloc double[3];
+        double numR = 0, numG = 0, numB = 0, denR = 0, denG = 0, denB = 0;
+        for (int i = 0; i < measured.Length; i++)
+        {
+            numR += (double)measured[i].R * theoretical[i].R;
+            denR += (double)theoretical[i].R * theoretical[i].R;
+            numG += (double)measured[i].G * theoretical[i].G;
+            denG += (double)theoretical[i].G * theoretical[i].G;
+            numB += (double)measured[i].B * theoretical[i].B;
+            denB += (double)theoretical[i].B * theoretical[i].B;
+        }
+        gain[0] = denR > 0 ? numR / denR : 1;
+        gain[1] = denG > 0 ? numG / denG : 1;
+        gain[2] = denB > 0 ? numB / denB : 1;
+        foreach (double g in gain)
+            if (g is < 0.2 or > 1.6)
+                return false;
+
+        double residual = 0;
+        for (int i = 0; i < measured.Length; i++)
+        {
+            residual += Math.Abs(measured[i].R - gain[0] * theoretical[i].R);
+            residual += Math.Abs(measured[i].G - gain[1] * theoretical[i].G);
+            residual += Math.Abs(measured[i].B - gain[2] * theoretical[i].B);
+        }
+        return residual / (measured.Length * 3) < 28; // mean absolute residual per channel
+    }
+
+    private static int MaxChannelDelta(Rgb24[] a, Rgb24[] b)
+    {
+        int max = 0;
+        for (int i = 0; i < a.Length; i++)
+        {
+            max = Math.Max(max, Math.Abs(a[i].R - b[i].R));
+            max = Math.Max(max, Math.Abs(a[i].G - b[i].G));
+            max = Math.Max(max, Math.Abs(a[i].B - b[i].B));
+        }
+        return max;
     }
 
     private static Rgb24[] MeasurePaletteStrip(Bitmap bmp, InnerRect inner, Layout layout, double yEnc)

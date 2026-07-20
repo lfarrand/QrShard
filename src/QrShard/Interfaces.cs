@@ -40,13 +40,13 @@ internal interface IStripReader
 {
     Layout? ReadMetadata(Bitmap bmp, InnerRect inner);
 
-    Rgb24[] ReadPalette(Bitmap bmp, InnerRect inner, Layout layout);
+    PaletteSet ReadPalette(Bitmap bmp, InnerRect inner, Layout layout);
 }
 
 /// <summary>Samples every data cell and classifies it against the measured palette.</summary>
 internal interface IGridSampler
 {
-    byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette, DecodeScratch scratch);
+    byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch);
 }
 
 /// <summary>Reassembles decoded shards into output files.</summary>
