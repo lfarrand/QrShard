@@ -14,12 +14,15 @@ internal static class ServiceRegistration
             .AddSingleton<ReedSolomon>()
             .AddSingleton<Fec>()
             .AddSingleton<CrossShardFec>()
+            .AddSingleton<FountainFec>()
             .AddSingleton<Crc>()
             .AddSingleton<BitStream>()
             .AddSingleton<Palette>()
             .AddSingleton<FastPng>()
+            .AddSingleton<FastPngReader>()
             .AddSingleton<ShardImageFormat>()
             .AddSingleton<CameraMath>()
+            .AddSingleton<PayloadCipher>()
             // Decode pipeline
             .AddSingleton<IInnerRectScanner, InnerRectScanner>()
             .AddSingleton<IStripReader, StripReader>()
@@ -27,6 +30,7 @@ internal static class ServiceRegistration
             .AddSingleton<IGridSampler, GridSampler>()
             .AddSingleton<IParityReassembler, ParityReassembler>()
             .AddSingleton<IShardAssembler, ShardAssembler>()
+            .AddSingleton<IPhotoFusion, PhotoFusion>()
             .AddSingleton<IShardDecoder, ShardDecoder>()
             // Camera rectification
             .AddSingleton<IAdaptiveBinarizer, AdaptiveBinarizer>()
@@ -45,5 +49,7 @@ internal static class ServiceRegistration
             .AddSingleton<IShardEncoder, ShardEncoder>()
             .AddSingleton<ISlideshowWriter, SlideshowWriter>()
             .AddSingleton<ISelfTest, SelfTest>()
+            .AddSingleton<ISessionStore, SessionStore>()
+            .AddSingleton<HeatmapRenderer>()
             .BuildServiceProvider();
 }

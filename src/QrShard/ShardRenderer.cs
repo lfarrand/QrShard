@@ -129,17 +129,24 @@ internal sealed class ShardRenderer(Fec fec, BitStream bitStream, FastPng fastPn
         DrawPaletteStrip(px, w, layout, palette, ix, iy + layout.InnerH - gutter - 2 * layout.MetaH);
         DrawMetaStrip(px, w, layout, metaModules, ix, iy + layout.InnerH - gutter - layout.MetaH);
 
-        // Data grid.
+        // Data grid, row-blit style: paint only the first scanline of each cell row, then
+        // memcpy that scanline down the remaining cellPx-1 rows — the fill becomes mostly
+        // Array.Copy instead of per-pixel stores.
         int dataX = ix + layout.DataLeft, dataY = iy + layout.DataTop;
         int cell = layout.CellPx, bits = layout.BitsPerCell;
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {
+            int firstRow = (dataY + gy * cell) * w;
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
             {
                 int v = bitStream.ReadCell(cellBuffer, cellIndex * bits, bits);
-                FillRect(px, w, dataX + gx * cell, dataY + gy * cell, cell, cell, palette[v]);
+                Array.Fill(px, palette[v], firstRow + dataX + gx * cell, cell);
             }
+            int rowStart = firstRow + dataX;
+            int rowLen = layout.GridW * cell;
+            for (int r = 1; r < cell; r++)
+                Array.Copy(px, rowStart, px, rowStart + r * w, rowLen);
         }
 
         writer.Write(outPath, px, w, h);
@@ -209,11 +216,11 @@ internal sealed class ShardRenderer(Fec fec, BitStream bitStream, FastPng fastPn
 
     private static void FillRect(Rgb24[] px, int stride, int x, int y, int rw, int rh, Rgb24 color)
     {
-        for (int yy = y; yy < y + rh; yy++)
-        {
-            int row = yy * stride;
-            for (int xx = x; xx < x + rw; xx++)
-                px[row + xx] = color;
-        }
+        if (rw <= 0 || rh <= 0)
+            return;
+        int first = y * stride + x;
+        Array.Fill(px, color, first, rw);
+        for (int yy = 1; yy < rh; yy++)
+            Array.Copy(px, first, px, first + yy * stride, rw);
     }
 }

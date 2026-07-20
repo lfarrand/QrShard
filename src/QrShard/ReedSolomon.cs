@@ -76,6 +76,12 @@ internal sealed class ReedSolomon
         return table;
     });
 
+    /// <summary>
+    /// The generator polynomial's non-leading coefficients (length nsym): tail[i] = gen[i+1].
+    /// Exposed so <see cref="Fec"/> can build SIMD nibble tables for lane-parallel encoding.
+    /// </summary>
+    public byte[] GeneratorTail(int nsym) => Generator(nsym)[1..];
+
     /// <summary>Computes parity symbols for the data (systematic encoding, LFSR division).</summary>
     public void Encode(ReadOnlySpan<byte> data, Span<byte> parity)
     {

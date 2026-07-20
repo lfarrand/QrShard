@@ -48,8 +48,50 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
         if (dest.Length < cwCount * CodewordLength)
             throw new ArgumentException("Destination buffer is too small.");
 
+        int j = 0;
+
+        // SIMD fast path, mirroring the decode-side syndrome scan: encode 16 codewords at
+        // once, one Vector128 lane per codeword. The LFSR step multiplies every lane's
+        // feedback coefficient by the FIXED generator coefficient gen[k+1], which is exactly
+        // the nibble-shuffle-table case. The interleaved output layout also turns the
+        // write-out into contiguous 16-byte stores.
+        if (Vector128.IsHardwareAccelerated && parity > 0 && cwCount >= 16)
+        {
+            byte[] genTail = reedSolomon.GeneratorTail(parity);
+            var tableLo = new Vector128<byte>[parity];
+            var tableHi = new Vector128<byte>[parity];
+            for (int i = 0; i < parity; i++)
+                (tableLo[i], tableHi[i]) = gf.MulTables(genTail[i]);
+            var register = new Vector128<byte>[parity];
+            Span<byte> lanes = stackalloc byte[16];
+
+            for (; j + 16 <= cwCount; j += 16)
+            {
+                Array.Clear(register);
+                for (int i = 0; i < dataLen; i++)
+                {
+                    for (int lane = 0; lane < 16; lane++)
+                    {
+                        int src = (j + lane) * dataLen + i;
+                        lanes[lane] = src < streamLength ? stream[src] : (byte)0;
+                    }
+                    var d = Vector128.Create<byte>(lanes);
+                    d.CopyTo(dest.AsSpan(i * cwCount + j, 16));
+
+                    var coef = d ^ register[0];
+                    for (int k = 0; k < parity - 1; k++)
+                        register[k] = register[k + 1];
+                    register[parity - 1] = Vector128<byte>.Zero;
+                    for (int k = 0; k < parity; k++)
+                        register[k] ^= gf.MulVec(coef, tableLo[k], tableHi[k]);
+                }
+                for (int i = 0; i < parity; i++)
+                    register[i].CopyTo(dest.AsSpan((dataLen + i) * cwCount + j, 16));
+            }
+        }
+
         Span<byte> cw = stackalloc byte[CodewordLength];
-        for (int j = 0; j < cwCount; j++)
+        for (; j < cwCount; j++)
         {
             for (int i = 0; i < dataLen; i++)
             {
@@ -72,8 +114,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
         return TryRecoverInto(buffer, parity, cwCount, stream, out correctedBytes);
     }
 
-    /// <summary>Pooled-buffer variant of <see cref="TryRecover"/>; dest may be longer than needed.</summary>
-    public bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes)
+    /// <summary>
+    /// Pooled-buffer variant of <see cref="TryRecover"/>; dest may be longer than needed.
+    /// When <paramref name="codewordErrors"/> is supplied (length cwCount), each entry receives
+    /// that codeword's corrected-byte count, or -1 if it was damaged beyond correction — the
+    /// data behind the diagnostic heatmap.
+    /// </summary>
+    public bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes,
+        int[]? codewordErrors = null)
     {
         int dataLen = DataLength(parity);
         if (dest.Length < cwCount * dataLen)
@@ -115,13 +163,13 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     if (dirty.GetElement(lane) == 0)
                         CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
                     else
-                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures);
+                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors);
                 }
             }
         }
 
         for (; j < cwCount; j++)
-            DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures);
+            DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors);
 
         correctedBytes = corrected;
         return failures == 0;
@@ -133,8 +181,78 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
             dest[j * dataLen + i] = buffer[i * cwCount + j];
     }
 
+    /// <summary>
+    /// Multi-capture recovery: several captures of the SAME shard, each individually damaged
+    /// beyond correction, are decoded codeword by codeword — each codeword takes the first
+    /// capture whose copy corrects, falling back to a per-byte majority vote across captures.
+    /// Glare or reflections rarely sit in the same place twice, so photos that fail alone
+    /// often succeed together.
+    /// </summary>
+    public bool TryRecoverFused(IReadOnlyList<byte[]> buffers, int parity, int cwCount, byte[] dest, out int correctedBytes)
+    {
+        int dataLen = DataLength(parity);
+        if (dest.Length < cwCount * dataLen)
+            throw new ArgumentException("Destination buffer is too small.");
+        correctedBytes = 0;
+        var cw = new byte[CodewordLength];
+
+        for (int j = 0; j < cwCount; j++)
+        {
+            bool solved = false;
+            foreach (byte[] buffer in buffers)
+            {
+                for (int i = 0; i < CodewordLength; i++)
+                    cw[i] = buffer[i * cwCount + j];
+                if (reedSolomon.TryDecode(cw, parity, out int errors))
+                {
+                    cw.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
+                    correctedBytes += errors;
+                    solved = true;
+                    break;
+                }
+            }
+            if (solved)
+                continue;
+
+            if (buffers.Count >= 3)
+            {
+                for (int i = 0; i < CodewordLength; i++)
+                    cw[i] = MajorityByte(buffers, i * cwCount + j);
+                if (reedSolomon.TryDecode(cw, parity, out int errors))
+                {
+                    cw.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
+                    correctedBytes += errors;
+                    continue;
+                }
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static byte MajorityByte(IReadOnlyList<byte[]> buffers, int index)
+    {
+        // Tiny N (a handful of captures): count agreements pairwise.
+        byte best = buffers[0][index];
+        int bestVotes = 1;
+        for (int a = 0; a < buffers.Count; a++)
+        {
+            byte candidate = buffers[a][index];
+            int votes = 0;
+            for (int b = 0; b < buffers.Count; b++)
+                if (buffers[b][index] == candidate)
+                    votes++;
+            if (votes > bestVotes)
+            {
+                bestVotes = votes;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
     private void DecodeCodeword(byte[] buffer, int parity, int cwCount, int j, int dataLen, byte[] dest,
-        byte[] cwScratch, ref int corrected, ref int failures)
+        byte[] cwScratch, ref int corrected, ref int failures, int[]? codewordErrors)
     {
         for (int i = 0; i < CodewordLength; i++)
             cwScratch[i] = buffer[i * cwCount + j];
@@ -143,10 +261,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
         {
             cwScratch.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
             corrected += errors;
+            if (codewordErrors is not null)
+                codewordErrors[j] = errors;
         }
         else
         {
             failures++;
+            if (codewordErrors is not null)
+                codewordErrors[j] = -1;
         }
     }
 }

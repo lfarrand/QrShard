@@ -12,17 +12,27 @@ namespace QrShard;
 internal sealed class ShardDecoder(
     AppSettings settings, ICameraRectifier cameraRectifier, IFrameLocator frameLocator,
     IStripReader stripReader, IGridSampler gridSampler, IShardAssembler assembler,
-    Fec fec, Crc crc) : IShardDecoder
+    Fec fec, Crc crc, FastPngReader pngReader, IPhotoFusion photoFusion) : IShardDecoder
 {
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
     public ShardDecoder() : this(
         AppSettings.Current, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
-        new StripReader(), new GridSampler(), new ShardAssembler(new ParityReassembler()),
-        new Fec(), new Crc())
+        new StripReader(), new GridSampler(), new ShardAssembler(),
+        new Fec(), new Crc(), new FastPngReader(), new PhotoFusion())
     {
     }
 
-    public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log)
+    public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log,
+        string? password = null)
+    {
+        var shards = CollectShards(imagePaths, log);
+        if (shards.Count == 0)
+            throw new ShardDecodeException("No decodable shard images were found.");
+        return assembler.Assemble(shards, outputPath, log, password);
+    }
+
+    /// <summary>Decodes every image to shards without assembling — the building block for sessions and verify.</summary>
+    public List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log)
     {
         var ordered = imagePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
         var results = new (DecodedShard? Shard, string? Error)[ordered.Count];
@@ -34,18 +44,22 @@ internal sealed class ShardDecoder(
         int parallelism = settings.DecodeMaxParallelism;
         if (parallelism <= 0)
             parallelism = Math.Min(Environment.ProcessorCount, 16);
+        var failures = new FailedCapture?[ordered.Count];
         Parallel.For(0, ordered.Count,
             new ParallelOptions { MaxDegreeOfParallelism = parallelism },
             () => new DecodeScratch(),
             (i, _, scratch) =>
             {
+                var diagnostics = new DecodeDiagnostics();
                 try
                 {
-                    results[i] = (DecodeImage(ordered[i], scratch), null);
+                    results[i] = (DecodeImage(ordered[i], scratch, diagnostics), null);
                 }
                 catch (ShardDecodeException ex)
                 {
                     results[i] = (null, ex.Message);
+                    if (diagnostics is { Layout: not null, Cells: not null })
+                        failures[i] = new FailedCapture(diagnostics.Layout, diagnostics.Cells, ordered[i]);
                 }
                 return scratch;
             },
@@ -70,37 +84,51 @@ internal sealed class ShardDecoder(
             }
         }
 
-        if (shards.Count == 0)
-            throw new ShardDecodeException("No decodable shard images were found.");
-
-        return assembler.Assemble(shards, outputPath, log);
+        // Multi-capture fusion: several failed captures of the same shard may still combine
+        // into a valid one (glare and reflections move between shots).
+        var failed = failures.OfType<FailedCapture>().ToList();
+        if (failed.Count >= 2)
+        {
+            foreach (var shard in photoFusion.Fuse(failed, log))
+            {
+                if (!shards.Any(s => s.Header.FileId == shard.Header.FileId &&
+                                     s.Header.Index == shard.Header.Index &&
+                                     s.Header.IsParity == shard.Header.IsParity))
+                    shards.Add(shard);
+            }
+        }
+        return shards;
     }
 
     public DecodedShard DecodeImage(string path) => DecodeImage(path, new DecodeScratch());
 
-    public DecodedShard DecodeImage(string path, DecodeScratch scratch)
+    /// <summary>Diagnostic single-image decode (axis-aligned pipeline only): captures the layout
+    /// and per-codeword ECC statistics whether or not the decode succeeds.</summary>
+    public DecodeDiagnostics Diagnose(string path)
     {
-        Image<Rgb24> image;
+        var scratch = new DecodeScratch();
+        var diagnostics = new DecodeDiagnostics();
         try
         {
-            image = Image.Load<Rgb24>(path);
+            Bitmap bmp = LoadBitmap(path, scratch);
+            diagnostics.Shard = DecodeBitmap(bmp, scratch, path, diagnostics);
         }
-        catch (ImageFormatException ex)
+        catch (ShardDecodeException ex)
         {
-            throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
+            diagnostics.Error = ex.Message;
         }
+        return diagnostics;
+    }
 
-        Bitmap bmp;
-        using (image)
-        {
-            var px = scratch.Pixels(image.Width * image.Height);
-            image.CopyPixelDataTo(px.AsSpan(0, image.Width * image.Height));
-            bmp = new Bitmap(px, image.Width, image.Height);
-        }
+    public DecodedShard DecodeImage(string path, DecodeScratch scratch) => DecodeImage(path, scratch, null);
+
+    private DecodedShard DecodeImage(string path, DecodeScratch scratch, DecodeDiagnostics? diagnostics)
+    {
+        Bitmap bmp = LoadBitmap(path, scratch);
 
         try
         {
-            return DecodeBitmap(bmp, scratch, path);
+            return DecodeBitmap(bmp, scratch, path, diagnostics);
         }
         catch (ShardDecodeException axisAlignedError)
         {
@@ -121,7 +149,7 @@ internal sealed class ShardDecoder(
 
             try
             {
-                return DecodeBitmap(rectified, scratch, path);
+                return DecodeBitmap(rectified, scratch, path, diagnostics);
             }
             catch (ShardDecodeException cameraError)
             {
@@ -131,31 +159,87 @@ internal sealed class ShardDecoder(
         }
     }
 
-    public DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path)
+    /// <summary>Reads a bitmap into the scratch's pooled pixel buffer, preferring the fast PNG
+    /// reader and falling back to ImageSharp for anything outside its truecolor subset.</summary>
+    private Bitmap LoadBitmap(string path, DecodeScratch scratch)
+    {
+        if (pngReader.TryRead(path, scratch, out Bitmap bmp))
+            return bmp;
+
+        Image<Rgb24> image;
+        try
+        {
+            image = Image.Load<Rgb24>(path);
+        }
+        catch (ImageFormatException ex)
+        {
+            throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
+        }
+
+        using (image)
+        {
+            var px = scratch.Pixels(image.Width * image.Height);
+            image.CopyPixelDataTo(px.AsSpan(0, image.Width * image.Height));
+            return new Bitmap(px, image.Width, image.Height);
+        }
+    }
+
+    public DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path) =>
+        DecodeBitmap(bmp, scratch, path, null);
+
+    private DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path, DecodeDiagnostics? diagnostics)
     {
         var (layout, inner) = frameLocator.Locate(bmp, scratch);
+        if (diagnostics is not null)
+            diagnostics.Layout = layout;
         var palette = stripReader.ReadPalette(bmp, inner, layout);
         byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch);
+
+        // Copy the sampled cells into the diagnostics on failure — the raw material for
+        // multi-capture fusion. First failing attempt wins (scratch buffers are reused).
+        void Salvage()
+        {
+            if (diagnostics is not null && diagnostics.Cells is null)
+                diagnostics.Cells = cells.AsSpan(0, (int)((layout.TotalBits + 7) / 8)).ToArray();
+        }
 
         byte[] stream;
         int correctedBytes = 0;
         if (layout.EccParity > 0)
         {
             stream = scratch.Recovered(layout.CodewordCount * Fec.DataLength(layout.EccParity));
-            if (!fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes))
+            int[]? codewordErrors = diagnostics is not null ? new int[layout.CodewordCount] : null;
+            bool recovered = fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes, codewordErrors);
+            if (diagnostics is not null)
+                diagnostics.CodewordErrors = codewordErrors!;
+            if (!recovered)
+            {
+                Salvage();
                 throw new ShardDecodeException("Damage exceeds the error-correction capacity of this image. Recapture it.");
+            }
         }
         else
         {
             stream = cells;
         }
 
-        var header = ShardHeader.Deserialize(stream, out int headerLen) ?? throw new ShardDecodeException("Shard header is corrupt. Recapture this image.");
+        var header = ShardHeader.Deserialize(stream, out int headerLen);
+        if (header is null)
+        {
+            Salvage();
+            throw new ShardDecodeException("Shard header is corrupt. Recapture this image.");
+        }
         if (headerLen + header.PayloadLength > stream.Length)
+        {
+            Salvage();
             throw new ShardDecodeException("Shard header declares more payload than the image holds.");
+        }
         byte[] payload = stream[headerLen..(headerLen + header.PayloadLength)];
         if (crc.Crc32(payload) != header.PayloadCrc32)
+        {
+            Salvage();
             throw new ShardDecodeException($"Payload CRC-32 mismatch (part {header.Index + 1}/{header.Count}). Recapture this image.");
+        }
         return new DecodedShard(header, payload, path, layout.EccParity, correctedBytes);
     }
 }

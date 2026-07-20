@@ -16,8 +16,12 @@ namespace QrShard;
 internal sealed class ShardHeader
 {
     public static readonly byte[] Magic = "QRS1"u8.ToArray();
-    public const byte FlagCompressed = 0x01;
-    public const byte FlagParity = 0x02;
+    public const byte FlagCompressed = 0x01;  // payload is compressed (deflate unless FlagBrotli)
+    public const byte FlagParity = 0x02;      // this image is cross-shard parity, not data
+    public const byte FlagBrotli = 0x04;      // compression algorithm is Brotli (with FlagCompressed)
+    public const byte FlagEncrypted = 0x08;   // payload is AES-256-GCM encrypted (password required)
+    public const byte FlagArchive = 0x10;     // payload is a tar archive of a folder
+    public const byte FlagFountain = 0x20;    // parity images are random-linear fountain frames
     private const byte HeaderVersion = 2;
 
     public required ulong FileId { get; init; }
