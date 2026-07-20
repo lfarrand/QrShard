@@ -365,11 +365,12 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     {
         errors = 0;
 
-        // Collect this codeword's flagged symbols. Leave slack for one unmarked error
-        // (2·1 + f ≤ parity); more flags than that means the marks are useless here.
+        // Collect this codeword's flagged symbols, up to the full erasure capacity: f = parity
+        // still decodes when every real error is marked, and when it isn't the attempt simply
+        // fails — the same outcome as not trying.
         Span<int> erasures = stackalloc int[MaxParity];
         int f = 0;
-        int limit = parity - 2;
+        int limit = parity;
         for (int i = 0; i < CodewordLength; i++)
         {
             int idx = i * cwCount + j;

@@ -23,6 +23,7 @@ internal static class ServiceRegistration
             .AddSingleton<ShardImageFormat>()
             .AddSingleton<CameraMath>()
             .AddSingleton<PayloadCipher>()
+            .AddSingleton<Interleaver2>()
             // Decode pipeline
             .AddSingleton<IInnerRectScanner, InnerRectScanner>()
             .AddSingleton<IStripReader, StripReader>()

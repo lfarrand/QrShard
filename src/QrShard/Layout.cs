@@ -47,6 +47,7 @@ internal sealed class Layout
     public required int InnerH { get; init; }
     public required int EccParity { get; init; } // RS parity symbols per 255-byte codeword, 0 = none
     public required int FinderModule { get; init; } // finder module px; 0 = screenshot profile (no bands)
+    public bool Interleave2 { get; init; } // v2 interleave: seeded permutation of the ECC byte layout
 
     public bool CameraFinders => FinderModule > 0;
     public int FinderBand => FinderModule * FinderBandModules;
@@ -68,8 +69,11 @@ internal sealed class Layout
     /// <summary>Bytes available for header + payload after ECC overhead.</summary>
     public long UsableBytes => EccParity == 0 ? TotalBytes : (long)CodewordCount * Fec.DataLength(EccParity);
 
-    public static Layout Create(int width, int height, int cellPx, int bitsPerCell, int eccParity, bool cameraFinders = false)
+    public static Layout Create(int width, int height, int cellPx, int bitsPerCell, int eccParity,
+        bool cameraFinders = false, bool interleave2 = false)
     {
+        if (interleave2 && eccParity == 0)
+            throw new ArgumentException("Interleave v2 permutes the ECC byte layout and needs ECC enabled.");
         if (width is < MinResolution or > MaxResolution || height is < MinResolution or > MaxResolution)
             throw new ArgumentException($"Resolution must be between {MinResolution} and {MaxResolution} in both dimensions.");
         if (cellPx is < 1 or > MaxCellPx)
@@ -114,6 +118,7 @@ internal sealed class Layout
             InnerH = 2 * gutter + 4 * metaH + gridH * cellPx,
             EccParity = eccParity,
             FinderModule = finderModule,
+            Interleave2 = interleave2,
         };
         if (eccParity > 0 && layout.CodewordCount < 1)
             throw new ArgumentException("Image capacity is too small for error correction; increase resolution or use --ecc 0.");
@@ -126,14 +131,17 @@ internal sealed class Layout
     // ---- Metadata strip bit packing (128 modules) ----
     // magic:8 version:4 bitsPerCell:4 gridW:16 gridH:16 cellPx:8 metaH:16 innerW:16 innerH:16 eccParity:8
     //   = 112 bits (14 bytes), then crc16:16 over those 14 bytes = 128.
+    // The strip is packed full, so new capabilities ride the VERSION nibble: version 2 is the
+    // classic modular interleave, version 3 the same fields with the v2 permuted interleave.
     public const byte MetaMagic = 0xC5;
     public const int MetaVersion = 2;
+    public const int MetaVersionInterleave2 = 3;
 
     public byte[] PackMetadata()
     {
         var bits = new BitWriter();
         bits.Write(MetaMagic, 8);
-        bits.Write(MetaVersion, 4);
+        bits.Write((uint)(Interleave2 ? MetaVersionInterleave2 : MetaVersion), 4);
         bits.Write((uint)BitsPerCell, 4);
         bits.Write((uint)GridW, 16);
         bits.Write((uint)GridH, 16);
@@ -157,7 +165,10 @@ internal sealed class Layout
                 bytes[i >> 3] |= (byte)(0x80 >> (i & 7));
 
         var reader = new BitReader(bytes);
-        if (reader.Read(8) != MetaMagic || reader.Read(4) != MetaVersion)
+        if (reader.Read(8) != MetaMagic)
+            return null;
+        uint version = reader.Read(4);
+        if (version is not (MetaVersion or MetaVersionInterleave2))
             return null;
         int bitsPerCell = (int)reader.Read(4);
         int gridW = (int)reader.Read(16);
@@ -188,6 +199,7 @@ internal sealed class Layout
             // Not carried in the strip: after (any) rectification the decoder maps geometry
             // purely from the frame's inner rectangle, so band info is irrelevant downstream.
             FinderModule = 0,
+            Interleave2 = version == MetaVersionInterleave2,
         };
     }
 }

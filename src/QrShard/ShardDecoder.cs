@@ -12,13 +12,13 @@ namespace QrShard;
 internal sealed class ShardDecoder(
     AppSettings settings, ICameraRectifier cameraRectifier, IFrameLocator frameLocator,
     IStripReader stripReader, IGridSampler gridSampler, IShardAssembler assembler,
-    Fec fec, Crc crc, FastPngReader pngReader, IPhotoFusion photoFusion) : IShardDecoder
+    Fec fec, Crc crc, FastPngReader pngReader, IPhotoFusion photoFusion, Interleaver2 interleaver) : IShardDecoder
 {
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
     public ShardDecoder() : this(
         AppSettings.Current, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
         new StripReader(), new GridSampler(), new ShardAssembler(),
-        new Fec(), new Crc(), new FastPngReader(), new PhotoFusion())
+        new Fec(), new Crc(), new FastPngReader(), new PhotoFusion(), new Interleaver2())
     {
     }
 
@@ -196,12 +196,40 @@ internal sealed class ShardDecoder(
         byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch,
             out bool[]? suspectBytes, out byte[]? secondChoiceBytes);
 
-        // Copy the sampled cells into the diagnostics on failure — the raw material for
-        // multi-capture fusion. First failing attempt wins (scratch buffers are reused).
+        // v2 interleave: gather the permuted cell stream back into classic order so the whole
+        // SIMD/erasure/Chase machinery — and multi-capture fusion — run unchanged.
+        byte[] work = cells;
+        bool[]? workSuspects = suspectBytes;
+        byte[]? workSecond = secondChoiceBytes;
+        int protectedLength = layout.CodewordCount * Fec.CodewordLength;
+        if (layout.Interleave2 && layout.EccParity > 0)
+        {
+            var gathered = scratch.GatheredCells(protectedLength);
+            interleaver.Gather(cells, gathered, protectedLength);
+            work = gathered;
+            if (suspectBytes is not null)
+            {
+                var flags = scratch.GatheredFlags(protectedLength);
+                interleaver.GatherFlags(suspectBytes, flags, protectedLength);
+                workSuspects = flags;
+            }
+            if (secondChoiceBytes is not null)
+            {
+                var second = scratch.GatheredSecond(protectedLength);
+                interleaver.Gather(secondChoiceBytes, second, protectedLength);
+                workSecond = second;
+            }
+        }
+
+        // Copy the (classic-order) cells into the diagnostics on failure — the raw material
+        // for multi-capture fusion. First failing attempt wins (scratch buffers are reused).
         void Salvage()
         {
             if (diagnostics is not null && diagnostics.Cells is null)
-                diagnostics.Cells = cells.AsSpan(0, (int)((layout.TotalBits + 7) / 8)).ToArray();
+            {
+                int salvageLength = layout.EccParity > 0 ? protectedLength : (int)((layout.TotalBits + 7) / 8);
+                diagnostics.Cells = work.AsSpan(0, salvageLength).ToArray();
+            }
         }
 
         byte[] stream;
@@ -210,7 +238,7 @@ internal sealed class ShardDecoder(
         {
             stream = scratch.Recovered(layout.CodewordCount * Fec.DataLength(layout.EccParity));
             int[]? codewordErrors = diagnostics is not null ? new int[layout.CodewordCount] : null;
-            bool recovered = fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes, codewordErrors, suspectBytes, secondChoiceBytes);
+            bool recovered = fec.TryRecoverInto(work, layout.EccParity, layout.CodewordCount, stream, out correctedBytes, codewordErrors, workSuspects, workSecond);
             if (diagnostics is not null)
                 diagnostics.CodewordErrors = codewordErrors!;
             if (!recovered)

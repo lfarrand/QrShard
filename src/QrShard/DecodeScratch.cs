@@ -71,4 +71,18 @@ internal sealed class DecodeScratch
             Array.Clear(_secondChoice, 0, length); // bits are ORed in
         return _secondChoice;
     }
+
+    // v2 interleave gather targets — fully overwritten for the requested length, no clearing.
+    private byte[]? _gatheredCells;
+    private bool[]? _gatheredFlags;
+    private byte[]? _gatheredSecond;
+
+    public byte[] GatheredCells(int length) =>
+        _gatheredCells is { } b && b.Length >= length ? b : _gatheredCells = new byte[length];
+
+    public bool[] GatheredFlags(int length) =>
+        _gatheredFlags is { } b && b.Length >= length ? b : _gatheredFlags = new bool[length];
+
+    public byte[] GatheredSecond(int length) =>
+        _gatheredSecond is { } b && b.Length >= length ? b : _gatheredSecond = new byte[length];
 }

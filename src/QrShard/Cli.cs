@@ -99,6 +99,7 @@ internal sealed class Cli(AppSettings? settings = null)
                     CameraMode = camera,
                     Password = Get(named, "-p", "--password"),
                     IsArchive = isArchive,
+                    Interleave2 = flags.Contains("--interleave2"),
                 };
                 string outDir = Get(named, "-o", "--out") ?? Path.Combine(
                     Path.GetDirectoryName(Path.GetFullPath(Path.TrimEndingDirectorySeparator(input)))!,
@@ -524,7 +525,7 @@ internal sealed class Cli(AppSettings? settings = null)
         var flags = new HashSet<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch" or "--screen" or "--open")
+            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch" or "--screen" or "--open" or "--interleave2")
                 flags.Add(args[i]);
             else if (args[i].StartsWith('-') && i + 1 < args.Length)
                 named[args[i]] = args[++i];

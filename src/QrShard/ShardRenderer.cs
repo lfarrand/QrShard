@@ -23,6 +23,15 @@ internal sealed class RenderScratch(Layout layout)
             _cells = new byte[length];
         return _cells;
     }
+
+    private byte[]? _scatter;
+
+    public byte[] ScatterBuffer(int length)
+    {
+        if (_scatter is null || _scatter.Length < length)
+            _scatter = new byte[length];
+        return _scatter;
+    }
 }
 
 /// <summary>How rendered pixels are written to disk for the chosen container format.</summary>
@@ -64,9 +73,10 @@ internal interface IShardRenderer
 /// The encode-side rasterizer: ECC-protects the staged stream, then draws the locator frame,
 /// camera finder bands, metadata/palette strips, and the data grid into a pixel canvas.
 /// </summary>
-internal sealed class ShardRenderer(Fec fec, BitStream bitStream, FastPng fastPng, ShardImageFormat formats) : IShardRenderer
+internal sealed class ShardRenderer(Fec fec, BitStream bitStream, FastPng fastPng, ShardImageFormat formats,
+    Interleaver2 interleaver) : IShardRenderer
 {
-    public ShardRenderer() : this(new Fec(), new BitStream(), new FastPng(), new ShardImageFormat())
+    public ShardRenderer() : this(new Fec(), new BitStream(), new FastPng(), new ShardImageFormat(), new Interleaver2())
     {
     }
 
@@ -88,6 +98,14 @@ internal sealed class ShardRenderer(Fec fec, BitStream bitStream, FastPng fastPn
             int protectedLength = layout.CodewordCount * Fec.CodewordLength;
             if (protectedLength < cellLength)
                 Array.Clear(cellBuffer, protectedLength, cellLength - protectedLength);
+            if (layout.Interleave2)
+            {
+                // v2 interleave: scatter the classic layout through the seeded permutation.
+                byte[] scattered = scratch.ScatterBuffer(cellLength);
+                interleaver.Scatter(cellBuffer, scattered, protectedLength);
+                Array.Copy(cellBuffer, protectedLength, scattered, protectedLength, cellLength - protectedLength);
+                cellBuffer = scattered;
+            }
         }
         else
         {

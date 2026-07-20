@@ -8,11 +8,11 @@ namespace QrShard;
 /// to dark red (damaged beyond correction). Helps users tune capture distance, focus, and
 /// exposure by showing WHERE errors concentrate (glare blob, cursor, screen edge).
 /// </summary>
-internal sealed class HeatmapRenderer(FastPng png)
+internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
 {
     private const int CellPx = 6;
 
-    public HeatmapRenderer() : this(new FastPng())
+    public HeatmapRenderer() : this(new FastPng(), new Interleaver2())
     {
     }
 
@@ -23,6 +23,17 @@ internal sealed class HeatmapRenderer(FastPng png)
         int cwCount = layout.CodewordCount;
         int bits = layout.BitsPerCell;
         long protectedBytes = (long)cwCount * Fec.CodewordLength;
+
+        // v2 interleave: a cell byte's codeword comes from its CLASSIC position, found by
+        // inverting the permutation.
+        int[]? inverse = null;
+        if (layout.Interleave2)
+        {
+            int[] perm = interleaver.Permutation((int)protectedBytes);
+            inverse = new int[perm.Length];
+            for (int i = 0; i < perm.Length; i++)
+                inverse[perm[i]] = i;
+        }
         // A codeword corrects up to parity/2 bytes — full red at that capacity.
         double capacity = Math.Max(1, layout.EccParity / 2.0);
 
@@ -38,7 +49,8 @@ internal sealed class HeatmapRenderer(FastPng png)
                 bool failed = false;
                 for (long b = firstByte; b <= lastByte && b < protectedBytes; b++)
                 {
-                    int errors = codewordErrors[(int)(b % cwCount)];
+                    long classic = inverse?[(int)b] ?? b;
+                    int errors = codewordErrors[(int)(classic % cwCount)];
                     if (errors < 0)
                         failed = true;
                     else
