@@ -60,4 +60,15 @@ internal sealed class DecodeScratch
             Array.Clear(_suspects, 0, length);
         return _suspects;
     }
+
+    private byte[]? _secondChoice;
+
+    public byte[] ClearedSecondChoice(int length)
+    {
+        if (_secondChoice is null || _secondChoice.Length < length)
+            _secondChoice = new byte[length];
+        else
+            Array.Clear(_secondChoice, 0, length); // bits are ORed in
+        return _secondChoice;
+    }
 }

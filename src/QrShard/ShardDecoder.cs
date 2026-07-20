@@ -193,7 +193,8 @@ internal sealed class ShardDecoder(
         if (diagnostics is not null)
             diagnostics.Layout = layout;
         var palette = stripReader.ReadPalette(bmp, inner, layout);
-        byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch, out bool[]? suspectBytes);
+        byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch,
+            out bool[]? suspectBytes, out byte[]? secondChoiceBytes);
 
         // Copy the sampled cells into the diagnostics on failure — the raw material for
         // multi-capture fusion. First failing attempt wins (scratch buffers are reused).
@@ -209,7 +210,7 @@ internal sealed class ShardDecoder(
         {
             stream = scratch.Recovered(layout.CodewordCount * Fec.DataLength(layout.EccParity));
             int[]? codewordErrors = diagnostics is not null ? new int[layout.CodewordCount] : null;
-            bool recovered = fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes, codewordErrors, suspectBytes);
+            bool recovered = fec.TryRecoverInto(cells, layout.EccParity, layout.CodewordCount, stream, out correctedBytes, codewordErrors, suspectBytes, secondChoiceBytes);
             if (diagnostics is not null)
                 diagnostics.CodewordErrors = codewordErrors!;
             if (!recovered)

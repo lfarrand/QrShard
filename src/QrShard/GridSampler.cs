@@ -16,7 +16,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     private const long AbsoluteSuspectDist = 4000;
 
     public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
-        out bool[]? suspectBytes)
+        out bool[]? suspectBytes, out byte[]? secondChoiceBytes)
     {
         double sx = inner.W / layout.InnerW;
         double sy = inner.H / layout.InnerH;
@@ -32,35 +32,45 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         int bits = layout.BitsPerCell;
         int streamLength = (int)((layout.TotalBits + 7) / 8);
         byte[] stream = scratch.ClearedCells(streamLength);
-        // Ambiguity flags feed erasure decoding — only meaningful when ECC is present.
+        // Ambiguity flags + second-choice values feed erasure and Chase decoding — only
+        // meaningful when ECC is present.
         bool[]? suspects = layout.EccParity > 0 ? scratch.ClearedSuspects(streamLength) : null;
+        byte[]? second = layout.EccParity > 0 ? scratch.ClearedSecondChoice(streamLength) : null;
 
         if (palettes.Interpolate)
-            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, sx, sy, bits);
+            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits);
         else
-            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, scratch, sx, sy, bits);
+            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits);
         suspectBytes = suspects;
+        secondChoiceBytes = second;
         return stream;
     }
 
     /// <summary>
-    /// Flags a cell whose winning classification was uncertain: far from every palette color,
-    /// or nearly equidistant to a second color. Its bytes become Reed-Solomon erasure
-    /// candidates — a wrong flag only costs capacity on codewords that already need help.
+    /// Records classification confidence: an uncertain cell (far from every palette color, or
+    /// nearly equidistant to a second one) has its bytes flagged as erasure candidates and its
+    /// runner-up value written to the second-choice stream — the raw material for Chase
+    /// decoding. Confident cells write their winning value to both streams, so a byte-level
+    /// splice of the two streams flips exactly the ambiguous cells.
     /// </summary>
-    private void MarkIfAmbiguous(bool[]? suspects, Rgb24[] palette, int best, long bestDist,
+    private void RecordConfidence(bool[]? suspects, byte[]? second, Rgb24[] palette, int best, long bestDist,
         byte r, byte g, byte b, long cellIndex, int bits)
     {
-        if (suspects is null || bestDist <= ConfidentDist)
-            return;
-        bool ambiguous = bestDist > AbsoluteSuspectDist
-            || paletteMath.SecondNearestDistance(palette, r, g, b, best) < bestDist * 2;
-        if (!ambiguous)
-            return;
-        long firstBit = cellIndex * bits;
-        long firstByte = firstBit >> 3, lastByte = (firstBit + bits - 1) >> 3;
-        for (long i = firstByte; i <= lastByte && i < suspects.Length; i++)
-            suspects[i] = true;
+        int alternative = best;
+        if (suspects is not null && bestDist > ConfidentDist)
+        {
+            int secondIndex = paletteMath.SecondNearest(palette, r, g, b, best, out long secondDist);
+            if (bestDist > AbsoluteSuspectDist || secondDist < bestDist * 2)
+            {
+                alternative = secondIndex;
+                long firstBit = cellIndex * bits;
+                long firstByte = firstBit >> 3, lastByte = (firstBit + bits - 1) >> 3;
+                for (long i = firstByte; i <= lastByte && i < suspects.Length; i++)
+                    suspects[i] = true;
+            }
+        }
+        if (second is not null)
+            bitStream.WriteCell(second, cellIndex * bits, bits, alternative);
     }
 
     /// <summary>
@@ -85,7 +95,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     }
 
     private void ReadUniform(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette,
-        List<(int dx, int dy)> offsets, byte[] stream, bool[]? suspects, DecodeScratch scratch,
+        List<(int dx, int dy)> offsets, byte[] stream, bool[]? suspects, byte[]? second, DecodeScratch scratch,
         double sx, double sy, int bits)
     {
         // Lazy nearest-color lookup keyed on 5-bit-per-channel quantized RGB.
@@ -126,7 +136,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
-                MarkIfAmbiguous(suspects, palette, best, bestDist, bR, bG, bB, cellIndex, bits);
+                RecordConfidence(suspects, second, palette, best, bestDist, bR, bG, bB, cellIndex, bits);
             }
         }
     }
@@ -137,7 +147,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// a photo) moves the classification targets with it. No LUT — the palette changes per row.
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
-        List<(int dx, int dy)> offsets, byte[] stream, bool[]? suspects, double sx, double sy, int bits)
+        List<(int dx, int dy)> offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits)
     {
         double yTopStrip = layout.Gutter + layout.MetaH * 1.5;
         double yBottomStrip = layout.InnerH - layout.Gutter - layout.MetaH * 1.5;
@@ -180,7 +190,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
-                MarkIfAmbiguous(suspects, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits);
+                RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits);
             }
         }
     }

@@ -47,7 +47,7 @@ internal interface IStripReader
 internal interface IGridSampler
 {
     byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
-        out bool[]? suspectBytes);
+        out bool[]? suspectBytes, out byte[]? secondChoiceBytes);
 }
 
 /// <summary>Reassembles decoded shards into output files.</summary>
