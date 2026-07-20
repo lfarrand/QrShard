@@ -102,8 +102,9 @@ internal sealed class ShardDecoder(
 
     public DecodedShard DecodeImage(string path) => DecodeImage(path, new DecodeScratch());
 
-    /// <summary>Diagnostic single-image decode (axis-aligned pipeline only): captures the layout
-    /// and per-codeword ECC statistics whether or not the decode succeeds.</summary>
+    /// <summary>Diagnostic single-image decode: captures the layout and per-codeword ECC
+    /// statistics whether or not the decode succeeds, with the same camera-rectification
+    /// fallback as the normal pipeline — so photo captures diagnose (and calibrate) too.</summary>
     public DecodeDiagnostics Diagnose(string path)
     {
         var scratch = new DecodeScratch();
@@ -111,7 +112,25 @@ internal sealed class ShardDecoder(
         try
         {
             Bitmap bmp = LoadBitmap(path, scratch);
-            diagnostics.Shard = DecodeBitmap(bmp, scratch, path, diagnostics);
+            try
+            {
+                diagnostics.Shard = DecodeBitmap(bmp, scratch, path, diagnostics);
+            }
+            catch (ShardDecodeException)
+            {
+                Bitmap? rectified;
+                try
+                {
+                    rectified = cameraRectifier.TryRectify(bmp);
+                }
+                catch (ShardDecodeException)
+                {
+                    rectified = null;
+                }
+                if (rectified is null)
+                    throw;
+                diagnostics.Shard = DecodeBitmap(rectified, scratch, path, diagnostics);
+            }
         }
         catch (ShardDecodeException ex)
         {

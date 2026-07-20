@@ -93,7 +93,7 @@ internal interface ICameraRectifier
 /// <summary>Guides encode-setting selection: emits density probes, analyzes their captures.</summary>
 internal interface ICalibration
 {
-    int Generate(string outDir, int width, int height, TextWriter output);
+    int Generate(string outDir, int width, int height, bool camera, TextWriter output);
 
     int Analyze(string capturedFolder, TextWriter output);
 }

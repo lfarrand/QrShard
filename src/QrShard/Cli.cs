@@ -125,6 +125,8 @@ internal sealed class Cli(AppSettings? settings = null)
                     string slideshow = services.Slideshow.Write(outDir, result.Files, intervalMs);
                     @out.WriteLine($"Slideshow: {slideshow} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
                     @out.WriteLine("  Open it in a browser, press F11, and record the screen for at least one full cycle.");
+                    if (flags.Contains("--open"))
+                        OpenInBrowser(slideshow, @out);
                 }
                 return 0;
                 }
@@ -138,10 +140,12 @@ internal sealed class Cli(AppSettings? settings = null)
             case "decode":
             {
                 var (positional, named, dflags) = ParseArgs(args[1..]);
-                if (positional.Count == 0)
-                    return Help(@out, err, "decode requires a folder, image files, or a video recording.");
-
                 string? password = Get(named, "-p", "--password");
+                if (dflags.Contains("--clipboard"))
+                    return DecodeClipboard(services, Get(named, "--session"), Get(named, "-o", "--out"), password, @out, err);
+                if (positional.Count == 0)
+                    return Help(@out, err, "decode requires a folder, image files, a video recording, or --clipboard.");
+
                 if (dflags.Contains("--watch"))
                 {
                     if (positional.Count != 1 || !Directory.Exists(positional[0]))
@@ -284,6 +288,10 @@ internal sealed class Cli(AppSettings? settings = null)
                 return 0;
             }
 
+            case "send":
+                // One-step sender: encode with a slideshow and open it in the default browser.
+                return RunCore(["encode", .. args[1..], "--video", "--open"], @out, err, settings, services);
+
             case "receive":
             {
                 var (_, named, rflags) = ParseArgs(args[1..]);
@@ -323,7 +331,7 @@ internal sealed class Cli(AppSettings? settings = null)
 
             case "calibrate":
             {
-                var (positional, named, _) = ParseArgs(args[1..]);
+                var (positional, named, cflags) = ParseArgs(args[1..]);
                 if (positional.Count == 1 && Directory.Exists(positional[0]))
                     return services.Calibration.Analyze(positional[0], @out);
                 if (positional.Count != 0)
@@ -332,7 +340,7 @@ internal sealed class Cli(AppSettings? settings = null)
                 string outDir = Get(named, "-o", "--out") ?? Path.Combine(Environment.CurrentDirectory, "qrshard-calibration");
                 if (note.Length > 0)
                     @out.WriteLine($"Resolution {width}x{height}{note}");
-                return services.Calibration.Generate(outDir, width, height, @out);
+                return services.Calibration.Generate(outDir, width, height, cflags.Contains("--camera"), @out);
             }
 
             case "test":
@@ -373,6 +381,77 @@ internal sealed class Cli(AppSettings? settings = null)
         PrintSetStatus(@out, merged, services.Parity);
         @out.WriteLine($"Set incomplete — {merged.Count} shard(s) saved to {sessionPath}; capture the missing images and decode again with --session.");
         return 3;
+    }
+
+    /// <summary>
+    /// Clipboard decode (Windows): read the bitmap off the clipboard — Win+Shift+S a displayed
+    /// shard, no file saving — merge it with the session, assemble when complete.
+    /// </summary>
+    private static int DecodeClipboard(CliServices services, string? sessionPath, string? outputPath,
+        string? password, TextWriter @out, TextWriter err)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            err.WriteLine("error: --clipboard is only supported on Windows.");
+            return 1;
+        }
+        var bmp = new ClipboardReader().TryRead();
+        if (bmp is null)
+        {
+            err.WriteLine("error: no bitmap on the clipboard (screenshot a displayed shard first).");
+            return 1;
+        }
+
+        var shard = services.Decoder.DecodeBitmap(bmp, new DecodeScratch(), "clipboard");
+        string which = shard.Header.IsParity
+            ? $"parity #{shard.Header.Index + 1}"
+            : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
+        @out.WriteLine($"  ok      clipboard  ({which}, {shard.Payload.Length:N0} bytes)");
+
+        var known = sessionPath is not null ? services.Sessions.Load(sessionPath) : [];
+        var merged = MergeShards(known, [shard]);
+        if (services.Parity.IsSetComplete(merged))
+        {
+            var restored = services.Assembler.Assemble(merged, outputPath, @out.WriteLine, password);
+            @out.WriteLine($"Restored {restored.Count} file(s).");
+            if (sessionPath is not null && File.Exists(sessionPath))
+                File.Delete(sessionPath);
+            return 0;
+        }
+        if (sessionPath is null)
+        {
+            @out.WriteLine("Set incomplete — use --session <file> to accumulate clipboard captures across screenshots.");
+            return 3;
+        }
+        services.Sessions.Save(sessionPath, merged);
+        PrintSetStatus(@out, merged, services.Parity);
+        @out.WriteLine($"Set incomplete — {merged.Count} shard(s) saved to {sessionPath}; screenshot the next image and run again.");
+        return 3;
+    }
+
+    /// <summary>Opens the slideshow in the platform's default browser (suppressed by the
+    /// QRSHARD_NO_LAUNCH environment variable, e.g. in tests and scripts).</summary>
+    private static void OpenInBrowser(string path, TextWriter @out)
+    {
+        if (Environment.GetEnvironmentVariable("QRSHARD_NO_LAUNCH") is not null)
+        {
+            @out.WriteLine("  (browser launch suppressed by QRSHARD_NO_LAUNCH)");
+            return;
+        }
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+            else if (OperatingSystem.IsMacOS())
+                System.Diagnostics.Process.Start("open", path);
+            else
+                System.Diagnostics.Process.Start("xdg-open", path);
+            @out.WriteLine("  Opened the slideshow in your default browser — press F11 for fullscreen.");
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or FileNotFoundException)
+        {
+            @out.WriteLine($"  Could not launch a browser automatically; open {path} manually.");
+        }
     }
 
     /// <summary>
@@ -525,7 +604,7 @@ internal sealed class Cli(AppSettings? settings = null)
         var flags = new HashSet<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch" or "--screen" or "--open" or "--interleave2")
+            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch" or "--screen" or "--open" or "--interleave2" or "--clipboard")
                 flags.Add(args[i]);
             else if (args[i].StartsWith('-') && i + 1 < args.Length)
                 named[args[i]] = args[++i];
