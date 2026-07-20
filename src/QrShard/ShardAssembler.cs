@@ -122,8 +122,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             string destDir = outputPath ?? Path.Combine(Environment.CurrentDirectory, Path.GetFileNameWithoutExtension(first.FileName));
             try
             {
-                Directory.CreateDirectory(destDir);
-                TarFile.ExtractToDirectory(outPath, destDir, overwriteFiles: true);
+                ExtractTar(outPath, destDir);
             }
             finally
             {
@@ -135,6 +134,40 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
 
         log($"  SHA-256 verified ✓  '{first.FileName}' → {outPath} ({written:N0} bytes)");
         return new RestoredFile(first.FileName, outPath, written);
+    }
+
+    /// <summary>
+    /// Manual tar extraction instead of TarFile.ExtractToDirectory: the built-in containment
+    /// check compares the destination STRING against symlink-resolved entry paths, so any
+    /// destination under a symlinked parent (macOS's /var → /private/var temp dir, notably)
+    /// spuriously fails as "outside the destination". Building both sides of our own zip-slip
+    /// guard from the same Path.GetFullPath keeps them consistent regardless of symlinks.
+    /// </summary>
+    private static void ExtractTar(string tarPath, string destDir)
+    {
+        Directory.CreateDirectory(destDir);
+        string destRoot = Path.GetFullPath(destDir);
+        using var fs = new FileStream(tarPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+        using var reader = new TarReader(fs);
+        while (reader.GetNextEntry() is { } entry)
+        {
+            string target = Path.GetFullPath(Path.Combine(destRoot, entry.Name));
+            if (!target.StartsWith(destRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal) && target != destRoot)
+                throw new ShardDecodeException($"Archive entry '{entry.Name}' escapes the destination directory.");
+
+            switch (entry.EntryType)
+            {
+                case TarEntryType.Directory:
+                    Directory.CreateDirectory(target);
+                    break;
+                case TarEntryType.RegularFile or TarEntryType.V7RegularFile:
+                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                    entry.ExtractToFile(target, overwrite: true);
+                    break;
+                default:
+                    break; // links, fifos, pax metadata — our own encoder never writes them
+            }
+        }
     }
 
     private static string ResolveOutputPath(ShardHeader first, string? outputPath)
