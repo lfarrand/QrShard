@@ -50,10 +50,27 @@ internal sealed class Cli(AppSettings? settings = null)
             {
                 var (positional, named, flags) = ParseArgs(args[1..]);
                 if (positional.Count != 1)
-                    return Help(@out, err, "encode requires exactly one input file.");
-                string file = positional[0];
-                if (!File.Exists(file))
-                    return Help(@out, err, $"file not found: {file}");
+                    return Help(@out, err, "encode requires exactly one input file or folder.");
+                string input = positional[0];
+                bool isArchive = Directory.Exists(input);
+                if (!isArchive && !File.Exists(input))
+                    return Help(@out, err, $"file not found: {input}");
+
+                // A folder is tar-ed into a temp archive and encoded as one payload; decoding
+                // extracts it back into a directory automatically.
+                string inputName = Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(input)));
+                string file = input;
+                string? tempTarDir = null;
+                if (isArchive)
+                {
+                    tempTarDir = Path.Combine(Path.GetTempPath(), "qrshard-tar-" + Guid.NewGuid().ToString("N")[..8]);
+                    Directory.CreateDirectory(tempTarDir);
+                    file = Path.Combine(tempTarDir, inputName + ".tar");
+                    @out.WriteLine($"Archiving folder '{input}'...");
+                    System.Formats.Tar.TarFile.CreateFromDirectory(input, file, includeBaseDirectory: false);
+                }
+                try
+                {
 
                 // Flag > appsettings.json EncodeDefaults > built-in default. The camera profile
                 // swaps in photo-appropriate density defaults (big cells, few colors, heavy
@@ -73,11 +90,14 @@ internal sealed class Cli(AppSettings? settings = null)
                     ImageFormat = Get(named, "-f", "--format") ?? defaults.ImageFormat,
                     Compress = !flags.Contains("--no-compress") && defaults.Compress,
                     CameraMode = camera,
+                    Password = Get(named, "-p", "--password"),
+                    IsArchive = isArchive,
                 };
                 string outDir = Get(named, "-o", "--out") ?? Path.Combine(
-                    Path.GetDirectoryName(Path.GetFullPath(file))!, Path.GetFileName(file) + settings.ShardFolderSuffix);
+                    Path.GetDirectoryName(Path.GetFullPath(Path.TrimEndingDirectorySeparator(input)))!,
+                    inputName + settings.ShardFolderSuffix);
 
-                @out.WriteLine($"Encoding '{file}' → {outDir}");
+                @out.WriteLine($"Encoding '{input}' → {outDir}");
                 @out.WriteLine($"  {opt.Width}x{opt.Height}px{resolutionNote}, cell {opt.CellPx}px, {opt.BitsPerCell} bits/cell, " +
                                $"ECC parity {opt.EccParity}, recovery {opt.RecoveryPercent}%, " +
                                $"format {opt.ImageFormat}, compression {(opt.Compress ? "on" : "off")}" +
@@ -96,6 +116,12 @@ internal sealed class Cli(AppSettings? settings = null)
                     @out.WriteLine("  Open it in a browser, press F11, and record the screen for at least one full cycle.");
                 }
                 return 0;
+                }
+                finally
+                {
+                    if (tempTarDir is not null)
+                        Directory.Delete(tempTarDir, recursive: true);
+                }
             }
 
             case "decode":
@@ -105,13 +131,14 @@ internal sealed class Cli(AppSettings? settings = null)
                     return Help(@out, err, "decode requires a folder, image files, or a video recording.");
 
                 // A single video file (or animated image) is a recording of the slideshow.
+                string? password = Get(named, "-p", "--password");
                 if (positional.Count == 1 && File.Exists(positional[0]) &&
                     (VideoDecoder.IsVideoFile(positional[0]) ||
                      (IsImageFile(positional[0]) && VideoDecoder.IsAnimatedImage(positional[0]))))
                 {
                     double fps = GetDouble(named, "--fps", 8.0);
                     @out.WriteLine($"Decoding video '{positional[0]}' (extracting at {fps} fps)...");
-                    var fromVideo = services.VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps, @out.WriteLine, out _);
+                    var fromVideo = services.VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps, @out.WriteLine, out _, password);
                     @out.WriteLine($"Restored {fromVideo.Count} file(s).");
                     return 0;
                 }
@@ -130,7 +157,7 @@ internal sealed class Cli(AppSettings? settings = null)
                     return Help(@out, err, "no image files found to decode.");
 
                 @out.WriteLine($"Decoding {images.Count} image(s)...");
-                var restored = services.Decoder.DecodeFolder(images, Get(named, "-o", "--out"), @out.WriteLine);
+                var restored = services.Decoder.DecodeFolder(images, Get(named, "-o", "--out"), @out.WriteLine, password);
                 @out.WriteLine($"Restored {restored.Count} file(s).");
                 return 0;
             }

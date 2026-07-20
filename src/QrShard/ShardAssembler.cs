@@ -1,13 +1,23 @@
+using System.Formats.Tar;
 using System.IO.Compression;
 using System.Security.Cryptography;
 
 namespace QrShard;
 
-/// <summary>Reassembles decoded shards into output files (contiguous path + shared plumbing).</summary>
-internal sealed class ShardAssembler(IParityReassembler parityReassembler) : IShardAssembler
+/// <summary>
+/// Reassembles decoded shards into output files. The chunk sequence is streamed through
+/// decrypt/decompress straight to disk with an incremental SHA-256, so peak memory is one
+/// buffer — not two copies of the whole file (encrypted payloads are the exception: GCM
+/// authenticates the whole message, so those materialize once).
+/// </summary>
+internal sealed class ShardAssembler(IParityReassembler parityReassembler, PayloadCipher cipher) : IShardAssembler
 {
+    public ShardAssembler() : this(new ParityReassembler(), new PayloadCipher())
+    {
+    }
+
     /// <summary>Reassembles already-decoded shards into output file(s). Shared by folder and video decoding.</summary>
-    public List<RestoredFile> Assemble(List<DecodedShard> shards, string? outputPath, Action<string> log)
+    public List<RestoredFile> Assemble(List<DecodedShard> shards, string? outputPath, Action<string> log, string? password = null)
     {
         var groups = shards.GroupBy(s => s.Header.FileId).ToList();
         if (outputPath is not null && groups.Count > 1)
@@ -15,11 +25,11 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler) : ISh
 
         var restored = new List<RestoredFile>();
         foreach (var group in groups)
-            restored.Add(Reassemble([.. group], outputPath, log));
+            restored.Add(Reassemble([.. group], outputPath, log, password));
         return restored;
     }
 
-    private RestoredFile Reassemble(List<DecodedShard> shards, string? outputPath, Action<string> log)
+    private RestoredFile Reassemble(List<DecodedShard> shards, string? outputPath, Action<string> log, string? password)
     {
         var first = shards[0].Header;
         int count = first.Count;
@@ -27,41 +37,129 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler) : ISh
             if (s.Header.Count != count)
                 throw new ShardDecodeException($"Inconsistent shard set for '{first.FileName}': image counts differ.");
 
-        // Both reassembly paths allocate the exact output size up front, so bound it first.
+        // Both reassembly paths bound their buffers by the declared sizes, so sanity-check first.
         if (first.TotalLength is < 0 or > ShardEncoder.MaxFileBytes || first.OriginalLength is < 0 or > ShardEncoder.MaxFileBytes)
             throw new ShardDecodeException($"'{first.FileName}': shard header declares an implausible file size.");
 
-        byte[] data = first.StripeParity > 0
-            ? parityReassembler.ReassembleWithParity(shards, first, log)
-            : ReassembleContiguous(shards, first);
-
-        if ((first.Flags & ShardHeader.FlagCompressed) != 0)
+        byte[][] chunks;
+        long[] chunkLengths;
+        if (first.StripeParity > 0)
         {
-            try
-            {
-                data = Inflate(data, (int)first.OriginalLength);
-            }
-            catch (InvalidDataException)
-            {
-                throw new ShardDecodeException($"'{first.FileName}': the reassembled stream failed to decompress. A shard is corrupt beyond recovery.");
-            }
+            chunks = parityReassembler.ReassembleWithParity(shards, first, log, out int cap);
+            chunkLengths = new long[chunks.Length];
+            for (int i = 0; i < chunks.Length; i++)
+                chunkLengths[i] = Math.Min(cap, first.TotalLength - (long)i * cap);
+        }
+        else
+        {
+            chunks = CollectContiguous(shards, first);
+            chunkLengths = new long[chunks.Length];
+            for (int i = 0; i < chunks.Length; i++)
+                chunkLengths[i] = chunks[i].Length;
         }
 
-        byte[] sha = SHA256.HashData(data);
-        if (!sha.AsSpan().SequenceEqual(first.Sha256))
-            throw new ShardDecodeException($"'{first.FileName}': SHA-256 of the reassembled file does not match the original. A shard was corrupted.");
+        bool encrypted = (first.Flags & ShardHeader.FlagEncrypted) != 0;
+        bool compressed = (first.Flags & ShardHeader.FlagCompressed) != 0;
+        bool archive = (first.Flags & ShardHeader.FlagArchive) != 0;
 
+        Stream source = new ChunkConcatStream(chunks, chunkLengths);
+        if (encrypted)
+        {
+            if (password is null)
+                throw new ShardDecodeException($"'{first.FileName}' is encrypted; supply the password with -p/--password.");
+            var blob = new byte[first.TotalLength];
+            source.ReadExactly(blob);
+            source = new MemoryStream(cipher.Decrypt(blob, password, first.FileName));
+        }
+        if (compressed)
+        {
+            source = (first.Flags & ShardHeader.FlagBrotli) != 0
+                ? new BrotliStream(source, CompressionMode.Decompress)
+                : new DeflateStream(source, CompressionMode.Decompress);
+        }
+
+        // Archives restore into a directory; the tar itself is a transient temp file.
+        string outPath = archive
+            ? Path.Combine(Path.GetTempPath(), $"qrshard-{first.FileId:x16}.tar")
+            : ResolveOutputPath(first, outputPath);
+
+        long written = 0;
+        byte[] sha;
+        try
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            using (var output = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
+            {
+                var buffer = new byte[1 << 20];
+                int n;
+                while (written <= first.OriginalLength && (n = source.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    output.Write(buffer, 0, n);
+                    hash.AppendData(buffer, 0, n);
+                    written += n;
+                }
+            }
+            sha = hash.GetHashAndReset();
+        }
+        catch (InvalidDataException)
+        {
+            TryDelete(outPath);
+            throw new ShardDecodeException($"'{first.FileName}': the reassembled stream failed to decompress. A shard is corrupt beyond recovery.");
+        }
+        finally
+        {
+            source.Dispose();
+        }
+
+        if (written != first.OriginalLength || !sha.AsSpan().SequenceEqual(first.Sha256))
+        {
+            TryDelete(outPath);
+            throw new ShardDecodeException($"'{first.FileName}': SHA-256 of the reassembled file does not match the original. A shard was corrupted.");
+        }
+
+        if (archive)
+        {
+            string destDir = outputPath ?? Path.Combine(Environment.CurrentDirectory, Path.GetFileNameWithoutExtension(first.FileName));
+            try
+            {
+                Directory.CreateDirectory(destDir);
+                TarFile.ExtractToDirectory(outPath, destDir, overwriteFiles: true);
+            }
+            finally
+            {
+                TryDelete(outPath);
+            }
+            log($"  SHA-256 verified ✓  '{first.FileName}' → extracted to {destDir}");
+            return new RestoredFile(first.FileName, destDir, written);
+        }
+
+        log($"  SHA-256 verified ✓  '{first.FileName}' → {outPath} ({written:N0} bytes)");
+        return new RestoredFile(first.FileName, outPath, written);
+    }
+
+    private static string ResolveOutputPath(ShardHeader first, string? outputPath)
+    {
         string outPath = outputPath ?? Path.Combine(Environment.CurrentDirectory, first.FileName);
         if (outputPath is null && File.Exists(outPath))
             outPath = Path.Combine(Environment.CurrentDirectory,
                 $"{Path.GetFileNameWithoutExtension(first.FileName)}.restored{Path.GetExtension(first.FileName)}");
-        File.WriteAllBytes(outPath, data);
-        log($"  SHA-256 verified ✓  '{first.FileName}' → {outPath} ({data.Length:N0} bytes)");
-        return new RestoredFile(first.FileName, outPath, data.LongLength);
+        return outPath;
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // best effort — verification already failed louder
+        }
     }
 
     /// <summary>Original path: no cross-shard parity — every data image must be present.</summary>
-    private static byte[] ReassembleContiguous(List<DecodedShard> shards, ShardHeader first)
+    private static byte[][] CollectContiguous(List<DecodedShard> shards, ShardHeader first)
     {
         var byIndex = new DecodedShard?[first.Count];
         foreach (var s in shards)
@@ -77,32 +175,52 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler) : ISh
         if (byIndex.Sum(s => (long)s!.Payload.Length) != first.TotalLength)
             throw new ShardDecodeException($"'{first.FileName}': reassembled length does not match expected {first.TotalLength:N0}.");
 
-        var data = new byte[first.TotalLength];
-        int offset = 0;
-        foreach (var s in byIndex)
-        {
-            s!.Payload.CopyTo(data.AsSpan(offset));
-            offset += s.Payload.Length;
-        }
-        return data;
+        return [.. byIndex.Select(s => s!.Payload)];
     }
 
-    private static byte[] Inflate(byte[] data, int expectedLength)
+    /// <summary>Reads a chunk sequence as one stream, consuming only the declared prefix of each chunk.</summary>
+    private sealed class ChunkConcatStream(byte[][] chunks, long[] lengths) : Stream
     {
-        // The original length is known from the (CRC-validated) header, so decompress straight
-        // into an exact-size buffer — no MemoryStream doubling, no final ToArray copy. Any
-        // length lie is caught by the SHA-256 verification that follows.
-        using var input = new MemoryStream(data);
-        using var ds = new DeflateStream(input, CompressionMode.Decompress);
-        var result = new byte[expectedLength];
-        int offset = 0;
-        while (offset < result.Length)
+        private int _index;
+        private long _posInChunk;
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
         {
-            int n = ds.Read(result, offset, result.Length - offset);
-            if (n == 0)
-                break;
-            offset += n;
+            while (_index < chunks.Length)
+            {
+                long remaining = lengths[_index] - _posInChunk;
+                if (remaining <= 0)
+                {
+                    _index++;
+                    _posInChunk = 0;
+                    continue;
+                }
+                int n = (int)Math.Min(buffer.Length, remaining);
+                chunks[_index].AsSpan((int)_posInChunk, n).CopyTo(buffer);
+                _posInChunk += n;
+                return n;
+            }
+            return 0;
         }
-        return result;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

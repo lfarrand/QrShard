@@ -17,12 +17,13 @@ internal sealed class ShardDecoder(
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
     public ShardDecoder() : this(
         AppSettings.Current, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
-        new StripReader(), new GridSampler(), new ShardAssembler(new ParityReassembler()),
+        new StripReader(), new GridSampler(), new ShardAssembler(),
         new Fec(), new Crc(), new FastPngReader())
     {
     }
 
-    public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log)
+    public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log,
+        string? password = null)
     {
         var ordered = imagePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
         var results = new (DecodedShard? Shard, string? Error)[ordered.Count];
@@ -73,7 +74,7 @@ internal sealed class ShardDecoder(
         if (shards.Count == 0)
             throw new ShardDecodeException("No decodable shard images were found.");
 
-        return assembler.Assemble(shards, outputPath, log);
+        return assembler.Assemble(shards, outputPath, log, password);
     }
 
     public DecodedShard DecodeImage(string path) => DecodeImage(path, new DecodeScratch());

@@ -61,8 +61,13 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec) : IParityRe
         return true;
     }
 
-    /// <summary>Tolerates losing up to StripeParity images per stripe.</summary>
-    public byte[] ReassembleWithParity(List<DecodedShard> shards, ShardHeader first, Action<string> log)
+    /// <summary>
+    /// Tolerates losing up to StripeParity images per stripe. Returns the per-image chunks
+    /// (each <paramref name="chunkCapacity"/> bytes or the original payload) so the assembler
+    /// can stream them out without materializing the whole file.
+    /// </summary>
+    public byte[][] ReassembleWithParity(List<DecodedShard> shards, ShardHeader first, Action<string> log,
+        out int chunkCapacity)
     {
         int count = first.Count, s = first.StripeData, p = first.StripeParity;
         int stripes = (count + s - 1) / s;
@@ -150,13 +155,8 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec) : IParityRe
         if (lastLen < 0 || lastLen > cap)
             throw new ShardDecodeException($"'{first.FileName}': reassembled length does not match expected {first.TotalLength:N0}.");
 
-        var data = new byte[first.TotalLength]; // offsets fit int: TotalLength <= ShardEncoder.MaxFileBytes
-        for (int i = 0; i < count; i++)
-        {
-            int len = i < count - 1 ? cap : (int)lastLen;
-            chunks[i].AsSpan(0, Math.Min(len, chunks[i].Length)).CopyTo(data.AsSpan(i * cap));
-        }
-        return data;
+        chunkCapacity = cap;
+        return chunks;
     }
 
     private static byte[] Pad(byte[] src, int length)

@@ -11,7 +11,8 @@ internal interface IShardEncoder
 /// <summary>Decodes captured shard images back into the original file(s).</summary>
 internal interface IShardDecoder
 {
-    List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log);
+    List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log,
+        string? password = null);
 
     DecodedShard DecodeImage(string path, DecodeScratch scratch);
 
@@ -47,7 +48,7 @@ internal interface IGridSampler
 /// <summary>Reassembles decoded shards into output files.</summary>
 internal interface IShardAssembler
 {
-    List<RestoredFile> Assemble(List<DecodedShard> shards, string? outputPath, Action<string> log);
+    List<RestoredFile> Assemble(List<DecodedShard> shards, string? outputPath, Action<string> log, string? password = null);
 }
 
 /// <summary>Cross-shard-parity recovery and the stripe-aware completeness check.</summary>
@@ -55,13 +56,14 @@ internal interface IParityReassembler
 {
     bool IsSetComplete(IReadOnlyCollection<DecodedShard> shards);
 
-    byte[] ReassembleWithParity(List<DecodedShard> shards, ShardHeader first, Action<string> log);
+    byte[][] ReassembleWithParity(List<DecodedShard> shards, ShardHeader first, Action<string> log, out int chunkCapacity);
 }
 
 /// <summary>Decodes shards from a recording (video file or animated image) of the slideshow.</summary>
 internal interface IVideoDecoder
 {
-    List<RestoredFile> Decode(string path, string? outputPath, double extractFps, Action<string> log, out VideoDecodeStats stats);
+    List<RestoredFile> Decode(string path, string? outputPath, double extractFps, Action<string> log,
+        out VideoDecodeStats stats, string? password = null);
 }
 
 /// <summary>Yields the frames of a recording (video file or animated image) in display order.</summary>

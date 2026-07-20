@@ -26,7 +26,7 @@ internal sealed class VideoDecoder(
 
     /// <summary>Default wiring for tests and non-DI callers.</summary>
     public VideoDecoder() : this(new ShardDecoder(), new RecordingFrameSource(),
-        new ShardAssembler(new ParityReassembler()), new ParityReassembler())
+        new ShardAssembler(), new ParityReassembler())
     {
     }
 
@@ -48,7 +48,7 @@ internal sealed class VideoDecoder(
     }
 
     public List<RestoredFile> Decode(string path, string? outputPath, double extractFps, Action<string> log,
-        out VideoDecodeStats stats)
+        out VideoDecodeStats stats, string? password = null)
     {
         var frames = frameSource.Frames(path, extractFps);
         var shards = CollectShards(frames, log, out stats);
@@ -56,7 +56,7 @@ internal sealed class VideoDecoder(
             $"collected {stats.ShardsCollected} shard(s){(stats.StoppedEarly ? ", stopped early — set complete" : "")}");
         if (shards.Count == 0)
             throw new ShardDecodeException("No decodable shard images were found in the video.");
-        return assembler.Assemble(shards, outputPath, log);
+        return assembler.Assemble(shards, outputPath, log, password);
     }
 
     // ---------- Shard collection with dedupe + early stop ----------

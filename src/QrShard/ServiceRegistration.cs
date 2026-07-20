@@ -21,6 +21,7 @@ internal static class ServiceRegistration
             .AddSingleton<FastPngReader>()
             .AddSingleton<ShardImageFormat>()
             .AddSingleton<CameraMath>()
+            .AddSingleton<PayloadCipher>()
             // Decode pipeline
             .AddSingleton<IInnerRectScanner, InnerRectScanner>()
             .AddSingleton<IStripReader, StripReader>()

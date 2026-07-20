@@ -13,6 +13,8 @@ internal sealed record EncodeOptions
     public int RecoveryPercent { get; init; } // extra parity images (% of data images); 0 = off
     public bool CameraMode { get; init; } // add finder patterns so photos (not just screenshots) decode
     public string ImageFormat { get; init; } = ShardImageFormat.Default; // any of ShardImageFormat.Supported
+    public string? Password { get; init; } // AES-256-GCM encrypt the payload (null = plaintext)
+    public bool IsArchive { get; init; } // payload is a tar of a folder; decode extracts it
 }
 
 internal sealed record EncodeResult(
@@ -48,7 +50,10 @@ internal sealed class ShardEncoder(
             throw new InvalidOperationException($"Files larger than {MaxFileBytes / 1_000_000:N0} MB are not supported.");
         string fileName = Path.GetFileName(filePath);
 
-        using var payload = payloadPreparer.Open(filePath, originalLength, opt.Compress, settings, out byte flags, out byte[] sha);
+        using var payload = payloadPreparer.Open(filePath, originalLength, opt.Compress, opt.Password, settings,
+            out byte flags, out byte[] sha);
+        if (opt.IsArchive)
+            flags |= ShardHeader.FlagArchive;
         var source = payload.Source;
         long dataLength = source.Length;
 
