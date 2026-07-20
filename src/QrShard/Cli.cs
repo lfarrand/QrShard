@@ -136,12 +136,20 @@ internal sealed class Cli(AppSettings? settings = null)
 
             case "decode":
             {
-                var (positional, named, _) = ParseArgs(args[1..]);
+                var (positional, named, dflags) = ParseArgs(args[1..]);
                 if (positional.Count == 0)
                     return Help(@out, err, "decode requires a folder, image files, or a video recording.");
 
-                // A single video file (or animated image) is a recording of the slideshow.
                 string? password = Get(named, "-p", "--password");
+                if (dflags.Contains("--watch"))
+                {
+                    if (positional.Count != 1 || !Directory.Exists(positional[0]))
+                        return Help(@out, err, "--watch requires exactly one folder to watch.");
+                    return DecodeWatch(services, positional[0], Get(named, "--session"),
+                        Get(named, "-o", "--out"), password, @out);
+                }
+
+                // A single video file (or animated image) is a recording of the slideshow.
                 if (positional.Count == 1 && File.Exists(positional[0]) &&
                     (VideoDecoder.IsVideoFile(positional[0]) ||
                      (IsImageFile(positional[0]) && VideoDecoder.IsAnimatedImage(positional[0]))))
@@ -275,6 +283,26 @@ internal sealed class Cli(AppSettings? settings = null)
                 return 0;
             }
 
+            case "receive":
+            {
+                var (_, named, _) = ParseArgs(args[1..]);
+                string? device = Get(named, "--device") ?? LiveFrameSource.DefaultDevice();
+                if (device is null)
+                    return Help(@out, err,
+                        "receive on Windows needs --device \"<webcam name>\" (list devices with: ffmpeg -list_devices true -f dshow -i dummy)");
+                double fps = GetDouble(named, "--fps", 10.0);
+                @out.WriteLine($"Receiving from '{device}' at {fps} fps — point the camera at the sender's slideshow.");
+                @out.WriteLine("Decoding stops automatically the moment the transfer is complete.");
+
+                // Same decoder, different frame source: the live pipe instead of a recording.
+                var live = new VideoDecoder(services.Decoder, new LiveFrameSource(Get(named, "--format")),
+                    services.Assembler, services.Parity, new CameraRectifier());
+                var received = live.Decode(device, Get(named, "-o", "--out"), fps, @out.WriteLine, out var liveStats,
+                    Get(named, "-p", "--password"));
+                @out.WriteLine($"Restored {received.Count} file(s) after examining {liveStats.FramesExamined} frame(s).");
+                return 0;
+            }
+
             case "calibrate":
             {
                 var (positional, named, _) = ParseArgs(args[1..]);
@@ -326,6 +354,80 @@ internal sealed class Cli(AppSettings? settings = null)
         services.Sessions.Save(sessionPath, merged);
         PrintSetStatus(@out, merged, services.Parity);
         @out.WriteLine($"Set incomplete — {merged.Count} shard(s) saved to {sessionPath}; capture the missing images and decode again with --session.");
+        return 3;
+    }
+
+    /// <summary>
+    /// Watch mode: poll a folder for new captures, decode each as it lands (with a settle
+    /// delay so half-written screenshots are left for the next poll), and assemble the moment
+    /// the set completes. Ctrl+C stops the watch, persisting progress when a session is given.
+    /// </summary>
+    private static int DecodeWatch(CliServices services, string folder, string? sessionPath,
+        string? outputPath, string? password, TextWriter @out)
+    {
+        var shards = sessionPath is not null ? services.Sessions.Load(sessionPath) : [];
+        if (shards.Count > 0)
+            @out.WriteLine($"  session: resuming with {shards.Count} previously collected shard(s)");
+        var seen = shards.Select(s => (s.Header.FileId, s.Header.Index, s.Header.IsParity)).ToHashSet();
+        var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        @out.WriteLine($"Watching {folder} — drop captures in; Ctrl+C stops" +
+                       (sessionPath is not null ? " (progress persists to the session)." : "."));
+
+        bool cancelled = false;
+        ConsoleCancelEventHandler onCancel = (_, e) =>
+        {
+            e.Cancel = true;
+            cancelled = true;
+        };
+        Console.CancelKeyPress += onCancel;
+        try
+        {
+            while (!cancelled)
+            {
+                var settled = DateTime.UtcNow - TimeSpan.FromMilliseconds(500);
+                var fresh = Directory.EnumerateFiles(folder)
+                    .Where(IsImageFile)
+                    .Where(f => !processed.Contains(f) && File.GetLastWriteTimeUtc(f) < settled)
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (fresh.Count > 0)
+                {
+                    processed.UnionWith(fresh);
+                    bool added = false;
+                    foreach (var s in services.Decoder.CollectShards(fresh, @out.WriteLine))
+                        if (seen.Add((s.Header.FileId, s.Header.Index, s.Header.IsParity)))
+                        {
+                            shards.Add(s);
+                            added = true;
+                        }
+                    if (added)
+                    {
+                        if (sessionPath is not null)
+                            services.Sessions.Save(sessionPath, shards);
+                        PrintSetStatus(@out, shards, services.Parity);
+                        if (services.Parity.IsSetComplete(shards))
+                        {
+                            var restored = services.Assembler.Assemble(shards, outputPath, @out.WriteLine, password);
+                            @out.WriteLine($"Restored {restored.Count} file(s).");
+                            if (sessionPath is not null && File.Exists(sessionPath))
+                                File.Delete(sessionPath);
+                            return 0;
+                        }
+                    }
+                }
+                Thread.Sleep(250);
+            }
+        }
+        finally
+        {
+            Console.CancelKeyPress -= onCancel;
+        }
+
+        if (sessionPath is not null && shards.Count > 0)
+        {
+            services.Sessions.Save(sessionPath, shards);
+            @out.WriteLine($"Stopped — {shards.Count} shard(s) saved to {sessionPath}.");
+        }
         return 3;
     }
 

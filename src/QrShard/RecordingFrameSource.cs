@@ -28,15 +28,19 @@ internal sealed class RecordingFrameSource : IFrameSource
         }
     }
 
+    private static IEnumerable<Bitmap> FfmpegFrames(string path, double fps) =>
+        FfmpegPipe($"-i \"{path}\"", fps);
+
     /// <summary>
-    /// Streams frames out of any container ffmpeg understands, as uncompressed BMP over a pipe
-    /// (BMP because its header carries the exact file size, making stream framing trivial).
-    /// Disposing the enumerator kills ffmpeg, which is how early stop avoids demuxing the rest.
+    /// Streams frames out of anything ffmpeg can open — a file, or a live capture device —
+    /// as uncompressed BMP over a pipe (BMP because its header carries the exact file size,
+    /// making stream framing trivial). Disposing the enumerator kills ffmpeg, which is how
+    /// early stop avoids demuxing the rest (or, live, how the capture ends).
     /// </summary>
-    private static IEnumerable<Bitmap> FfmpegFrames(string path, double fps)
+    internal static IEnumerable<Bitmap> FfmpegPipe(string inputArgs, double fps)
     {
         ProcessStartInfo psi = new("ffmpeg",
-            $"-hide_banner -loglevel error -i \"{path}\" -vf fps={fps.ToString(System.Globalization.CultureInfo.InvariantCulture)} -c:v bmp -f image2pipe -")
+            $"-hide_banner -loglevel error {inputArgs} -vf fps={fps.ToString(System.Globalization.CultureInfo.InvariantCulture)} -c:v bmp -f image2pipe -")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
