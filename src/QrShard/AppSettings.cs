@@ -43,6 +43,15 @@ internal sealed class AppSettings
     /// <summary>Max parallel image decodes; 0 = automatic (cores, capped at 16).</summary>
     public int DecodeMaxParallelism { get; private set; }
 
+    /// <summary>Default frame rate for the live receiver (`qrshard receive`).</summary>
+    public double ReceiveFps { get; private set; } = 10;
+
+    /// <summary>Poll interval (ms) for watch-mode decoding.</summary>
+    public int WatchPollMs { get; private set; } = 250;
+
+    /// <summary>Parallel frame-decode workers for the live receiver; 0 = automatic.</summary>
+    public int ReceiveDecodeWorkers { get; private set; }
+
     internal sealed class EncodeDefaultSettings
     {
         public string Resolution { get; set; } = "auto";
@@ -96,6 +105,23 @@ internal sealed class AppSettings
             settings.DecodeMaxParallelism = ReadInt(root, "DecodeMaxParallelism", settings.DecodeMaxParallelism);
             if (settings.DecodeMaxParallelism is < 0 or > 1024)
                 throw Invalid("DecodeMaxParallelism", settings.DecodeMaxParallelism, "0 (auto) to 1024");
+
+            if (root.TryGetProperty("ReceiveFps", out var receiveFps))
+            {
+                settings.ReceiveFps = receiveFps.ValueKind == JsonValueKind.Number
+                    ? receiveFps.GetDouble()
+                    : throw Invalid("ReceiveFps", receiveFps.ToString(), "a number of frames per second");
+                if (settings.ReceiveFps is <= 0 or > 120)
+                    throw Invalid("ReceiveFps", settings.ReceiveFps, "0-120 frames per second");
+            }
+
+            settings.WatchPollMs = ReadInt(root, "WatchPollMs", settings.WatchPollMs);
+            if (settings.WatchPollMs is < 50 or > 60_000)
+                throw Invalid("WatchPollMs", settings.WatchPollMs, "50-60000 milliseconds");
+
+            settings.ReceiveDecodeWorkers = ReadInt(root, "ReceiveDecodeWorkers", settings.ReceiveDecodeWorkers);
+            if (settings.ReceiveDecodeWorkers is < 0 or > 64)
+                throw Invalid("ReceiveDecodeWorkers", settings.ReceiveDecodeWorkers, "0 (auto) to 64");
 
             if (root.TryGetProperty("EncodeDefaults", out var defaults) && defaults.ValueKind == JsonValueKind.Object)
             {

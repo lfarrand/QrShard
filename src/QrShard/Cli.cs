@@ -146,7 +146,7 @@ internal sealed class Cli(AppSettings? settings = null)
                     if (positional.Count != 1 || !Directory.Exists(positional[0]))
                         return Help(@out, err, "--watch requires exactly one folder to watch.");
                     return DecodeWatch(services, positional[0], Get(named, "--session"),
-                        Get(named, "-o", "--out"), password, @out);
+                        Get(named, "-o", "--out"), password, @out, settings.WatchPollMs);
                 }
 
                 // A single video file (or animated image) is a recording of the slideshow.
@@ -285,20 +285,37 @@ internal sealed class Cli(AppSettings? settings = null)
 
             case "receive":
             {
-                var (_, named, _) = ParseArgs(args[1..]);
-                string? device = Get(named, "--device") ?? LiveFrameSource.DefaultDevice();
-                if (device is null)
-                    return Help(@out, err,
-                        "receive on Windows needs --device \"<webcam name>\" (list devices with: ffmpeg -list_devices true -f dshow -i dummy)");
-                double fps = GetDouble(named, "--fps", 10.0);
-                @out.WriteLine($"Receiving from '{device}' at {fps} fps — point the camera at the sender's slideshow.");
-                @out.WriteLine("Decoding stops automatically the moment the transfer is complete.");
+                var (_, named, rflags) = ParseArgs(args[1..]);
+                IFrameSource source;
+                string sourceLabel;
+                if (rflags.Contains("--screen"))
+                {
+                    // Self-capture: decode this machine's own screen — put the sender's
+                    // slideshow anywhere visible, including inside an RDP/VM window.
+                    source = new ScreenFrameSource(ScreenFrameSource.ParseRegion(Get(named, "--region")));
+                    sourceLabel = "screen";
+                    @out.WriteLine("Receiving from this machine's screen — put the sender's slideshow somewhere visible (an RDP or VM window works).");
+                }
+                else
+                {
+                    string? device = Get(named, "--device") ?? LiveFrameSource.DefaultDevice();
+                    if (device is null)
+                        return Help(@out, err,
+                            "receive on Windows needs --device \"<webcam name>\" or --screen (list devices with: ffmpeg -list_devices true -f dshow -i dummy)");
+                    source = new LiveFrameSource(Get(named, "--format"));
+                    sourceLabel = device;
+                    @out.WriteLine($"Receiving from '{device}' — point the camera at the sender's slideshow.");
+                }
+                double fps = GetDouble(named, "--fps", settings.ReceiveFps);
+                int workers = settings.ReceiveDecodeWorkers > 0
+                    ? settings.ReceiveDecodeWorkers
+                    : Math.Clamp(Environment.ProcessorCount / 4, 2, 4);
+                @out.WriteLine($"Decoding at {fps} fps with {workers} worker(s); stops automatically when the transfer completes.");
 
-                // Same decoder, different frame source: the live pipe instead of a recording.
-                var live = new VideoDecoder(services.Decoder, new LiveFrameSource(Get(named, "--format")),
+                var live = new VideoDecoder(services.Decoder, source,
                     services.Assembler, services.Parity, new CameraRectifier());
-                var received = live.Decode(device, Get(named, "-o", "--out"), fps, @out.WriteLine, out var liveStats,
-                    Get(named, "-p", "--password"));
+                var received = live.Decode(sourceLabel, Get(named, "-o", "--out"), fps, @out.WriteLine, out var liveStats,
+                    Get(named, "-p", "--password"), workers);
                 @out.WriteLine($"Restored {received.Count} file(s) after examining {liveStats.FramesExamined} frame(s).");
                 return 0;
             }
@@ -363,7 +380,7 @@ internal sealed class Cli(AppSettings? settings = null)
     /// the set completes. Ctrl+C stops the watch, persisting progress when a session is given.
     /// </summary>
     private static int DecodeWatch(CliServices services, string folder, string? sessionPath,
-        string? outputPath, string? password, TextWriter @out)
+        string? outputPath, string? password, TextWriter @out, int pollMs = 250)
     {
         var shards = sessionPath is not null ? services.Sessions.Load(sessionPath) : [];
         if (shards.Count > 0)
@@ -415,7 +432,7 @@ internal sealed class Cli(AppSettings? settings = null)
                         }
                     }
                 }
-                Thread.Sleep(250);
+                Thread.Sleep(pollMs);
             }
         }
         finally
@@ -507,7 +524,7 @@ internal sealed class Cli(AppSettings? settings = null)
         var flags = new HashSet<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch")
+            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch" or "--screen" or "--open")
                 flags.Add(args[i]);
             else if (args[i].StartsWith('-') && i + 1 < args.Length)
                 named[args[i]] = args[++i];

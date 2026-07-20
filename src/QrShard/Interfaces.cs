@@ -68,7 +68,7 @@ internal interface IParityReassembler
 internal interface IVideoDecoder
 {
     List<RestoredFile> Decode(string path, string? outputPath, double extractFps, Action<string> log,
-        out VideoDecodeStats stats, string? password = null);
+        out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1);
 }
 
 /// <summary>Yields the frames of a recording (video file or animated image) in display order.</summary>
