@@ -114,8 +114,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
         return TryRecoverInto(buffer, parity, cwCount, stream, out correctedBytes);
     }
 
-    /// <summary>Pooled-buffer variant of <see cref="TryRecover"/>; dest may be longer than needed.</summary>
-    public bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes)
+    /// <summary>
+    /// Pooled-buffer variant of <see cref="TryRecover"/>; dest may be longer than needed.
+    /// When <paramref name="codewordErrors"/> is supplied (length cwCount), each entry receives
+    /// that codeword's corrected-byte count, or -1 if it was damaged beyond correction — the
+    /// data behind the diagnostic heatmap.
+    /// </summary>
+    public bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes,
+        int[]? codewordErrors = null)
     {
         int dataLen = DataLength(parity);
         if (dest.Length < cwCount * dataLen)
@@ -157,13 +163,13 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     if (dirty.GetElement(lane) == 0)
                         CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
                     else
-                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures);
+                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors);
                 }
             }
         }
 
         for (; j < cwCount; j++)
-            DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures);
+            DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors);
 
         correctedBytes = corrected;
         return failures == 0;
@@ -176,7 +182,7 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     }
 
     private void DecodeCodeword(byte[] buffer, int parity, int cwCount, int j, int dataLen, byte[] dest,
-        byte[] cwScratch, ref int corrected, ref int failures)
+        byte[] cwScratch, ref int corrected, ref int failures, int[]? codewordErrors)
     {
         for (int i = 0; i < CodewordLength; i++)
             cwScratch[i] = buffer[i * cwCount + j];
@@ -185,10 +191,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
         {
             cwScratch.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
             corrected += errors;
+            if (codewordErrors is not null)
+                codewordErrors[j] = errors;
         }
         else
         {
             failures++;
+            if (codewordErrors is not null)
+                codewordErrors[j] = -1;
         }
     }
 }

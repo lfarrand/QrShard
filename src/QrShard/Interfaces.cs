@@ -14,9 +14,13 @@ internal interface IShardDecoder
     List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log,
         string? password = null);
 
+    List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log);
+
     DecodedShard DecodeImage(string path, DecodeScratch scratch);
 
     DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path);
+
+    DecodeDiagnostics Diagnose(string path);
 }
 
 /// <summary>Locates the shard's black locator frame and validates it against the metadata strip.</summary>

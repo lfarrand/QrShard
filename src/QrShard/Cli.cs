@@ -5,7 +5,8 @@ namespace QrShard;
 /// <summary>Command handlers with their dependencies resolved from the composition root.</summary>
 internal sealed record CliServices(
     IShardEncoder Encoder, IShardDecoder Decoder, IVideoDecoder VideoDecoder,
-    ISlideshowWriter Slideshow, ISelfTest SelfTest);
+    ISlideshowWriter Slideshow, ISelfTest SelfTest, ISessionStore Sessions,
+    IParityReassembler Parity, IShardAssembler Assembler, HeatmapRenderer Heatmap);
 
 /// <summary>Command-line interface, separated from Program for testability.</summary>
 internal sealed class Cli(AppSettings? settings = null)
@@ -23,7 +24,11 @@ internal sealed class Cli(AppSettings? settings = null)
                 provider.GetRequiredService<IShardDecoder>(),
                 provider.GetRequiredService<IVideoDecoder>(),
                 provider.GetRequiredService<ISlideshowWriter>(),
-                provider.GetRequiredService<ISelfTest>());
+                provider.GetRequiredService<ISelfTest>(),
+                provider.GetRequiredService<ISessionStore>(),
+                provider.GetRequiredService<IParityReassembler>(),
+                provider.GetRequiredService<IShardAssembler>(),
+                provider.GetRequiredService<HeatmapRenderer>());
             return RunCore(args, @out, err, cfg, services);
         }
         catch (ShardDecodeException ex)
@@ -156,18 +161,84 @@ internal sealed class Cli(AppSettings? settings = null)
                 if (images.Count == 0)
                     return Help(@out, err, "no image files found to decode.");
 
+                string? sessionPath = Get(named, "--session");
+                if (sessionPath is not null)
+                    return DecodeWithSession(services, images, sessionPath, Get(named, "-o", "--out"), password, @out);
+
                 @out.WriteLine($"Decoding {images.Count} image(s)...");
                 var restored = services.Decoder.DecodeFolder(images, Get(named, "-o", "--out"), @out.WriteLine, password);
                 @out.WriteLine($"Restored {restored.Count} file(s).");
                 return 0;
             }
 
+            case "verify":
+            {
+                var (positional, named, _) = ParseArgs(args[1..]);
+                var images = new List<string>();
+                foreach (string p in positional)
+                {
+                    if (Directory.Exists(p))
+                        images.AddRange(Directory.EnumerateFiles(p).Where(IsImageFile));
+                    else if (File.Exists(p))
+                        images.Add(p);
+                    else
+                        return Help(@out, err, $"not found: {p}");
+                }
+                string? session = Get(named, "--session");
+                if (images.Count == 0 && session is null)
+                    return Help(@out, err, "verify requires a folder, image files, or --session.");
+
+                var shards = images.Count > 0 ? services.Decoder.CollectShards(images, @out.WriteLine) : [];
+                if (session is not null)
+                    shards = MergeShards(services.Sessions.Load(session), shards);
+                if (shards.Count == 0)
+                {
+                    err.WriteLine("error: no decodable shards found.");
+                    return 1;
+                }
+
+                PrintSetStatus(@out, shards, services.Parity);
+                bool complete = services.Parity.IsSetComplete(shards);
+                @out.WriteLine(complete
+                    ? "Complete: every file can be fully reassembled."
+                    : "Incomplete: capture the missing images and verify again.");
+                return complete ? 0 : 1;
+            }
+
             case "info":
             {
-                var (positional, _, _) = ParseArgs(args[1..]);
+                var (positional, named, _) = ParseArgs(args[1..]);
                 if (positional.Count != 1 || !File.Exists(positional[0]))
                     return Help(@out, err, "info requires one shard image.");
-                var shard = services.Decoder.DecodeImage(positional[0], new DecodeScratch());
+                DecodedShard shard;
+                string? heatmapPath = Get(named, "--heatmap");
+                if (heatmapPath is not null)
+                {
+                    var diag = services.Decoder.Diagnose(positional[0]);
+                    if (diag.Layout is not null && diag.Layout.EccParity > 0)
+                    {
+                        services.Heatmap.Render(diag.Layout, diag.CodewordErrors, heatmapPath);
+                        int corrected = diag.CodewordErrors.Count(e => e > 0);
+                        int failed = diag.CodewordErrors.Count(e => e < 0);
+                        @out.WriteLine($"heatmap   : {heatmapPath} ({corrected} codeword(s) needed correction, {failed} beyond correction)");
+                    }
+                    else
+                    {
+                        err.WriteLine(diag.Layout is null
+                            ? $"error: cannot render heatmap: {diag.Error}"
+                            : "error: cannot render heatmap: this image was encoded without ECC.");
+                    }
+                    if (diag.Shard is null)
+                    {
+                        err.WriteLine($"error: {diag.Error}");
+                        return 1;
+                    }
+                    shard = diag.Shard;
+                }
+                else
+                {
+                    shard = services.Decoder.DecodeImage(positional[0], new DecodeScratch());
+                }
                 var h = shard.Header;
                 @out.WriteLine($"file      : {h.FileName}");
                 @out.WriteLine($"file id   : {h.FileId:X16}");
@@ -186,6 +257,66 @@ internal sealed class Cli(AppSettings? settings = null)
 
             default:
                 return Help(@out, err, $"unknown command: {args[0]}");
+        }
+    }
+
+    /// <summary>
+    /// Session decode: merge previously collected shards with this run's, assemble if the set
+    /// is now complete (deleting the session), otherwise persist the union and report what is
+    /// still missing. Exit code 3 = valid but incomplete.
+    /// </summary>
+    private static int DecodeWithSession(CliServices services, List<string> images, string sessionPath,
+        string? outputPath, string? password, TextWriter @out)
+    {
+        var known = services.Sessions.Load(sessionPath);
+        if (known.Count > 0)
+            @out.WriteLine($"  session: resuming with {known.Count} previously collected shard(s)");
+
+        @out.WriteLine($"Decoding {images.Count} image(s)...");
+        var merged = MergeShards(known, services.Decoder.CollectShards(images, @out.WriteLine));
+        if (merged.Count == 0)
+            throw new ShardDecodeException("No decodable shard images were found.");
+
+        if (services.Parity.IsSetComplete(merged))
+        {
+            var restored = services.Assembler.Assemble(merged, outputPath, @out.WriteLine, password);
+            @out.WriteLine($"Restored {restored.Count} file(s).");
+            if (File.Exists(sessionPath))
+                File.Delete(sessionPath);
+            return 0;
+        }
+
+        services.Sessions.Save(sessionPath, merged);
+        PrintSetStatus(@out, merged, services.Parity);
+        @out.WriteLine($"Set incomplete — {merged.Count} shard(s) saved to {sessionPath}; capture the missing images and decode again with --session.");
+        return 3;
+    }
+
+    /// <summary>Union of two shard lists, first occurrence of each (file, index, parity) winning.</summary>
+    private static List<DecodedShard> MergeShards(List<DecodedShard> first, List<DecodedShard> second)
+    {
+        var merged = new List<DecodedShard>(first.Count + second.Count);
+        var seen = new HashSet<(ulong, int, bool)>();
+        foreach (var s in first.Concat(second))
+            if (seen.Add((s.Header.FileId, s.Header.Index, s.Header.IsParity)))
+                merged.Add(s);
+        return merged;
+    }
+
+    private static void PrintSetStatus(TextWriter @out, List<DecodedShard> shards, IParityReassembler parity)
+    {
+        foreach (var group in shards.GroupBy(s => s.Header.FileId))
+        {
+            var first = group.First().Header;
+            var have = group.Where(s => !s.Header.IsParity).Select(s => s.Header.Index).ToHashSet();
+            var missing = Enumerable.Range(0, first.Count).Where(i => !have.Contains(i)).ToList();
+            int parityCount = group.Count(s => s.Header.IsParity);
+            bool complete = parity.IsSetComplete([.. group]);
+            string detail = missing.Count == 0
+                ? "all data present"
+                : $"missing image(s) {string.Join(", ", missing.Take(20).Select(i => i + 1))}{(missing.Count > 20 ? ", ..." : "")}";
+            @out.WriteLine($"  '{first.FileName}': {have.Count}/{first.Count} data + {parityCount} parity — " +
+                           $"{(complete ? "recoverable ✓" : detail)}");
         }
     }
 

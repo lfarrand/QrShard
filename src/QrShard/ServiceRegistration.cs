@@ -47,5 +47,7 @@ internal static class ServiceRegistration
             .AddSingleton<IShardEncoder, ShardEncoder>()
             .AddSingleton<ISlideshowWriter, SlideshowWriter>()
             .AddSingleton<ISelfTest, SelfTest>()
+            .AddSingleton<ISessionStore, SessionStore>()
+            .AddSingleton<HeatmapRenderer>()
             .BuildServiceProvider();
 }
