@@ -14,6 +14,7 @@ internal static class ServiceRegistration
             .AddSingleton<ReedSolomon>()
             .AddSingleton<Fec>()
             .AddSingleton<CrossShardFec>()
+            .AddSingleton<FountainFec>()
             .AddSingleton<Crc>()
             .AddSingleton<BitStream>()
             .AddSingleton<Palette>()

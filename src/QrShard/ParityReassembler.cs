@@ -4,9 +4,9 @@ namespace QrShard;
 /// Cross-shard-parity reassembly: reconstructs missing data images from parity images stripe
 /// by stripe, plus the completeness check that shares its stripe math.
 /// </summary>
-internal sealed class ParityReassembler(CrossShardFec crossShardFec) : IParityReassembler
+internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec fountainFec) : IParityReassembler
 {
-    public ParityReassembler() : this(new CrossShardFec())
+    public ParityReassembler() : this(new CrossShardFec(), new FountainFec())
     {
     }
 
@@ -37,6 +37,13 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec) : IParityRe
                 continue;
             }
 
+            if ((first.Flags & ShardHeader.FlagFountain) != 0)
+            {
+                if (!IsFountainSetComplete(group, first, dataPresent))
+                    return false;
+                continue;
+            }
+
             int stripes = (count + s - 1) / s;
             var parityPresent = new bool[stripes * p]; // by ordinal, so duplicates don't double-count
             foreach (var x in group)
@@ -61,6 +68,41 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec) : IParityRe
         return true;
     }
 
+    /// <summary>Fountain stripes solve when the available equations (identity rows for present
+    /// data images + the coded frames' coefficient rows) reach full rank.</summary>
+    private bool IsFountainSetComplete(IEnumerable<DecodedShard> group, ShardHeader first, bool[] dataPresent)
+    {
+        int count = first.Count, s = first.StripeData;
+        int stripes = (count + s - 1) / s;
+
+        var codedSeqs = new List<int>[stripes];
+        for (int g = 0; g < stripes; g++)
+            codedSeqs[g] = [];
+        foreach (var x in group)
+            if (x.Header.IsParity && x.Header.Index >= 0)
+                codedSeqs[x.Header.Index % stripes].Add(x.Header.Index / stripes);
+
+        for (int g = 0; g < stripes; g++)
+        {
+            int firstIndex = g * s;
+            int stripeData = Math.Min(s, count - firstIndex);
+            var rows = new List<byte[]>();
+            for (int t = 0; t < stripeData; t++)
+            {
+                if (!dataPresent[firstIndex + t])
+                    continue;
+                var unit = new byte[stripeData];
+                unit[t] = 1;
+                rows.Add(unit);
+            }
+            foreach (int seq in codedSeqs[g])
+                rows.Add(fountainFec.Coefficients(first.FileId, g, seq, stripeData));
+            if (fountainFec.Rank(rows, stripeData) < stripeData)
+                return false;
+        }
+        return true;
+    }
+
     /// <summary>
     /// Tolerates losing up to StripeParity images per stripe. Returns the per-image chunks
     /// (each <paramref name="chunkCapacity"/> bytes or the original payload) so the assembler
@@ -69,6 +111,8 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec) : IParityRe
     public byte[][] ReassembleWithParity(List<DecodedShard> shards, ShardHeader first, Action<string> log,
         out int chunkCapacity)
     {
+        if ((first.Flags & ShardHeader.FlagFountain) != 0)
+            return ReassembleFountain(shards, first, log, out chunkCapacity);
         int count = first.Count, s = first.StripeData, p = first.StripeParity;
         int stripes = (count + s - 1) / s;
         int cap = shards.Max(x => x.Payload.Length); // full per-image capacity (parity images are always full)
@@ -150,6 +194,97 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec) : IParityRe
 
         if (reconstructed > 0)
             log($"  recovered {reconstructed} missing image(s) from parity");
+
+        long lastLen = first.TotalLength - (long)(count - 1) * cap;
+        if (lastLen < 0 || lastLen > cap)
+            throw new ShardDecodeException($"'{first.FileName}': reassembled length does not match expected {first.TotalLength:N0}.");
+
+        chunkCapacity = cap;
+        return chunks;
+    }
+
+    /// <summary>Fountain reassembly: solve each stripe from any full-rank frame subset.</summary>
+    private byte[][] ReassembleFountain(List<DecodedShard> shards, ShardHeader first, Action<string> log,
+        out int chunkCapacity)
+    {
+        int count = first.Count, s = first.StripeData;
+        int stripes = (count + s - 1) / s;
+        int cap = shards.Max(x => x.Payload.Length); // coded frames are always full capacity
+
+        var dataByIndex = new DecodedShard?[count];
+        var codedByStripe = new List<(int Seq, byte[] Payload)>[stripes];
+        for (int g = 0; g < stripes; g++)
+            codedByStripe[g] = [];
+        foreach (var x in shards)
+        {
+            if (x.Header.IsParity)
+            {
+                if (x.Header.Index >= 0)
+                    codedByStripe[x.Header.Index % stripes].Add((x.Header.Index / stripes, x.Payload));
+            }
+            else
+            {
+                dataByIndex[x.Header.Index] ??= x;
+            }
+        }
+
+        var chunks = new byte[count][];
+        var unrecoverable = new List<int>();
+        int reconstructed = 0;
+
+        for (int g = 0; g < stripes; g++)
+        {
+            int firstIndex = g * s;
+            int stripeData = Math.Min(s, count - firstIndex);
+
+            bool allPresent = true;
+            for (int t = 0; t < stripeData; t++)
+                allPresent &= dataByIndex[firstIndex + t] is not null;
+            if (allPresent)
+            {
+                for (int t = 0; t < stripeData; t++)
+                    chunks[firstIndex + t] = Pad(dataByIndex[firstIndex + t]!.Payload, cap);
+                continue;
+            }
+
+            // Systematic rows first, so present chunks pass through unchanged.
+            var rows = new List<(byte[] Coef, byte[] Payload)>();
+            for (int t = 0; t < stripeData; t++)
+            {
+                var shard = dataByIndex[firstIndex + t];
+                if (shard is null)
+                    continue;
+                var unit = new byte[stripeData];
+                unit[t] = 1;
+                rows.Add((unit, Pad(shard.Payload, cap)));
+            }
+            foreach (var (seq, payload) in codedByStripe[g].OrderBy(c => c.Seq))
+                rows.Add((fountainFec.Coefficients(first.FileId, g, seq, stripeData), payload));
+
+            if (!fountainFec.TryReconstruct(rows, stripeData, cap, out byte[][] recovered))
+            {
+                for (int t = 0; t < stripeData; t++)
+                    if (dataByIndex[firstIndex + t] is null)
+                        unrecoverable.Add(firstIndex + t);
+                continue;
+            }
+
+            for (int t = 0; t < stripeData; t++)
+            {
+                chunks[firstIndex + t] = recovered[t];
+                if (dataByIndex[firstIndex + t] is null)
+                    reconstructed++;
+            }
+        }
+
+        if (unrecoverable.Count > 0)
+            throw new ShardDecodeException(
+                $"'{first.FileName}': {unrecoverable.Count} data image(s) are missing and the captured fountain frames " +
+                $"do not span them (images {string.Join(", ", unrecoverable.Take(10).Select(i => i + 1))}{(unrecoverable.Count > 10 ? ", ..." : "")} of {count}). " +
+                "Capture more frames and decode again.");
+
+        if (reconstructed > 0)
+            log($"  recovered {reconstructed} missing image(s) from fountain frames");
 
         long lastLen = first.TotalLength - (long)(count - 1) * cap;
         if (lastLen < 0 || lastLen > cap)

@@ -4,6 +4,8 @@ namespace QrShard;
 internal interface IStripePlanner
 {
     (int StripeData, int StripeParity) PlanStripes(int count, int recoveryPercent);
+
+    (int StripeData, int CodedPerStripe) PlanFountain(int count, int fountainPercent);
 }
 
 /// <summary>
@@ -24,5 +26,19 @@ internal sealed class StripePlanner : IStripePlanner
         while (stripeData + stripeParity > CrossShardFec.MaxShardsPerStripe && stripeData > 1)
             stripeData--;
         return (stripeData, stripeParity);
+    }
+
+    /// <summary>
+    /// Fountain planning: small stripes (cheap receiver solves) with pct% extra coded frames
+    /// per stripe. Unlike the Cauchy layer there is no 255 ceiling — coefficients are random,
+    /// not domain-limited — so any positive coded count is valid.
+    /// </summary>
+    public (int StripeData, int CodedPerStripe) PlanFountain(int count, int fountainPercent)
+    {
+        if (fountainPercent <= 0 || count < 1)
+            return (0, 0);
+        int stripeData = Math.Min(count, FountainFec.MaxStripeData);
+        int coded = Math.Max(1, (int)Math.Ceiling(stripeData * fountainPercent / 100.0));
+        return (stripeData, coded);
     }
 }

@@ -92,6 +92,7 @@ internal sealed class Cli(AppSettings? settings = null)
                     BitsPerCell = GetInt(named, "-b", "--bits", camera ? 2 : defaults.BitsPerCell),
                     EccParity = GetInt(named, "-e", "--ecc", camera ? 32 : defaults.EccParity),
                     RecoveryPercent = GetInt(named, "-R", "--recovery", defaults.RecoveryPercent),
+                    FountainPercent = GetInt(named, "-F", "--fountain", 0),
                     ImageFormat = Get(named, "-f", "--format") ?? defaults.ImageFormat,
                     Compress = !flags.Contains("--no-compress") && defaults.Compress,
                     CameraMode = camera,
@@ -110,8 +111,11 @@ internal sealed class Cli(AppSettings? settings = null)
                 var result = services.Encoder.Encode(file, outDir, opt, @out.WriteLine);
                 @out.WriteLine($"Done: {result.ImageCount} image(s) of {result.Width}x{result.Height}px, up to {result.BytesPerImage:N0} payload bytes each.");
                 if (result.ParityImages > 0)
-                    @out.WriteLine($"  {result.DataImages} data + {result.ParityImages} parity image(s); " +
-                                   $"can recover up to {result.StripeParity} lost image(s) per {result.StripeData + result.StripeParity}.");
+                    @out.WriteLine(opt.FountainPercent > 0
+                        ? $"  {result.DataImages} data + {result.ParityImages} fountain-coded image(s); " +
+                          $"any ~{result.StripeData} captured frames per stripe reconstruct the data."
+                        : $"  {result.DataImages} data + {result.ParityImages} parity image(s); " +
+                          $"can recover up to {result.StripeParity} lost image(s) per {result.StripeData + result.StripeParity}.");
 
                 if (flags.Contains("--video"))
                 {
@@ -402,7 +406,8 @@ internal sealed class Cli(AppSettings? settings = null)
             QrShard — encode any file into dense QR-style images and back.
 
             usage:
-              qrshard encode <file> [options]     Split a file into shard images.
+              qrshard encode <file|folder> [options]   Split a file (or a folder, tar-ed
+                                         automatically and extracted on decode) into shard images.
                 -o, --out <dir>          Output folder (default: <file>.shards next to the input)
                 -r, --resolution <px>    Image size: "auto" (the default) uses the primary
                                          monitor's native resolution so shards fill the screen
@@ -416,6 +421,12 @@ internal sealed class Cli(AppSettings? settings = null)
                 -R, --recovery <pct>     Add parity IMAGES so whole missing/damaged images can be
                                          rebuilt without recapture; pct% extra images, 0-100
                                          (default: 0; e.g. 15 tolerates losing ~15% of the images)
+                -F, --fountain <pct>     Fountain coding for video mode: pct% extra CODED frames
+                                         (random linear combinations); ANY enough captured frames
+                                         per stripe reconstruct the data — ideal with --video,
+                                         where torn/glared frames simply don't count
+                -p, --password <pw>      AES-256-GCM encrypt the payload; decode needs the same
+                                         password (wrong password fails cleanly, nothing leaks)
                 -f, --format <fmt>       Lossless image format: png, bmp, tga, qoi, webp, tiff
                                          (default: png, written by the built-in fast PNG writer)
                 --camera                 Camera profile: adds finder patterns so images decode
@@ -435,7 +446,17 @@ internal sealed class Cli(AppSettings? settings = null)
                                          (mp4/webm/mkv/mov/avi need ffmpeg on PATH; animated
                                          png/gif/webp decode natively)
                 --fps <n>                Frame extraction rate for video files (default: 8)
-              qrshard info <image>       Show and validate a single shard image.
+                -p, --password <pw>      Password for encrypted payloads
+                --session <file>         Accumulate shards across capture sittings: incomplete
+                                         sets persist to the session file (exit code 3) and the
+                                         next run resumes from the union; deleted on success
+              qrshard verify <folder|images...> [--session f]
+                                         Report per-file completeness (missing images, parity
+                                         coverage) without writing output; exit 0 when complete
+              qrshard info <image> [--heatmap <out.png>]
+                                         Show and validate a single shard image; --heatmap renders
+                                         a per-cell ECC damage map (green=clean, red=corrected,
+                                         dark red=beyond correction) even for failed decodes
               qrshard test               Round-trip self-test, including simulated screenshots.
 
             Density guide (per image, after default ECC): bytes ≈ cells x bits/cell / 8 x 0.94.

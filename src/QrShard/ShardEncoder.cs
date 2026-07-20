@@ -15,6 +15,7 @@ internal sealed record EncodeOptions
     public string ImageFormat { get; init; } = ShardImageFormat.Default; // any of ShardImageFormat.Supported
     public string? Password { get; init; } // AES-256-GCM encrypt the payload (null = plaintext)
     public bool IsArchive { get; init; } // payload is a tar of a folder; decode extracts it
+    public int FountainPercent { get; init; } // fountain-coded frames (% of data, video mode); 0 = off
 }
 
 internal sealed record EncodeResult(
@@ -28,15 +29,16 @@ internal sealed record EncodeResult(
 /// </summary>
 internal sealed class ShardEncoder(
     AppSettings settings, IPayloadPreparer payloadPreparer, IStripePlanner stripePlanner,
-    IShardRenderer renderer, CrossShardFec crossShardFec, Crc crc, Palette paletteBuilder,
-    ShardImageFormat formats) : IShardEncoder
+    IShardRenderer renderer, CrossShardFec crossShardFec, FountainFec fountainFec, Crc crc,
+    Palette paletteBuilder, ShardImageFormat formats) : IShardEncoder
 {
     public const long MaxFileBytes = 1_500_000_000; // byte[] limits; also far beyond any sane shard count
     public const int MaxRecoveryPercent = 100;
+    public const int MaxFountainPercent = 1000;
 
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
     public ShardEncoder() : this(AppSettings.Current, new PayloadPreparer(), new StripePlanner(),
-        new ShardRenderer(), new CrossShardFec(), new Crc(), new Palette(), new ShardImageFormat())
+        new ShardRenderer(), new CrossShardFec(), new FountainFec(), new Crc(), new Palette(), new ShardImageFormat())
     {
     }
 
@@ -44,6 +46,11 @@ internal sealed class ShardEncoder(
     {
         if (opt.RecoveryPercent is < 0 or > MaxRecoveryPercent)
             throw new ArgumentException($"Recovery percent must be between 0 and {MaxRecoveryPercent}.");
+        if (opt.FountainPercent is < 0 or > MaxFountainPercent)
+            throw new ArgumentException($"Fountain percent must be between 0 and {MaxFountainPercent}.");
+        if (opt.FountainPercent > 0 && opt.RecoveryPercent > 0)
+            throw new ArgumentException("Use either recovery parity or fountain coding, not both.");
+        bool fountain = opt.FountainPercent > 0;
         string format = formats.Normalize(opt.ImageFormat);
         long originalLength = new FileInfo(filePath).Length;
         if (originalLength > MaxFileBytes)
@@ -54,6 +61,8 @@ internal sealed class ShardEncoder(
             out byte flags, out byte[] sha);
         if (opt.IsArchive)
             flags |= ShardHeader.FlagArchive;
+        if (fountain)
+            flags |= ShardHeader.FlagFountain;
         var source = payload.Source;
         long dataLength = source.Length;
 
@@ -65,7 +74,9 @@ internal sealed class ShardEncoder(
         int capacity = (int)capacityLong;
 
         int count = Math.Max(1, (int)((dataLength + capacity - 1) / capacity));
-        var (stripeData, stripeParity) = stripePlanner.PlanStripes(count, opt.RecoveryPercent);
+        var (stripeData, stripeParity) = fountain
+            ? stripePlanner.PlanFountain(count, opt.FountainPercent)
+            : stripePlanner.PlanStripes(count, opt.RecoveryPercent);
         int stripes = stripeParity > 0 ? (count + stripeData - 1) / stripeData : 0;
         int parityTotal = stripes * stripeParity;
 
@@ -103,9 +114,20 @@ internal sealed class ShardEncoder(
                 int s = Math.Min(stripeData, count - first);
                 for (int t = 0; t < s; t++)
                     FillChunk(first + t, chunkBuffers[t]);
-                byte[][] parity = crossShardFec.Encode(new ArraySegment<byte[]>(chunkBuffers, 0, s), stripeParity, capacity);
-                for (int p = 0; p < stripeParity; p++)
-                    parityChunks[g * stripeParity + p] = parity[p];
+                if (fountain)
+                {
+                    // Fountain ordinals are round-robin across stripes (o -> stripe o % stripes)
+                    // so a cycling slideshow spreads every stripe's coded frames evenly.
+                    for (int seq = 0; seq < stripeParity; seq++)
+                        parityChunks[seq * stripes + g] =
+                            fountainFec.EncodeFrame(new ArraySegment<byte[]>(chunkBuffers, 0, s), fileId, g, seq, capacity);
+                }
+                else
+                {
+                    byte[][] parity = crossShardFec.Encode(new ArraySegment<byte[]>(chunkBuffers, 0, s), stripeParity, capacity);
+                    for (int p = 0; p < stripeParity; p++)
+                        parityChunks[g * stripeParity + p] = parity[p];
+                }
             }
         }
 
