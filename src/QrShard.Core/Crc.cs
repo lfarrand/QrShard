@@ -1,36 +1,16 @@
 namespace QrShard;
 
-/// <summary>CRC implementations used for image payload (CRC-32/IEEE) and metadata strip (CRC-16/CCITT).</summary>
+/// <summary>
+/// CRC implementations used for image payload (CRC-32/IEEE) and metadata strip (CRC-16/CCITT).
+/// CRC-32 delegates to System.IO.Hashing's implementation of the SAME polynomial
+/// (0xEDB88320 reflected, init/xorout 0xFFFFFFFF) — wire format unchanged, but bulk hashing
+/// uses carryless-multiply folding instead of a byte-at-a-time table walk, roughly an order of
+/// magnitude faster over the megabytes each transfer CRCs. CRC-16 only ever sees the 14-byte
+/// metadata payload; scalar is fine.
+/// </summary>
 internal sealed class Crc
 {
-    private static readonly uint[] Table32 = BuildTable32();
-
-    private static uint[] BuildTable32()
-    {
-        var table = new uint[256];
-        for (uint i = 0; i < 256; i++)
-        {
-            uint c = i;
-            for (int k = 0; k < 8; k++)
-                c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            table[i] = c;
-        }
-        return table;
-    }
-
-    public uint Crc32(ReadOnlySpan<byte> data) => Crc32Finish(Crc32Append(Crc32Begin(), data));
-
-    // Incremental CRC-32 (for streamed writers, e.g. the PNG chunk CRC).
-    public uint Crc32Begin() => 0xFFFFFFFFu;
-
-    public uint Crc32Append(uint state, ReadOnlySpan<byte> data)
-    {
-        foreach (byte b in data)
-            state = Table32[(state ^ b) & 0xFF] ^ (state >> 8);
-        return state;
-    }
-
-    public uint Crc32Finish(uint state) => state ^ 0xFFFFFFFFu;
+    public uint Crc32(ReadOnlySpan<byte> data) => System.IO.Hashing.Crc32.HashToUInt32(data);
 
     public ushort Crc16Ccitt(ReadOnlySpan<byte> data)
     {

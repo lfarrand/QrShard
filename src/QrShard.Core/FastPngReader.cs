@@ -135,10 +135,16 @@ internal sealed class FastPngReader
                 for (int i = bpp; i < n; i++)
                     row[i] += row[i - bpp];
                 break;
-            case 2: // Up
-                for (int i = 0; i < n; i++)
+            case 2: // Up — no cross-lane dependency, so vectorize (our own writer's filter)
+            {
+                int i = 0;
+                for (; i <= n - System.Numerics.Vector<byte>.Count; i += System.Numerics.Vector<byte>.Count)
+                    (new System.Numerics.Vector<byte>(row.AsSpan(i)) + new System.Numerics.Vector<byte>(prior.AsSpan(i)))
+                        .CopyTo(row.AsSpan(i));
+                for (; i < n; i++)
                     row[i] += prior[i];
                 break;
+            }
             case 3: // Average
                 for (int i = 0; i < bpp; i++)
                     row[i] += (byte)(prior[i] >> 1);

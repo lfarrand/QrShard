@@ -1,4 +1,5 @@
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace QrShard;
 
@@ -12,6 +13,7 @@ internal sealed class Gf256
 {
     private static readonly byte[] Exp = new byte[512];
     private static readonly byte[] Log = new byte[256];
+    private static readonly ulong[] AffineMatrices = new ulong[256];
 
     static Gf256()
     {
@@ -26,7 +28,38 @@ internal sealed class Gf256
         }
         for (int i = 255; i < 512; i++)
             Exp[i] = Exp[i - 255];
+
+        for (int c = 0; c < 256; c++)
+            AffineMatrices[c] = BuildAffineMatrix((byte)c);
     }
+
+    private static byte MulStatic(byte a, byte b) => a == 0 || b == 0 ? (byte)0 : Exp[Log[a] + Log[b]];
+
+    /// <summary>
+    /// The 8x8 GF(2) bit matrix computing y = coef·x in our field (0x11D), packed for
+    /// GF2P8AFFINEQB: multiplication by a constant is linear over GF(2), and GFNI's affine
+    /// instruction applies an arbitrary bit matrix per byte — one instruction replaces the
+    /// two-shuffle nibble trick regardless of the field polynomial. Output bit i's row lives
+    /// in qword byte 7-i; row bit k weights input bit k.
+    /// </summary>
+    private static ulong BuildAffineMatrix(byte coef)
+    {
+        Span<byte> rows = stackalloc byte[8];
+        for (int k = 0; k < 8; k++)
+        {
+            byte column = MulStatic(coef, (byte)(1 << k)); // where input bit k lands in the output
+            for (int i = 0; i < 8; i++)
+                if (((column >> i) & 1) != 0)
+                    rows[i] |= (byte)(1 << k);
+        }
+        ulong matrix = 0;
+        for (int i = 0; i < 8; i++)
+            matrix |= (ulong)rows[i] << (8 * (7 - i));
+        return matrix;
+    }
+
+    /// <summary>Packed GFNI affine matrix for multiply-by-<paramref name="coef"/>.</summary>
+    public ulong AffineMatrix(byte coef) => AffineMatrices[coef];
 
     public byte Mul(byte a, byte b) => a == 0 || b == 0 ? (byte)0 : Exp[Log[a] + Log[b]];
 
@@ -85,7 +118,40 @@ internal sealed class Gf256
             return;
 
         int i = 0;
-        if (Vector128.IsHardwareAccelerated && src.Length >= 16)
+        if (Gfni.IsSupported)
+        {
+            // GFNI: one GF2P8AFFINEQB per vector replaces the shuffle dance, at up to 64
+            // bytes per instruction with AVX-512.
+            ulong matrix = AffineMatrices[coef];
+            if (Gfni.V512.IsSupported && src.Length - i >= 64)
+            {
+                var m512 = Vector512.Create(matrix).AsByte();
+                for (; i <= src.Length - 64; i += 64)
+                {
+                    var product = Gfni.V512.GaloisFieldAffineTransform(Vector512.Create<byte>(src.Slice(i, 64)), m512, 0);
+                    (Vector512.Create<byte>(dst.Slice(i, 64)) ^ product).CopyTo(dst.Slice(i, 64));
+                }
+            }
+            if (Gfni.V256.IsSupported && src.Length - i >= 32)
+            {
+                var m256 = Vector256.Create(matrix).AsByte();
+                for (; i <= src.Length - 32; i += 32)
+                {
+                    var product = Gfni.V256.GaloisFieldAffineTransform(Vector256.Create<byte>(src.Slice(i, 32)), m256, 0);
+                    (Vector256.Create<byte>(dst.Slice(i, 32)) ^ product).CopyTo(dst.Slice(i, 32));
+                }
+            }
+            if (src.Length - i >= 16)
+            {
+                var m128 = Vector128.Create(matrix).AsByte();
+                for (; i <= src.Length - 16; i += 16)
+                {
+                    var product = Gfni.GaloisFieldAffineTransform(Vector128.Create<byte>(src.Slice(i, 16)), m128, 0);
+                    (Vector128.Create<byte>(dst.Slice(i, 16)) ^ product).CopyTo(dst.Slice(i, 16));
+                }
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated && src.Length >= 16)
         {
             var (tableLo, tableHi) = MulTables(coef);
             for (; i <= src.Length - 16; i += 16)

@@ -11,6 +11,10 @@
          from serializing on a single workstation-GC heap. -->
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <!-- DATAS adapts heap size to live data — great for long-lived services, measured ~3-9%
+         slower for this burst-throughput CLI (A/B on a 100 MB round trip). The library does
+         not set this; embedding hosts keep their own GC policy. -->
+    <GarbageCollectionAdaptationMode>0</GarbageCollectionAdaptationMode>
   </PropertyGroup>
 
   <!-- `dotnet pack` produces a global tool: dotnet tool install -g QrShard.Tool -->

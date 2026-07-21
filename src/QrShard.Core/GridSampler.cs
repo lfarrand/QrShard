@@ -9,6 +9,11 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     {
     }
 
+    private static readonly (int dx, int dy)[] CenterOnly = [(0, 0)];
+
+    private static readonly (int dx, int dy)[] NineOffsets =
+        [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)];
+
     /// <summary>Squared-distance floor below which a classification is trusted outright.</summary>
     private const long ConfidentDist = 200;
 
@@ -25,9 +30,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         // Candidate sample offsets around each cell center: when a capture is rescaled, the
         // exact center may land on a blended boundary pixel; picking the candidate closest to a
         // palette color strongly prefers pure interior pixels. Offsets must stay inside the cell.
-        var offsets = new List<(int dx, int dy)> { (0, 0) };
-        if (Math.Min(cellW, cellH) >= 3.5)
-            offsets.AddRange([(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]);
+        var offsets = Math.Min(cellW, cellH) >= 3.5 ? NineOffsets : CenterOnly;
 
         int bits = layout.BitsPerCell;
         int streamLength = (int)((layout.TotalBits + 7) / 8);
@@ -95,7 +98,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     }
 
     private void ReadUniform(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette,
-        List<(int dx, int dy)> offsets, byte[] stream, bool[]? suspects, byte[]? second, DecodeScratch scratch,
+        (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, DecodeScratch scratch,
         double sx, double sy, int bits)
     {
         // Lazy nearest-color lookup keyed on 5-bit-per-channel quantized RGB.
@@ -103,36 +106,68 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         int width = bmp.Width, height = bmp.Height;
         var px = bmp.Px;
         int[] cols = ColumnPixels(inner, layout, sx, width);
-        var offsetArray = offsets.ToArray();
+
+        // Interior cells (the overwhelming majority) index with precomputed flat deltas — no
+        // clamping, no per-offset coordinate math; only cells within one pixel of the capture
+        // edge take the clamped path.
+        var deltas = new int[offsets.Length];
+        for (int k = 0; k < offsets.Length; k++)
+            deltas[k] = offsets[k].dy * width + offsets[k].dx;
 
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {
             int rowY = RowPixel(inner, layout, sy, height, gy);
+            bool rowInterior = rowY >= 1 && rowY < height - 1;
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
             {
                 int colX = cols[gx];
                 int best = 0;
                 long bestDist = long.MaxValue;
                 byte bR = 0, bG = 0, bB = 0;
-                foreach (var (dx, dy) in offsetArray)
+                if (rowInterior && colX >= 1 && colX < width - 1)
                 {
-                    int xi = Math.Clamp(colX + dx, 0, width - 1);
-                    int yi = Math.Clamp(rowY + dy, 0, height - 1);
-                    var c = px[yi * width + xi];
-                    int key = (c.R >> 3 << 10) | (c.G >> 3 << 5) | (c.B >> 3);
-                    int v = lut[key];
-                    if (v < 0)
-                        lut[key] = v = paletteMath.Nearest(palette, c.R, c.G, c.B);
-                    long dr = c.R - palette[v].R, dg = c.G - palette[v].G, db = c.B - palette[v].B;
-                    long dist = dr * dr + dg * dg + db * db;
-                    if (dist < bestDist)
+                    int baseIndex = rowY * width + colX;
+                    foreach (int delta in deltas)
                     {
-                        bestDist = dist;
-                        best = v;
-                        (bR, bG, bB) = (c.R, c.G, c.B);
-                        if (dist == 0)
-                            break;
+                        var c = px[baseIndex + delta];
+                        int key = (c.R >> 3 << 10) | (c.G >> 3 << 5) | (c.B >> 3);
+                        int v = lut[key];
+                        if (v < 0)
+                            lut[key] = v = paletteMath.Nearest(palette, c.R, c.G, c.B);
+                        long dr = c.R - palette[v].R, dg = c.G - palette[v].G, db = c.B - palette[v].B;
+                        long dist = dr * dr + dg * dg + db * db;
+                        if (dist < bestDist)
+                        {
+                            bestDist = dist;
+                            best = v;
+                            (bR, bG, bB) = (c.R, c.G, c.B);
+                            if (dist == 0)
+                                break;
+                        }
+                    }
+                }
+                else
+                {
+                    foreach (var (dx, dy) in offsets)
+                    {
+                        int xi = Math.Clamp(colX + dx, 0, width - 1);
+                        int yi = Math.Clamp(rowY + dy, 0, height - 1);
+                        var c = px[yi * width + xi];
+                        int key = (c.R >> 3 << 10) | (c.G >> 3 << 5) | (c.B >> 3);
+                        int v = lut[key];
+                        if (v < 0)
+                            lut[key] = v = paletteMath.Nearest(palette, c.R, c.G, c.B);
+                        long dr = c.R - palette[v].R, dg = c.G - palette[v].G, db = c.B - palette[v].B;
+                        long dist = dr * dr + dg * dg + db * db;
+                        if (dist < bestDist)
+                        {
+                            bestDist = dist;
+                            best = v;
+                            (bR, bG, bB) = (c.R, c.G, c.B);
+                            if (dist == 0)
+                                break;
+                        }
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
@@ -147,7 +182,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// a photo) moves the classification targets with it. No LUT — the palette changes per row.
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
-        List<(int dx, int dy)> offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits)
+        (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits)
     {
         double yTopStrip = layout.Gutter + layout.MetaH * 1.5;
         double yBottomStrip = layout.InnerH - layout.Gutter - layout.MetaH * 1.5;
@@ -155,7 +190,6 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         int width = bmp.Width, height = bmp.Height;
         var px = bmp.Px;
         int[] cols = ColumnPixels(inner, layout, sx, width);
-        var offsetArray = offsets.ToArray();
 
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
@@ -172,7 +206,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                 int best = 0;
                 long bestDist = long.MaxValue;
                 byte bR = 0, bG = 0, bB = 0;
-                foreach (var (dx, dy) in offsetArray)
+                foreach (var (dx, dy) in offsets)
                 {
                     int xi = Math.Clamp(colX + dx, 0, width - 1);
                     int yi = Math.Clamp(rowY + dy, 0, height - 1);

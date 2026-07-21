@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
 using SixLabors.ImageSharp.PixelFormats;
@@ -15,13 +16,9 @@ namespace QrShard;
 /// general-purpose image library solves a much broader problem than "serialize pixels we
 /// just rendered", and the PNG encode was the dominant cost of the whole encoder.
 /// </summary>
-internal sealed class FastPng(Crc crc)
+internal sealed class FastPng
 {
     private static readonly byte[] Signature = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-
-    public FastPng() : this(new Crc())
-    {
-    }
 
     /// <param name="upFilter">
     /// True to apply the PNG "Up" filter to every row (ideal when rows repeat, i.e. cell size
@@ -48,7 +45,7 @@ internal sealed class FastPng(Crc crc)
         long lengthPosition = fs.Position;
         Span<byte> scratch = stackalloc byte[4];
         fs.Write(scratch); // length placeholder
-        var idat = new ChunkBodyStream(fs, crc);
+        var idat = new ChunkBodyStream(fs);
         idat.Write("IDAT"u8);
 
         int rowBytes = width * 3;
@@ -76,8 +73,14 @@ internal sealed class FastPng(Crc crc)
                 else
                 {
                     ReadOnlySpan<byte> prior = src.Slice((y - 1) * rowBytes, rowBytes);
-                    for (int x = 0; x < rowBytes; x++)
-                        filtered[1 + x] = (byte)(row[x] - prior[x]);
+                    Span<byte> target = filtered.AsSpan(1);
+                    int x = 0;
+                    // Byte subtraction has no cross-lane dependency — vectorize at the widest
+                    // width the machine has.
+                    for (; x <= rowBytes - Vector<byte>.Count; x += Vector<byte>.Count)
+                        (new Vector<byte>(row[x..]) - new Vector<byte>(prior[x..])).CopyTo(target[x..]);
+                    for (; x < rowBytes; x++)
+                        target[x] = (byte)(row[x] - prior[x]);
                 }
                 zlib.Write(filtered);
             }
@@ -164,7 +167,7 @@ internal sealed class FastPng(Crc crc)
         }
     }
 
-    private void WriteChunk(Stream stream, string type, ReadOnlySpan<byte> data)
+    private static void WriteChunk(Stream stream, string type, ReadOnlySpan<byte> data)
     {
         Span<byte> header = stackalloc byte[8];
         BinaryPrimitives.WriteUInt32BigEndian(header, (uint)data.Length);
@@ -172,23 +175,24 @@ internal sealed class FastPng(Crc crc)
         stream.Write(header);
         stream.Write(data);
 
-        uint chunkCrc = crc.Crc32Append(crc.Crc32Begin(), header[4..]);
-        chunkCrc = crc.Crc32Finish(crc.Crc32Append(chunkCrc, data));
+        var chunkCrc = new System.IO.Hashing.Crc32();
+        chunkCrc.Append(header[4..]);
+        chunkCrc.Append(data);
         Span<byte> crcBytes = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(crcBytes, chunkCrc);
+        BinaryPrimitives.WriteUInt32BigEndian(crcBytes, chunkCrc.GetCurrentHashAsUInt32());
         stream.Write(crcBytes);
     }
 
     /// <summary>Pass-through stream that accumulates the PNG chunk CRC over everything written.</summary>
-    private sealed class ChunkBodyStream(Stream inner, Crc crc32) : Stream
+    private sealed class ChunkBodyStream(Stream inner) : Stream
     {
-        private uint _crc = crc32.Crc32Begin();
+        private readonly System.IO.Hashing.Crc32 _crc = new();
 
-        public uint Crc => crc32.Crc32Finish(_crc);
+        public uint Crc => _crc.GetCurrentHashAsUInt32();
 
         public override void Write(ReadOnlySpan<byte> buffer)
         {
-            _crc = crc32.Crc32Append(_crc, buffer);
+            _crc.Append(buffer);
             inner.Write(buffer);
         }
 
