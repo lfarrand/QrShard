@@ -56,4 +56,25 @@ public class CrcTests
         new Random(3).NextBytes(data);
         Assert.Equal(new Crc().Crc32(data), new Crc().Crc32(data));
     }
+
+    [Fact]
+    public void Crc32_IncrementalHashing_MatchesOneShot()
+    {
+        // FastPng streams the IDAT CRC through System.IO.Hashing; the chunked result must
+        // equal our one-shot wrapper regardless of split boundaries.
+        var data = new byte[100_000];
+        new Random(4).NextBytes(data);
+        uint oneShot = new Crc().Crc32(data);
+
+        var incremental = new System.IO.Hashing.Crc32();
+        int offset = 0;
+        var rng = new Random(5);
+        while (offset < data.Length)
+        {
+            int n = Math.Min(rng.Next(1, 7000), data.Length - offset);
+            incremental.Append(data.AsSpan(offset, n));
+            offset += n;
+        }
+        Assert.Equal(oneShot, incremental.GetCurrentHashAsUInt32());
+    }
 }

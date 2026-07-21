@@ -76,7 +76,9 @@ internal sealed class VideoDecoder(
         var scratch = new DecodeScratch();
         var shards = new List<DecodedShard>();
         var seen = new HashSet<(ulong FileId, int Index, bool Parity)>();
-        byte[]? previousSignature = null;
+        var signature = new byte[SignatureLength];
+        var previousSignature = new byte[SignatureLength];
+        bool hasPrevious = false;
         int examined = 0, decoded = 0;
         bool stoppedEarly = false;
         var mode = CaptureMode.Unknown;
@@ -85,9 +87,10 @@ internal sealed class VideoDecoder(
         foreach (var frame in frames)
         {
             examined++;
-            byte[] signature = FrameSignature(frame);
-            bool duplicate = previousSignature is not null && MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
-            previousSignature = signature;
+            FrameSignature(frame, signature);
+            bool duplicate = hasPrevious && MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
+            (previousSignature, signature) = (signature, previousSignature);
+            hasPrevious = true;
             if (duplicate)
                 continue;
 
@@ -142,7 +145,9 @@ internal sealed class VideoDecoder(
 
         var producer = Task.Run(() =>
         {
-            byte[]? previousSignature = null;
+            var signature = new byte[SignatureLength];
+            var previousSignature = new byte[SignatureLength];
+            bool hasPrevious = false;
             try
             {
                 foreach (var frame in frames)
@@ -150,9 +155,10 @@ internal sealed class VideoDecoder(
                     if (cts.IsCancellationRequested)
                         break;
                     int index = ++examined; // producer-only until the final barrier
-                    byte[] signature = FrameSignature(frame);
-                    bool duplicate = previousSignature is not null && MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
-                    previousSignature = signature;
+                    FrameSignature(frame, signature);
+                    bool duplicate = hasPrevious && MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
+                    (previousSignature, signature) = (signature, previousSignature);
+                    hasPrevious = true;
                     if (duplicate)
                         continue;
                     Interlocked.Increment(ref decodedCount);
@@ -261,27 +267,28 @@ internal sealed class VideoDecoder(
         return shard;
     }
 
+    private const int SignatureGrid = 32;
+    private const int SignatureLength = SignatureGrid * SignatureGrid;
+
     /// <summary>
     /// Sparse point-sample signature for cheap near-duplicate rejection: the luminance of 1024
-    /// exact pixels on a fixed grid. Point samples, deliberately not averages — shard content
-    /// is noise-like, so any downsampled average converges to the same mean for every shard,
-    /// while exact pixels differ almost everywhere between different shards.
+    /// exact pixels on a fixed grid, written into a caller-reused buffer. Point samples,
+    /// deliberately not averages — shard content is noise-like, so any downsampled average
+    /// converges to the same mean for every shard, while exact pixels differ almost everywhere
+    /// between different shards.
     /// </summary>
-    private static byte[] FrameSignature(Bitmap frame)
+    private static void FrameSignature(Bitmap frame, byte[] signature)
     {
-        const int grid = 32;
-        var signature = new byte[grid * grid];
-        for (int gy = 0; gy < grid; gy++)
+        for (int gy = 0; gy < SignatureGrid; gy++)
         {
-            int y = (2 * gy + 1) * frame.Height / (2 * grid);
-            for (int gx = 0; gx < grid; gx++)
+            int y = (2 * gy + 1) * frame.Height / (2 * SignatureGrid);
+            for (int gx = 0; gx < SignatureGrid; gx++)
             {
-                int x = (2 * gx + 1) * frame.Width / (2 * grid);
+                int x = (2 * gx + 1) * frame.Width / (2 * SignatureGrid);
                 var p = frame.At(x, y);
-                signature[gy * grid + gx] = (byte)((p.R + p.G + p.B) / 3);
+                signature[gy * SignatureGrid + gx] = (byte)((p.R + p.G + p.B) / 3);
             }
         }
-        return signature;
     }
 
     private static double MeanAbsDiff(byte[] a, byte[] b)
