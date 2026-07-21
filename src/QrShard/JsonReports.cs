@@ -9,6 +9,32 @@ namespace QrShard;
 /// </summary>
 internal sealed class JsonReports
 {
+    public string EncodeReport(EncodeResult result, string outputDir, string? slideshowPath)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
+        {
+            w.WriteStartObject();
+            w.WriteString("outputDir", outputDir);
+            w.WriteNumber("imageCount", result.ImageCount);
+            w.WriteNumber("dataImages", result.DataImages);
+            w.WriteNumber("parityImages", result.ParityImages);
+            w.WriteNumber("bytesPerImage", result.BytesPerImage);
+            w.WriteNumber("width", result.Width);
+            w.WriteNumber("height", result.Height);
+            w.WriteNumber("stripeData", result.StripeData);
+            w.WriteNumber("stripeParity", result.StripeParity);
+            if (slideshowPath is not null)
+                w.WriteString("slideshow", slideshowPath);
+            w.WriteStartArray("files");
+            foreach (string f in result.Files)
+                w.WriteStringValue(f);
+            w.WriteEndArray();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
+
     public string VerifyReport(List<DecodedShard> shards, IParityReassembler parity)
     {
         using var ms = new MemoryStream();

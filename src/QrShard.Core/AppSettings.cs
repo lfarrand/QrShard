@@ -52,6 +52,10 @@ internal sealed class AppSettings
     /// <summary>Parallel frame-decode workers for the live receiver; 0 = automatic.</summary>
     public int ReceiveDecodeWorkers { get; private set; }
 
+    /// <summary>Named encode presets applied by <c>--profile &lt;name&gt;</c>; flags still override.</summary>
+    public IReadOnlyDictionary<string, EncodeDefaultSettings> EncodeProfiles { get; private set; } =
+        new Dictionary<string, EncodeDefaultSettings>();
+
     internal sealed class EncodeDefaultSettings
     {
         public string Resolution { get; set; } = "auto";
@@ -124,45 +128,75 @@ internal sealed class AppSettings
                 throw Invalid("ReceiveDecodeWorkers", settings.ReceiveDecodeWorkers, "0 (auto) to 64");
 
             if (root.TryGetProperty("EncodeDefaults", out var defaults) && defaults.ValueKind == JsonValueKind.Object)
+                ParseEncodeSettings(defaults, settings.EncodeDefaults, "EncodeDefaults", Invalid);
+
+            if (root.TryGetProperty("EncodeProfiles", out var profiles) && profiles.ValueKind == JsonValueKind.Object)
             {
-                var d = settings.EncodeDefaults;
-                d.Resolution = ReadString(defaults, "Resolution", d.Resolution);
-                if (!IsValidResolution(d.Resolution))
-                    throw Invalid("EncodeDefaults.Resolution", d.Resolution, "\"2160\" or \"3840x2160\" style");
-
-                d.CellPx = ReadInt(defaults, "CellPx", d.CellPx);
-                if (d.CellPx is < 1 or > Layout.MaxCellPx)
-                    throw Invalid("EncodeDefaults.CellPx", d.CellPx, $"1-{Layout.MaxCellPx}");
-
-                d.BitsPerCell = ReadInt(defaults, "BitsPerCell", d.BitsPerCell);
-                if (d.BitsPerCell is < Palette.MinBits or > Palette.MaxBits)
-                    throw Invalid("EncodeDefaults.BitsPerCell", d.BitsPerCell, $"{Palette.MinBits}-{Palette.MaxBits}");
-
-                d.EccParity = ReadInt(defaults, "EccParity", d.EccParity);
-                if (d.EccParity is < 0 or > Fec.MaxParity || (d.EccParity & 1) != 0)
-                    throw Invalid("EncodeDefaults.EccParity", d.EccParity, $"an even number 0-{Fec.MaxParity}");
-
-                d.RecoveryPercent = ReadInt(defaults, "RecoveryPercent", d.RecoveryPercent);
-                if (d.RecoveryPercent is < 0 or > ShardEncoder.MaxRecoveryPercent)
-                    throw Invalid("EncodeDefaults.RecoveryPercent", d.RecoveryPercent, $"0-{ShardEncoder.MaxRecoveryPercent}");
-
-                string format = ReadString(defaults, "ImageFormat", d.ImageFormat);
-                try
+                var parsed = new Dictionary<string, EncodeDefaultSettings>(StringComparer.OrdinalIgnoreCase);
+                foreach (var profile in profiles.EnumerateObject())
                 {
-                    d.ImageFormat = new ShardImageFormat().Normalize(format);
+                    if (profile.Value.ValueKind != JsonValueKind.Object)
+                        throw Invalid($"EncodeProfiles.{profile.Name}", profile.Value.ToString(), "an object of encode settings");
+                    // Each profile starts from the resolved EncodeDefaults, so a preset only
+                    // states the fields it changes.
+                    var p = Clone(settings.EncodeDefaults);
+                    ParseEncodeSettings(profile.Value, p, $"EncodeProfiles.{profile.Name}", Invalid);
+                    parsed[profile.Name] = p;
                 }
-                catch (ArgumentException)
-                {
-                    throw Invalid("EncodeDefaults.ImageFormat", format, string.Join(", ", ShardImageFormat.Supported));
-                }
-
-                d.Compress = ReadBool(defaults, "Compress", d.Compress);
+                settings.EncodeProfiles = parsed;
             }
         }
         return settings;
 
         InvalidOperationException Invalid(string setting, object value, string expected) =>
             new($"{file}: invalid {setting} '{value}'. Possible values: {expected}.");
+    }
+
+    private static EncodeDefaultSettings Clone(EncodeDefaultSettings s) => new()
+    {
+        Resolution = s.Resolution,
+        CellPx = s.CellPx,
+        BitsPerCell = s.BitsPerCell,
+        EccParity = s.EccParity,
+        RecoveryPercent = s.RecoveryPercent,
+        ImageFormat = s.ImageFormat,
+        Compress = s.Compress,
+    };
+
+    private static void ParseEncodeSettings(JsonElement obj, EncodeDefaultSettings d, string prefix,
+        Func<string, object, string, InvalidOperationException> invalid)
+    {
+        d.Resolution = ReadString(obj, "Resolution", d.Resolution);
+        if (!IsValidResolution(d.Resolution))
+            throw invalid($"{prefix}.Resolution", d.Resolution, "\"2160\" or \"3840x2160\" style");
+
+        d.CellPx = ReadInt(obj, "CellPx", d.CellPx);
+        if (d.CellPx is < 1 or > Layout.MaxCellPx)
+            throw invalid($"{prefix}.CellPx", d.CellPx, $"1-{Layout.MaxCellPx}");
+
+        d.BitsPerCell = ReadInt(obj, "BitsPerCell", d.BitsPerCell);
+        if (d.BitsPerCell is < Palette.MinBits or > Palette.MaxBits)
+            throw invalid($"{prefix}.BitsPerCell", d.BitsPerCell, $"{Palette.MinBits}-{Palette.MaxBits}");
+
+        d.EccParity = ReadInt(obj, "EccParity", d.EccParity);
+        if (d.EccParity is < 0 or > Fec.MaxParity || (d.EccParity & 1) != 0)
+            throw invalid($"{prefix}.EccParity", d.EccParity, $"an even number 0-{Fec.MaxParity}");
+
+        d.RecoveryPercent = ReadInt(obj, "RecoveryPercent", d.RecoveryPercent);
+        if (d.RecoveryPercent is < 0 or > ShardEncoder.MaxRecoveryPercent)
+            throw invalid($"{prefix}.RecoveryPercent", d.RecoveryPercent, $"0-{ShardEncoder.MaxRecoveryPercent}");
+
+        string format = ReadString(obj, "ImageFormat", d.ImageFormat);
+        try
+        {
+            d.ImageFormat = new ShardImageFormat().Normalize(format);
+        }
+        catch (ArgumentException)
+        {
+            throw invalid($"{prefix}.ImageFormat", format, string.Join(", ", ShardImageFormat.Supported));
+        }
+
+        d.Compress = ReadBool(obj, "Compress", d.Compress);
     }
 
     private static bool IsValidResolution(string value)

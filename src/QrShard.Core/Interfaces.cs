@@ -135,6 +135,8 @@ internal interface IFrameEdgeTracer
 internal interface ISlideshowWriter
 {
     string Write(string outDir, IReadOnlyList<string> imageFiles, int intervalMs);
+
+    string WriteApng(string outDir, IReadOnlyList<string> imageFiles, int intervalMs);
 }
 
 /// <summary>End-to-end round-trip self-test, run via `qrshard test`.</summary>
