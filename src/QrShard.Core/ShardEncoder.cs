@@ -16,6 +16,7 @@ internal sealed record EncodeOptions
     public string? Password { get; init; } // AES-256-GCM encrypt the payload (null = plaintext)
     public bool IsArchive { get; init; } // payload is a tar of a folder; decode extracts it
     public int FountainPercent { get; init; } // fountain-coded frames (% of data, video mode); 0 = off
+    public bool Interleave2 { get; init; } // v2 permuted interleave (metadata version 3; needs ECC)
 }
 
 internal sealed record EncodeResult(
@@ -66,7 +67,8 @@ internal sealed class ShardEncoder(
         var source = payload.Source;
         long dataLength = source.Length;
 
-        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity, opt.CameraMode);
+        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity, opt.CameraMode,
+            opt.Interleave2);
         int headerSize = ShardHeader.Size(fileName);
         long capacityLong = layout.UsableBytes - headerSize;
         if (capacityLong < 1)

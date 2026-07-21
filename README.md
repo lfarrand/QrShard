@@ -45,10 +45,16 @@ Video decoding and the live receiver additionally need [ffmpeg](https://ffmpeg.o
 - **dotnet tool**: `dotnet tool install -g QrShard.Tool` → the `qrshard` command (needs the
   .NET 10 runtime).
 - **Standalone binaries**: tagged releases attach Native-AOT single-file binaries for
-  win-x64 / linux-x64 / osx-arm64 — no .NET install needed. `./publish.ps1` (or `.sh`)
-  produces the same locally.
+  win-x64 / linux-x64 / linux-arm64 / osx-arm64 — no .NET install needed. `./publish.ps1`
+  (or `.sh`) produces the same locally.
+- **As a library**: `dotnet add package QrShard.Core` — the embeddable codec with a small
+  public API (`QrShardCodec.EncodeFile` / `DecodeImages`), wire-compatible with the CLI.
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
   [Building](#building-and-testing) for the ImageSharp license note).
+
+Shell completions for bash and PowerShell live in [`completions/`](completions/). The wire
+format is fully specified in [SPEC.md](SPEC.md) — an independent implementation can be built
+from it.
 
 ## How to use it
 
@@ -108,11 +114,12 @@ transfer completes.
 | Command | Description |
 |---|---|
 | `qrshard encode <file\|folder> [options]` | Split a file (or tar-ed folder) into shard images |
-| `qrshard decode <folder\|images...\|recording> [options]` | Reconstitute the original from captures or a recording |
-| `qrshard receive [--device d] [options]` | Live decode from a webcam pointed at the sender |
+| `qrshard send <file\|folder> [options]` | Encode + open the slideshow in the default browser |
+| `qrshard decode <folder\|images...\|recording> [options]` | Reconstitute the original from captures or a recording (`--watch` to keep decoding as captures land; `--clipboard` on Windows) |
+| `qrshard receive [--device d \| --screen] [options]` | Live decode from a webcam — or from THIS machine's screen (`--screen`): put the slideshow in an RDP/VM window and transfer out of locked-down remotes |
 | `qrshard verify <folder\|images...> [--session f] [--json]` | Report set completeness without writing output |
 | `qrshard info <image> [--heatmap out.png] [--json]` | Inspect/validate one shard; render an ECC damage map |
-| `qrshard calibrate [-o dir] / calibrate <folder>` | Probe → capture → recommended density settings |
+| `qrshard calibrate [-o dir] [--camera] / calibrate <folder>` | Probe → capture → recommended density settings |
 | `qrshard test` | End-to-end self-test, including simulated screenshots |
 
 ### `encode` options

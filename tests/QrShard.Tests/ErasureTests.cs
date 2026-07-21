@@ -124,7 +124,8 @@ public class ErasureTests
         Assert.True(new FastPngReader().TryRead(result.Files[0], scratch, out Bitmap bmp));
         var (foundLayout, inner) = new FrameLocator(new InnerRectScanner(), new StripReader()).Locate(bmp, scratch);
         var palettes = new StripReader().ReadPalette(bmp, inner, foundLayout);
-        byte[] cells = new GridSampler().ReadDataGrid(bmp, inner, foundLayout, palettes, scratch, out bool[]? suspects);
+        byte[] cells = new GridSampler().ReadDataGrid(bmp, inner, foundLayout, palettes, scratch,
+            out bool[]? suspects, out _);
         Assert.NotNull(suspects);
 
         var fec = new Fec();

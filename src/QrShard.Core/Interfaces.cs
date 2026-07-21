@@ -47,7 +47,7 @@ internal interface IStripReader
 internal interface IGridSampler
 {
     byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
-        out bool[]? suspectBytes);
+        out bool[]? suspectBytes, out byte[]? secondChoiceBytes);
 }
 
 /// <summary>Reassembles decoded shards into output files.</summary>
@@ -68,7 +68,7 @@ internal interface IParityReassembler
 internal interface IVideoDecoder
 {
     List<RestoredFile> Decode(string path, string? outputPath, double extractFps, Action<string> log,
-        out VideoDecodeStats stats, string? password = null);
+        out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1);
 }
 
 /// <summary>Yields the frames of a recording (video file or animated image) in display order.</summary>
@@ -93,7 +93,7 @@ internal interface ICameraRectifier
 /// <summary>Guides encode-setting selection: emits density probes, analyzes their captures.</summary>
 internal interface ICalibration
 {
-    int Generate(string outDir, int width, int height, TextWriter output);
+    int Generate(string outDir, int width, int height, bool camera, TextWriter output);
 
     int Analyze(string capturedFolder, TextWriter output);
 }

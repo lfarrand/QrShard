@@ -37,10 +37,12 @@ internal sealed class RecordingFrameSource : IFrameSource
     /// making stream framing trivial). Disposing the enumerator kills ffmpeg, which is how
     /// early stop avoids demuxing the rest (or, live, how the capture ends).
     /// </summary>
-    internal static IEnumerable<Bitmap> FfmpegPipe(string inputArgs, double fps)
+    internal static IEnumerable<Bitmap> FfmpegPipe(string inputArgs, double fps, string? extraFilter = null)
     {
+        string filter = $"fps={fps.ToString(System.Globalization.CultureInfo.InvariantCulture)}"
+                        + (extraFilter is null ? "" : "," + extraFilter);
         ProcessStartInfo psi = new("ffmpeg",
-            $"-hide_banner -loglevel error {inputArgs} -vf fps={fps.ToString(System.Globalization.CultureInfo.InvariantCulture)} -c:v bmp -f image2pipe -")
+            $"-hide_banner -loglevel error {inputArgs} -vf {filter} -c:v bmp -f image2pipe -")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,

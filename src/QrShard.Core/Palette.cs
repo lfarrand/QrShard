@@ -39,19 +39,25 @@ internal sealed class Palette
     private static byte Level(int index, int count) =>
         count == 1 ? (byte)0 : (byte)(index * 255 / (count - 1));
 
-    /// <summary>Squared distance to the nearest palette color EXCLUDING one index — the
-    /// classification margin used to flag ambiguous cells as Reed-Solomon erasures.</summary>
-    public long SecondNearestDistance(Rgb24[] palette, int r, int g, int b, int excludeIndex)
+    /// <summary>
+    /// The nearest palette color EXCLUDING one index, with its squared distance — the
+    /// classification margin (erasure flagging) and the alternative value (Chase trials).
+    /// </summary>
+    public int SecondNearest(Rgb24[] palette, int r, int g, int b, int excludeIndex, out long distance)
     {
-        long best = long.MaxValue;
+        int best = excludeIndex;
+        distance = long.MaxValue;
         for (int i = 0; i < palette.Length; i++)
         {
             if (i == excludeIndex)
                 continue;
             long dr = r - palette[i].R, dg = g - palette[i].G, db = b - palette[i].B;
             long dist = dr * dr + dg * dg + db * db;
-            if (dist < best)
-                best = dist;
+            if (dist < distance)
+            {
+                distance = dist;
+                best = i;
+            }
         }
         return best;
     }

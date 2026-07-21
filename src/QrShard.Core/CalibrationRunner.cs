@@ -13,18 +13,25 @@ internal sealed class CalibrationRunner(IShardEncoder encoder, IShardDecoder dec
     }
 
     /// <summary>Densest first, so the analysis report reads top-down from ambitious to safe.</summary>
-    private static readonly (int CellPx, int Bits)[] Probes =
+    private static readonly (int CellPx, int Bits)[] ScreenProbes =
         [(1, 8), (1, 6), (2, 6), (2, 4), (3, 4), (4, 4), (8, 2)];
 
-    private const int EccParity = 16;
+    /// <summary>Camera-profile ladder: photo capture needs several camera pixels per cell.</summary>
+    private static readonly (int CellPx, int Bits)[] CameraProbes =
+        [(4, 2), (5, 2), (6, 2), (8, 2), (10, 2)];
 
-    public int Generate(string outDir, int width, int height, TextWriter output)
+    private const int ScreenEccParity = 16;
+    private const int CameraEccParity = 32;
+
+    public int Generate(string outDir, int width, int height, bool camera, TextWriter output)
     {
+        var probes = camera ? CameraProbes : ScreenProbes;
+        int eccParity = camera ? CameraEccParity : ScreenEccParity;
         Directory.CreateDirectory(outDir);
-        output.WriteLine($"Writing {Probes.Length} calibration probes ({width}x{height}) → {outDir}");
-        foreach (var (cellPx, bits) in Probes)
+        output.WriteLine($"Writing {probes.Length} {(camera ? "camera-profile " : "")}calibration probes ({width}x{height}) → {outDir}");
+        foreach (var (cellPx, bits) in probes)
         {
-            var layout = Layout.Create(width, height, cellPx, bits, EccParity);
+            var layout = Layout.Create(width, height, cellPx, bits, eccParity, camera);
             int payloadSize = (int)Math.Max(1, (layout.UsableBytes - ShardHeader.Size("p.bin")) * 9 / 10);
             string input = Path.Combine(outDir, $"cal-c{cellPx}b{bits}.bin");
             byte[] payload = new byte[payloadSize];
@@ -38,7 +45,8 @@ internal sealed class CalibrationRunner(IShardEncoder encoder, IShardDecoder dec
                     Height = height,
                     CellPx = cellPx,
                     BitsPerCell = bits,
-                    EccParity = EccParity,
+                    EccParity = eccParity,
+                    CameraMode = camera,
                     Compress = false,
                 });
             }
@@ -50,8 +58,10 @@ internal sealed class CalibrationRunner(IShardEncoder encoder, IShardDecoder dec
         }
         output.WriteLine();
         output.WriteLine("Next: display each probe image full-screen at 100% zoom, capture it the way you");
-        output.WriteLine("will capture real transfers (screenshot tool, phone photo of the recording setup,");
-        output.WriteLine($"etc.), put the captures in one folder, and run: qrshard calibrate <that folder>");
+        output.WriteLine("will capture real transfers (screenshot tool, phone photo, etc.), put the");
+        output.WriteLine("captures in one folder, and run: qrshard calibrate <that folder>");
+        if (camera)
+            output.WriteLine("Remember to add --camera to your real encodes alongside the recommended -c/-b.");
         return 0;
     }
 
@@ -97,7 +107,7 @@ internal sealed class CalibrationRunner(IShardEncoder encoder, IShardDecoder dec
 
         output.WriteLine("Probe results (densest first):");
         (int CellPx, int Bits)? recommended = null;
-        foreach (var (cellPx, bits) in Probes)
+        foreach (var (cellPx, bits) in ScreenProbes.Concat(CameraProbes))
         {
             if (!results.TryGetValue((cellPx, bits), out var r))
                 continue;

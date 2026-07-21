@@ -99,6 +99,7 @@ internal sealed class Cli(AppSettings? settings = null)
                     CameraMode = camera,
                     Password = Get(named, "-p", "--password"),
                     IsArchive = isArchive,
+                    Interleave2 = flags.Contains("--interleave2"),
                 };
                 string outDir = Get(named, "-o", "--out") ?? Path.Combine(
                     Path.GetDirectoryName(Path.GetFullPath(Path.TrimEndingDirectorySeparator(input)))!,
@@ -124,6 +125,8 @@ internal sealed class Cli(AppSettings? settings = null)
                     string slideshow = services.Slideshow.Write(outDir, result.Files, intervalMs);
                     @out.WriteLine($"Slideshow: {slideshow} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
                     @out.WriteLine("  Open it in a browser, press F11, and record the screen for at least one full cycle.");
+                    if (flags.Contains("--open"))
+                        OpenInBrowser(slideshow, @out);
                 }
                 return 0;
                 }
@@ -137,16 +140,18 @@ internal sealed class Cli(AppSettings? settings = null)
             case "decode":
             {
                 var (positional, named, dflags) = ParseArgs(args[1..]);
-                if (positional.Count == 0)
-                    return Help(@out, err, "decode requires a folder, image files, or a video recording.");
-
                 string? password = Get(named, "-p", "--password");
+                if (dflags.Contains("--clipboard"))
+                    return DecodeClipboard(services, Get(named, "--session"), Get(named, "-o", "--out"), password, @out, err);
+                if (positional.Count == 0)
+                    return Help(@out, err, "decode requires a folder, image files, a video recording, or --clipboard.");
+
                 if (dflags.Contains("--watch"))
                 {
                     if (positional.Count != 1 || !Directory.Exists(positional[0]))
                         return Help(@out, err, "--watch requires exactly one folder to watch.");
                     return DecodeWatch(services, positional[0], Get(named, "--session"),
-                        Get(named, "-o", "--out"), password, @out);
+                        Get(named, "-o", "--out"), password, @out, settings.WatchPollMs);
                 }
 
                 // A single video file (or animated image) is a recording of the slideshow.
@@ -283,29 +288,50 @@ internal sealed class Cli(AppSettings? settings = null)
                 return 0;
             }
 
+            case "send":
+                // One-step sender: encode with a slideshow and open it in the default browser.
+                return RunCore(["encode", .. args[1..], "--video", "--open"], @out, err, settings, services);
+
             case "receive":
             {
-                var (_, named, _) = ParseArgs(args[1..]);
-                string? device = Get(named, "--device") ?? LiveFrameSource.DefaultDevice();
-                if (device is null)
-                    return Help(@out, err,
-                        "receive on Windows needs --device \"<webcam name>\" (list devices with: ffmpeg -list_devices true -f dshow -i dummy)");
-                double fps = GetDouble(named, "--fps", 10.0);
-                @out.WriteLine($"Receiving from '{device}' at {fps} fps — point the camera at the sender's slideshow.");
-                @out.WriteLine("Decoding stops automatically the moment the transfer is complete.");
+                var (_, named, rflags) = ParseArgs(args[1..]);
+                IFrameSource source;
+                string sourceLabel;
+                if (rflags.Contains("--screen"))
+                {
+                    // Self-capture: decode this machine's own screen — put the sender's
+                    // slideshow anywhere visible, including inside an RDP/VM window.
+                    source = new ScreenFrameSource(ScreenFrameSource.ParseRegion(Get(named, "--region")));
+                    sourceLabel = "screen";
+                    @out.WriteLine("Receiving from this machine's screen — put the sender's slideshow somewhere visible (an RDP or VM window works).");
+                }
+                else
+                {
+                    string? device = Get(named, "--device") ?? LiveFrameSource.DefaultDevice();
+                    if (device is null)
+                        return Help(@out, err,
+                            "receive on Windows needs --device \"<webcam name>\" or --screen (list devices with: ffmpeg -list_devices true -f dshow -i dummy)");
+                    source = new LiveFrameSource(Get(named, "--format"));
+                    sourceLabel = device;
+                    @out.WriteLine($"Receiving from '{device}' — point the camera at the sender's slideshow.");
+                }
+                double fps = GetDouble(named, "--fps", settings.ReceiveFps);
+                int workers = settings.ReceiveDecodeWorkers > 0
+                    ? settings.ReceiveDecodeWorkers
+                    : Math.Clamp(Environment.ProcessorCount / 4, 2, 4);
+                @out.WriteLine($"Decoding at {fps} fps with {workers} worker(s); stops automatically when the transfer completes.");
 
-                // Same decoder, different frame source: the live pipe instead of a recording.
-                var live = new VideoDecoder(services.Decoder, new LiveFrameSource(Get(named, "--format")),
+                var live = new VideoDecoder(services.Decoder, source,
                     services.Assembler, services.Parity, new CameraRectifier());
-                var received = live.Decode(device, Get(named, "-o", "--out"), fps, @out.WriteLine, out var liveStats,
-                    Get(named, "-p", "--password"));
+                var received = live.Decode(sourceLabel, Get(named, "-o", "--out"), fps, @out.WriteLine, out var liveStats,
+                    Get(named, "-p", "--password"), workers);
                 @out.WriteLine($"Restored {received.Count} file(s) after examining {liveStats.FramesExamined} frame(s).");
                 return 0;
             }
 
             case "calibrate":
             {
-                var (positional, named, _) = ParseArgs(args[1..]);
+                var (positional, named, cflags) = ParseArgs(args[1..]);
                 if (positional.Count == 1 && Directory.Exists(positional[0]))
                     return services.Calibration.Analyze(positional[0], @out);
                 if (positional.Count != 0)
@@ -314,7 +340,7 @@ internal sealed class Cli(AppSettings? settings = null)
                 string outDir = Get(named, "-o", "--out") ?? Path.Combine(Environment.CurrentDirectory, "qrshard-calibration");
                 if (note.Length > 0)
                     @out.WriteLine($"Resolution {width}x{height}{note}");
-                return services.Calibration.Generate(outDir, width, height, @out);
+                return services.Calibration.Generate(outDir, width, height, cflags.Contains("--camera"), @out);
             }
 
             case "test":
@@ -358,12 +384,83 @@ internal sealed class Cli(AppSettings? settings = null)
     }
 
     /// <summary>
+    /// Clipboard decode (Windows): read the bitmap off the clipboard — Win+Shift+S a displayed
+    /// shard, no file saving — merge it with the session, assemble when complete.
+    /// </summary>
+    private static int DecodeClipboard(CliServices services, string? sessionPath, string? outputPath,
+        string? password, TextWriter @out, TextWriter err)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            err.WriteLine("error: --clipboard is only supported on Windows.");
+            return 1;
+        }
+        var bmp = new ClipboardReader().TryRead();
+        if (bmp is null)
+        {
+            err.WriteLine("error: no bitmap on the clipboard (screenshot a displayed shard first).");
+            return 1;
+        }
+
+        var shard = services.Decoder.DecodeBitmap(bmp, new DecodeScratch(), "clipboard");
+        string which = shard.Header.IsParity
+            ? $"parity #{shard.Header.Index + 1}"
+            : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
+        @out.WriteLine($"  ok      clipboard  ({which}, {shard.Payload.Length:N0} bytes)");
+
+        var known = sessionPath is not null ? services.Sessions.Load(sessionPath) : [];
+        var merged = MergeShards(known, [shard]);
+        if (services.Parity.IsSetComplete(merged))
+        {
+            var restored = services.Assembler.Assemble(merged, outputPath, @out.WriteLine, password);
+            @out.WriteLine($"Restored {restored.Count} file(s).");
+            if (sessionPath is not null && File.Exists(sessionPath))
+                File.Delete(sessionPath);
+            return 0;
+        }
+        if (sessionPath is null)
+        {
+            @out.WriteLine("Set incomplete — use --session <file> to accumulate clipboard captures across screenshots.");
+            return 3;
+        }
+        services.Sessions.Save(sessionPath, merged);
+        PrintSetStatus(@out, merged, services.Parity);
+        @out.WriteLine($"Set incomplete — {merged.Count} shard(s) saved to {sessionPath}; screenshot the next image and run again.");
+        return 3;
+    }
+
+    /// <summary>Opens the slideshow in the platform's default browser (suppressed by the
+    /// QRSHARD_NO_LAUNCH environment variable, e.g. in tests and scripts).</summary>
+    private static void OpenInBrowser(string path, TextWriter @out)
+    {
+        if (Environment.GetEnvironmentVariable("QRSHARD_NO_LAUNCH") is not null)
+        {
+            @out.WriteLine("  (browser launch suppressed by QRSHARD_NO_LAUNCH)");
+            return;
+        }
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+            else if (OperatingSystem.IsMacOS())
+                System.Diagnostics.Process.Start("open", path);
+            else
+                System.Diagnostics.Process.Start("xdg-open", path);
+            @out.WriteLine("  Opened the slideshow in your default browser — press F11 for fullscreen.");
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or FileNotFoundException)
+        {
+            @out.WriteLine($"  Could not launch a browser automatically; open {path} manually.");
+        }
+    }
+
+    /// <summary>
     /// Watch mode: poll a folder for new captures, decode each as it lands (with a settle
     /// delay so half-written screenshots are left for the next poll), and assemble the moment
     /// the set completes. Ctrl+C stops the watch, persisting progress when a session is given.
     /// </summary>
     private static int DecodeWatch(CliServices services, string folder, string? sessionPath,
-        string? outputPath, string? password, TextWriter @out)
+        string? outputPath, string? password, TextWriter @out, int pollMs = 250)
     {
         var shards = sessionPath is not null ? services.Sessions.Load(sessionPath) : [];
         if (shards.Count > 0)
@@ -415,7 +512,7 @@ internal sealed class Cli(AppSettings? settings = null)
                         }
                     }
                 }
-                Thread.Sleep(250);
+                Thread.Sleep(pollMs);
             }
         }
         finally
@@ -507,7 +604,7 @@ internal sealed class Cli(AppSettings? settings = null)
         var flags = new HashSet<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch")
+            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch" or "--screen" or "--open" or "--interleave2" or "--clipboard")
                 flags.Add(args[i]);
             else if (args[i].StartsWith('-') && i + 1 < args.Length)
                 named[args[i]] = args[++i];
@@ -573,7 +670,12 @@ internal sealed class Cli(AppSettings? settings = null)
                                          cycles the images forever — record the screen for a
                                          full cycle instead of screenshotting by hand
                 -i, --interval <ms>      Slideshow interval per image (default: 500, min 100)
-                --no-compress            Skip deflate compression of the payload
+                --interleave2            v2 permuted interleave: spreads VERTICAL damage as well
+                                         as horizontal (needs ECC; older decoders reject it)
+                --no-compress            Skip compression of the payload
+              qrshard send <file|folder> [encode options]
+                                         One-step sender: encode with a slideshow and open it
+                                         in the default browser
 
               qrshard decode <folder|images...|recording> [-o <file>]
                                          Reconstitute the original file from captured images, or
@@ -588,16 +690,22 @@ internal sealed class Cli(AppSettings? settings = null)
                 --watch                  Keep watching the folder: decode captures as they land
                                          and assemble the moment the set completes (Ctrl+C
                                          stops; progress persists when --session is given)
-              qrshard receive [--device d] [--format f] [--fps n] [-o file] [-p pw]
-                                         LIVE receiver: read a webcam via ffmpeg, point it at
-                                         the sender's slideshow, and decode in real time —
-                                         stops automatically when the transfer completes
-                                         (Windows: --device "<webcam name>"; list with
+                --clipboard              (Windows) decode the bitmap on the clipboard —
+                                         Win+Shift+S a displayed shard, no file saving;
+                                         accumulates with --session
+              qrshard receive [--device d] [--screen] [--region x,y,w,h] [--fps n] [-o f] [-p pw]
+                                         LIVE receiver: decode a webcam pointed at the sender's
+                                         slideshow — or, with --screen, THIS machine's own
+                                         screen (put the slideshow in an RDP/VM window and
+                                         transfer out of locked-down remotes). Stops
+                                         automatically when the transfer completes.
+                                         (Windows webcams: --device "<name>"; list with
                                          ffmpeg -list_devices true -f dshow -i dummy)
-              qrshard calibrate [-o dir] [-r res]
-                                         Write a ladder of density probes; capture them like a
-                                         real transfer, then run qrshard calibrate <folder> to
-                                         get recommended -c/-b settings for YOUR setup
+              qrshard calibrate [-o dir] [-r res] [--camera]
+                                         Write a ladder of density probes (--camera for the
+                                         photo-capture ladder); capture them like a real
+                                         transfer, then run qrshard calibrate <folder> to get
+                                         recommended -c/-b settings for YOUR setup
               qrshard verify <folder|images...> [--session f] [--json]
                                          Report per-file completeness (missing images, parity
                                          coverage) without writing output; exit 0 when complete

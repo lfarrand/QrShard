@@ -56,10 +56,12 @@ internal sealed class VideoDecoder(
     }
 
     public List<RestoredFile> Decode(string path, string? outputPath, double extractFps, Action<string> log,
-        out VideoDecodeStats stats, string? password = null)
+        out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1)
     {
         var frames = frameSource.Frames(path, extractFps);
-        var shards = CollectShards(frames, log, out stats);
+        var shards = decodeWorkers > 1
+            ? CollectShardsParallel(frames, log, decodeWorkers, out stats)
+            : CollectShards(frames, log, out stats);
         log($"  video: examined {stats.FramesExamined} frame(s), fully decoded {stats.FramesDecoded}, " +
             $"collected {stats.ShardsCollected} shard(s){(stats.StoppedEarly ? ", stopped early — set complete" : "")}");
         if (shards.Count == 0)
@@ -99,7 +101,7 @@ internal sealed class VideoDecoder(
                     string which = shard.Header.IsParity
                         ? $"parity #{shard.Header.Index + 1}"
                         : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
-                    log($"  ok      frame {examined}  ({which}, {shard.Payload.Length:N0} bytes)");
+                    log($"  ok      frame {examined}  ({which}, {shard.Payload.Length:N0} bytes) — {shards.Count} collected");
 
                     if (parityReassembler.IsSetComplete(shards))
                     {
@@ -116,6 +118,98 @@ internal sealed class VideoDecoder(
         }
 
         stats = new VideoDecodeStats(examined, decoded, shards.Count, stoppedEarly);
+        return shards;
+    }
+
+    /// <summary>
+    /// Pipelined variant for the live receiver: one producer reads and dedupes frames while
+    /// several workers decode concurrently — per-frame decode latency is the throughput
+    /// ceiling on camera-profile streams, so overlapping frames matters there. The bounded
+    /// queue gives backpressure; completing the set cancels the producer, whose enumerator
+    /// disposal kills ffmpeg. (File recordings keep the sequential path: its early-stop
+    /// guarantees are exact, which the tests — and the "no wasted demux" promise — rely on.)
+    /// </summary>
+    private List<DecodedShard> CollectShardsParallel(IEnumerable<Bitmap> frames, Action<string> log, int workers,
+        out VideoDecodeStats stats)
+    {
+        var shards = new List<DecodedShard>();
+        var seen = new HashSet<(ulong FileId, int Index, bool Parity)>();
+        using var queue = new System.Collections.Concurrent.BlockingCollection<(Bitmap Frame, int Index)>(workers * 2);
+        using var cts = new CancellationTokenSource();
+        int examined = 0, decodedCount = 0;
+        bool stoppedEarly = false;
+        object gate = new();
+
+        var producer = Task.Run(() =>
+        {
+            byte[]? previousSignature = null;
+            try
+            {
+                foreach (var frame in frames)
+                {
+                    if (cts.IsCancellationRequested)
+                        break;
+                    int index = ++examined; // producer-only until the final barrier
+                    byte[] signature = FrameSignature(frame);
+                    bool duplicate = previousSignature is not null && MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
+                    previousSignature = signature;
+                    if (duplicate)
+                        continue;
+                    Interlocked.Increment(ref decodedCount);
+                    try
+                    {
+                        queue.Add((frame, index), cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                queue.CompleteAdding();
+            }
+        });
+
+        var workerTasks = Enumerable.Range(0, workers).Select(_ => Task.Run(() =>
+        {
+            var scratch = new DecodeScratch();
+            var mode = CaptureMode.Unknown; // per-worker latch/pose: benign duplication
+            CameraPose? cachedPose = null;
+            foreach (var (frame, index) in queue.GetConsumingEnumerable())
+            {
+                if (cts.IsCancellationRequested)
+                    break;
+                try
+                {
+                    var shard = DecodeFrame(frame, scratch, index, ref mode, ref cachedPose);
+                    lock (gate)
+                    {
+                        if (!seen.Add((shard.Header.FileId, shard.Header.Index, shard.Header.IsParity)))
+                            continue;
+                        shards.Add(shard);
+                        string which = shard.Header.IsParity
+                            ? $"parity #{shard.Header.Index + 1}"
+                            : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
+                        log($"  ok      frame {index}  ({which}, {shard.Payload.Length:N0} bytes) — {shards.Count} collected");
+                        if (parityReassembler.IsSetComplete(shards))
+                        {
+                            stoppedEarly = true;
+                            cts.Cancel();
+                        }
+                    }
+                }
+                catch (ShardDecodeException)
+                {
+                    // torn or non-shard frame — the stream will bring the shard around again
+                }
+            }
+        })).ToArray();
+
+        Task.WaitAll(workerTasks);
+        producer.Wait();
+        stats = new VideoDecodeStats(examined, decodedCount, shards.Count, stoppedEarly);
         return shards;
     }
 

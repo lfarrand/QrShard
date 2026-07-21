@@ -127,7 +127,7 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     /// positions as unknown ones, so borderline captures gain real capacity.
     /// </param>
     public bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes,
-        int[]? codewordErrors = null, bool[]? suspectBytes = null)
+        int[]? codewordErrors = null, bool[]? suspectBytes = null, byte[]? secondChoice = null)
     {
         int dataLen = DataLength(parity);
         if (dest.Length < cwCount * dataLen)
@@ -169,13 +169,13 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     if (dirty.GetElement(lane) == 0)
                         CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
                     else
-                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes);
+                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
                 }
             }
         }
 
         for (; j < cwCount; j++)
-            DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes);
+            DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
 
         correctedBytes = corrected;
         return failures == 0;
@@ -258,7 +258,8 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     }
 
     private void DecodeCodeword(byte[] buffer, int parity, int cwCount, int j, int dataLen, byte[] dest,
-        byte[] cwScratch, ref int corrected, ref int failures, int[]? codewordErrors, bool[]? suspectBytes)
+        byte[] cwScratch, ref int corrected, ref int failures, int[]? codewordErrors, bool[]? suspectBytes,
+        byte[]? secondChoice)
     {
         for (int i = 0; i < CodewordLength; i++)
             cwScratch[i] = buffer[i * cwCount + j];
@@ -283,9 +284,80 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
             return;
         }
 
+        if (suspectBytes is not null && secondChoice is not null
+            && TryChase(buffer, secondChoice, parity, cwCount, j, cwScratch, suspectBytes, out errors))
+        {
+            cwScratch.AsSpan(0, dataLen).CopyTo(dest.AsSpan(j * dataLen));
+            corrected += errors;
+            if (codewordErrors is not null)
+                codewordErrors[j] = errors;
+            return;
+        }
+
         failures++;
         if (codewordErrors is not null)
             codewordErrors[j] = -1;
+    }
+
+    /// <summary>Exhaustive Chase subsets over at most this many ambiguous symbols (2^6 - 1 trials).</summary>
+    private const int MaxChasePositions = 6;
+
+    /// <summary>
+    /// Chase decoding: the classifier recorded each ambiguous cell's runner-up value, so trial
+    /// codewords splice second choices over the received symbols. Few ambiguous symbols get an
+    /// exhaustive subset search; many (systematic blur — best/second swapped across a whole
+    /// region) get a single all-flipped trial, which is exactly the codeword the classifier
+    /// WOULD have produced had every coin-flip landed the other way.
+    /// </summary>
+    private bool TryChase(byte[] buffer, byte[] secondChoice, int parity, int cwCount, int j, byte[] cwScratch,
+        bool[] suspectBytes, out int errors)
+    {
+        errors = 0;
+        Span<int> positions = stackalloc int[MaxChasePositions];
+        int count = 0;
+        bool overflow = false;
+        for (int i = 0; i < CodewordLength; i++)
+        {
+            int idx = i * cwCount + j;
+            if (idx >= suspectBytes.Length || !suspectBytes[idx])
+                continue;
+            if (idx >= secondChoice.Length || buffer[idx] == secondChoice[idx])
+                continue; // flagged, but the alternative byte is identical — nothing to try
+            if (count == MaxChasePositions)
+            {
+                overflow = true;
+                break;
+            }
+            positions[count++] = i;
+        }
+        if (count == 0)
+            return false;
+
+        if (overflow)
+        {
+            // All-flipped trial: every differing ambiguous symbol takes its second choice.
+            for (int i = 0; i < CodewordLength; i++)
+            {
+                int idx = i * cwCount + j;
+                cwScratch[i] = idx < suspectBytes.Length && suspectBytes[idx]
+                               && idx < secondChoice.Length && buffer[idx] != secondChoice[idx]
+                    ? secondChoice[idx]
+                    : buffer[idx];
+            }
+            return reedSolomon.TryDecode(cwScratch, parity, out errors);
+        }
+
+        for (int mask = 1; mask < 1 << count; mask++)
+        {
+            for (int i = 0; i < CodewordLength; i++)
+                cwScratch[i] = buffer[i * cwCount + j];
+            for (int b = 0; b < count; b++)
+                if ((mask & (1 << b)) != 0)
+                    cwScratch[positions[b]] = secondChoice[positions[b] * cwCount + j];
+            if (reedSolomon.TryDecode(cwScratch, parity, out errors))
+                return true;
+        }
+        return false;
     }
 
     private bool TryErasureRetry(byte[] buffer, int parity, int cwCount, int j, byte[] cwScratch,
@@ -293,11 +365,12 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     {
         errors = 0;
 
-        // Collect this codeword's flagged symbols. Leave slack for one unmarked error
-        // (2·1 + f ≤ parity); more flags than that means the marks are useless here.
+        // Collect this codeword's flagged symbols, up to the full erasure capacity: f = parity
+        // still decodes when every real error is marked, and when it isn't the attempt simply
+        // fails — the same outcome as not trying.
         Span<int> erasures = stackalloc int[MaxParity];
         int f = 0;
-        int limit = parity - 2;
+        int limit = parity;
         for (int i = 0; i < CodewordLength; i++)
         {
             int idx = i * cwCount + j;
