@@ -161,7 +161,10 @@ internal sealed class Cli(AppSettings? settings = null)
                 {
                     double fps = GetDouble(named, "--fps", 8.0);
                     @out.WriteLine($"Decoding video '{positional[0]}' (extracting at {fps} fps)...");
-                    var fromVideo = services.VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps, @out.WriteLine, out _, password);
+                    // Escalate fps automatically for file recordings unless the user pinned --fps.
+                    bool userSetFps = Get(named, "--fps") is not null;
+                    var fromVideo = services.VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps,
+                        @out.WriteLine, out _, password, decodeWorkers: 1, escalateFps: !userSetFps);
                     @out.WriteLine($"Restored {fromVideo.Count} file(s).");
                     return 0;
                 }
