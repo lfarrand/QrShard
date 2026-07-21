@@ -10,6 +10,15 @@ if (args.Contains("--graphs-only"))
     return;
 }
 
+// `--gf-probe` runs the in-process GF(2^8) primitive micro-benchmark (throughput of the RS
+// encode, syndrome scan, and MulAdd hot loops). Compare acceleration tiers by re-running with
+// DOTNET_EnableGFNI=0 and/or DOTNET_EnableAVX512F=0 — same build, only the JIT path differs.
+if (args.Contains("--gf-probe"))
+{
+    GfProbe.Run(Console.Out);
+    return;
+}
+
 // Run everything by default (no interactive prompt); any BenchmarkDotNet switcher
 // arguments (--filter, --list, --job, ...) pass straight through.
 string[] effectiveArgs = args.Length == 0 ? ["--filter", "*"] : args;

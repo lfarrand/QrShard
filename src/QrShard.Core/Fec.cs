@@ -1,4 +1,5 @@
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace QrShard;
 
@@ -50,12 +51,81 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
 
         int j = 0;
 
+        // GFNI wide encode: 64/32 codewords per block through the LFSR, one affine transform
+        // per generator coefficient per step (mirrors the decode-side wide syndrome scan).
+        if (Gfni.V512.IsSupported && parity > 0 && cwCount - j >= 64)
+        {
+            byte[] genTail = reedSolomon.GeneratorTail(parity);
+            var matrices = new Vector512<byte>[parity];
+            for (int i = 0; i < parity; i++)
+                matrices[i] = Vector512.Create(gf.AffineMatrix(genTail[i])).AsByte();
+            var register = new Vector512<byte>[parity];
+            Span<byte> lanes = stackalloc byte[64];
+
+            for (; j + 64 <= cwCount; j += 64)
+            {
+                Array.Clear(register);
+                for (int i = 0; i < dataLen; i++)
+                {
+                    for (int lane = 0; lane < 64; lane++)
+                    {
+                        int src = (j + lane) * dataLen + i;
+                        lanes[lane] = src < streamLength ? stream[src] : (byte)0;
+                    }
+                    var d = Vector512.Create<byte>(lanes);
+                    d.CopyTo(dest.AsSpan(i * cwCount + j, 64));
+
+                    var coef = d ^ register[0];
+                    for (int k = 0; k < parity - 1; k++)
+                        register[k] = register[k + 1];
+                    register[parity - 1] = Vector512<byte>.Zero;
+                    for (int k = 0; k < parity; k++)
+                        register[k] ^= Gfni.V512.GaloisFieldAffineTransform(coef, matrices[k], 0);
+                }
+                for (int i = 0; i < parity; i++)
+                    register[i].CopyTo(dest.AsSpan((dataLen + i) * cwCount + j, 64));
+            }
+        }
+        if (Gfni.V256.IsSupported && parity > 0 && cwCount - j >= 32)
+        {
+            byte[] genTail = reedSolomon.GeneratorTail(parity);
+            var matrices = new Vector256<byte>[parity];
+            for (int i = 0; i < parity; i++)
+                matrices[i] = Vector256.Create(gf.AffineMatrix(genTail[i])).AsByte();
+            var register = new Vector256<byte>[parity];
+            Span<byte> lanes = stackalloc byte[32];
+
+            for (; j + 32 <= cwCount; j += 32)
+            {
+                Array.Clear(register);
+                for (int i = 0; i < dataLen; i++)
+                {
+                    for (int lane = 0; lane < 32; lane++)
+                    {
+                        int src = (j + lane) * dataLen + i;
+                        lanes[lane] = src < streamLength ? stream[src] : (byte)0;
+                    }
+                    var d = Vector256.Create<byte>(lanes);
+                    d.CopyTo(dest.AsSpan(i * cwCount + j, 32));
+
+                    var coef = d ^ register[0];
+                    for (int k = 0; k < parity - 1; k++)
+                        register[k] = register[k + 1];
+                    register[parity - 1] = Vector256<byte>.Zero;
+                    for (int k = 0; k < parity; k++)
+                        register[k] ^= Gfni.V256.GaloisFieldAffineTransform(coef, matrices[k], 0);
+                }
+                for (int i = 0; i < parity; i++)
+                    register[i].CopyTo(dest.AsSpan((dataLen + i) * cwCount + j, 32));
+            }
+        }
+
         // SIMD fast path, mirroring the decode-side syndrome scan: encode 16 codewords at
         // once, one Vector128 lane per codeword. The LFSR step multiplies every lane's
         // feedback coefficient by the FIXED generator coefficient gen[k+1], which is exactly
         // the nibble-shuffle-table case. The interleaved output layout also turns the
         // write-out into contiguous 16-byte stores.
-        if (Vector128.IsHardwareAccelerated && parity > 0 && cwCount >= 16)
+        if (Vector128.IsHardwareAccelerated && parity > 0 && cwCount - j >= 16)
         {
             byte[] genTail = reedSolomon.GeneratorTail(parity);
             var tableLo = new Vector128<byte>[parity];
@@ -137,12 +207,76 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
 
         int j = 0;
 
+        // GFNI wide paths: syndromes for 64 (AVX-512) or 32 (AVX) codewords per block, one
+        // GF2P8AFFINEQB per α-power per step — multiplication by the fixed α^i is a GF(2)
+        // bit-matrix, which is exactly what the affine instruction applies per byte.
+        if (Gfni.V512.IsSupported && parity > 0 && cwCount - j >= 64)
+        {
+            var matrices = new Vector512<byte>[parity];
+            for (int i = 0; i < parity; i++)
+                matrices[i] = Vector512.Create(gf.AffineMatrix(gf.AlphaPower(i))).AsByte();
+            var synd = new Vector512<byte>[parity];
+
+            for (; j + 64 <= cwCount; j += 64)
+            {
+                Array.Clear(synd);
+                for (int k = 0; k < CodewordLength; k++)
+                {
+                    var c = Vector512.Create<byte>(buffer.AsSpan(k * cwCount + j, 64));
+                    for (int i = 0; i < parity; i++)
+                        synd[i] = Gfni.V512.GaloisFieldAffineTransform(synd[i], matrices[i], 0) ^ c;
+                }
+
+                var dirty = Vector512<byte>.Zero;
+                for (int i = 0; i < parity; i++)
+                    dirty |= synd[i];
+
+                for (int lane = 0; lane < 64; lane++)
+                {
+                    if (dirty.GetElement(lane) == 0)
+                        CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
+                    else
+                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
+                }
+            }
+        }
+        if (Gfni.V256.IsSupported && parity > 0 && cwCount - j >= 32)
+        {
+            var matrices = new Vector256<byte>[parity];
+            for (int i = 0; i < parity; i++)
+                matrices[i] = Vector256.Create(gf.AffineMatrix(gf.AlphaPower(i))).AsByte();
+            var synd = new Vector256<byte>[parity];
+
+            for (; j + 32 <= cwCount; j += 32)
+            {
+                Array.Clear(synd);
+                for (int k = 0; k < CodewordLength; k++)
+                {
+                    var c = Vector256.Create<byte>(buffer.AsSpan(k * cwCount + j, 32));
+                    for (int i = 0; i < parity; i++)
+                        synd[i] = Gfni.V256.GaloisFieldAffineTransform(synd[i], matrices[i], 0) ^ c;
+                }
+
+                var dirty = Vector256<byte>.Zero;
+                for (int i = 0; i < parity; i++)
+                    dirty |= synd[i];
+
+                for (int lane = 0; lane < 32; lane++)
+                {
+                    if (dirty.GetElement(lane) == 0)
+                        CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
+                    else
+                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
+                }
+            }
+        }
+
         // SIMD fast path: the buffer is interleaved (byte k*cwCount+j is symbol k of codeword j),
         // so 16 consecutive codewords' symbols sit in 16 consecutive bytes. Compute all their
         // syndromes together — one Vector128 lane per codeword, multiplying every lane by the
         // constant α^i via nibble shuffles. Clean codewords (the vast majority) are then copied
         // straight out; only dirty lanes fall back to the scalar Berlekamp-Massey decoder.
-        if (Vector128.IsHardwareAccelerated && parity > 0 && cwCount >= 16)
+        if (Vector128.IsHardwareAccelerated && parity > 0 && cwCount - j >= 16)
         {
             var tableLo = new Vector128<byte>[parity];
             var tableHi = new Vector128<byte>[parity];
