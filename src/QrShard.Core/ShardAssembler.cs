@@ -40,6 +40,11 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         // Both reassembly paths bound their buffers by the declared sizes, so sanity-check first.
         if (first.TotalLength is < 0 or > ShardEncoder.MaxFileBytes || first.OriginalLength is < 0 or > ShardEncoder.MaxFileBytes)
             throw new ShardDecodeException($"'{first.FileName}': shard header declares an implausible file size.");
+        // Cross-shard geometry drives divisor/array math in both parity paths. Deserialize
+        // already rejects this, but a directly-constructed shard set (session API, tests) must
+        // fail cleanly rather than crash.
+        if (first.StripeParity > 0 && first.StripeData < 1)
+            throw new ShardDecodeException($"'{first.FileName}': shard header declares invalid stripe geometry.");
 
         byte[][] chunks;
         long[] chunkLengths;
@@ -196,7 +201,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     {
         var byIndex = new DecodedShard?[first.Count];
         foreach (var s in shards)
-            if (!s.Header.IsParity)
+            if (!s.Header.IsParity && (uint)s.Header.Index < (uint)first.Count) // guard crafted out-of-range ordinals
                 byIndex[s.Header.Index] ??= s;
 
         var missing = Enumerable.Range(0, first.Count).Where(i => byIndex[i] is null).ToList();

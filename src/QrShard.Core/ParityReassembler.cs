@@ -25,6 +25,12 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
             var first = group.First().Header;
             int count = first.Count, s = first.StripeData, p = first.StripeParity;
 
+            // Defense in depth: ShardHeader.Deserialize already rejects p>0 with s<1, but a
+            // DecodedShard could be constructed directly (tests, future callers), and this
+            // check drives divisor math below. A malformed stripe set is simply not complete.
+            if (p > 0 && s < 1)
+                return false;
+
             var dataPresent = new bool[count];
             foreach (var x in group)
                 if (!x.Header.IsParity && x.Header.Index < count)
@@ -123,10 +129,10 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
         {
             if (x.Header.IsParity)
             {
-                if (x.Header.Index < parityByOrdinal.Length)
+                if ((uint)x.Header.Index < (uint)parityByOrdinal.Length)
                     parityByOrdinal[x.Header.Index] ??= x;
             }
-            else
+            else if ((uint)x.Header.Index < (uint)count) // guard crafted out-of-range ordinals
             {
                 dataByIndex[x.Header.Index] ??= x;
             }
@@ -222,7 +228,7 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
                 if (x.Header.Index >= 0)
                     codedByStripe[x.Header.Index % stripes].Add((x.Header.Index / stripes, x.Payload));
             }
-            else
+            else if ((uint)x.Header.Index < (uint)count) // guard crafted out-of-range ordinals
             {
                 dataByIndex[x.Header.Index] ??= x;
             }
