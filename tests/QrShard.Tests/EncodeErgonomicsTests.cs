@@ -123,4 +123,41 @@ public class EncodeErgonomicsTests
         Assert.Equal(2, code);
         Assert.Contains("unknown profile", output);
     }
+
+    [Fact]
+    public void MultiFile_SameBasenameDifferentDirs_RefusedNotSilentlyLost()
+    {
+        // Two DIFFERENT files with the same name from different folders would collide at the
+        // archive root — an integrity tool must refuse, never silently drop one.
+        using var tmp = new TempDir();
+        string d1 = tmp.Sub("d1"), d2 = tmp.Sub("d2");
+        File.WriteAllBytes(Path.Combine(d1, "same.bin"), TestData.Random(15_000, 1));
+        File.WriteAllBytes(Path.Combine(d2, "same.bin"), TestData.Random(15_000, 2));
+
+        var (code, output) = Run("encode", Path.Combine(d1, "same.bin"), Path.Combine(d2, "same.bin"),
+            "-o", tmp.File("shards"), "-r", "900");
+        Assert.Equal(1, code); // ArgumentException path → exit 1
+        Assert.Contains("same archive path", output);
+        Assert.False(Directory.Exists(tmp.File("shards"))); // nothing half-written
+    }
+
+    [Fact]
+    public void MultiFile_SameNameInsideDifferentSubfolders_IsFine()
+    {
+        // The same name inside DIFFERENT subfolders keeps distinct paths — must round-trip.
+        using var tmp = new TempDir();
+        string proj = tmp.Sub("proj");
+        Directory.CreateDirectory(Path.Combine(proj, "a"));
+        Directory.CreateDirectory(Path.Combine(proj, "b"));
+        byte[] ca = TestData.Random(9_000, 1), cb = TestData.Random(9_000, 2);
+        File.WriteAllBytes(Path.Combine(proj, "a", "same.bin"), ca);
+        File.WriteAllBytes(Path.Combine(proj, "b", "same.bin"), cb);
+
+        string shards = tmp.File("shards");
+        Assert.Equal(0, Run("encode", proj, "-o", shards, "-r", "900").Code);
+        string dest = tmp.File("restored");
+        Assert.Equal(0, Run("decode", shards, "-o", dest).Code);
+        Assert.Equal(ca, File.ReadAllBytes(Path.Combine(dest, "a", "same.bin")));
+        Assert.Equal(cb, File.ReadAllBytes(Path.Combine(dest, "b", "same.bin")));
+    }
 }

@@ -71,19 +71,20 @@ internal sealed class Cli(AppSettings? settings = null)
                     ? "bundle"
                     : Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(input)));
                 string file = input;
-                string? tempTarDir = null;
+                string? tempTarDir = positional.Count > 1 || Directory.Exists(positional[0])
+                    ? Path.Combine(Path.GetTempPath(), "qrshard-tar-" + Guid.NewGuid().ToString("N")[..8])
+                    : null;
+                try
+                {
                 if (isArchive)
                 {
-                    tempTarDir = Path.Combine(Path.GetTempPath(), "qrshard-tar-" + Guid.NewGuid().ToString("N")[..8]);
-                    Directory.CreateDirectory(tempTarDir);
-                    file = Path.Combine(tempTarDir, inputName + ".tar");
+                    Directory.CreateDirectory(tempTarDir!);
+                    file = Path.Combine(tempTarDir!, inputName + ".tar");
                     preLog(positional.Count > 1
                         ? $"Archiving {positional.Count} inputs..."
                         : $"Archiving folder '{input}'...");
-                    WriteTar(positional, file);
+                    WriteTar(positional, file); // may throw on a name collision — finally still cleans up
                 }
-                try
-                {
 
                 Action<string> encLog = preLog;
 
@@ -165,7 +166,7 @@ internal sealed class Cli(AppSettings? settings = null)
                 }
                 finally
                 {
-                    if (tempTarDir is not null)
+                    if (tempTarDir is not null && Directory.Exists(tempTarDir))
                         Directory.Delete(tempTarDir, recursive: true);
                 }
             }
@@ -469,12 +470,14 @@ internal sealed class Cli(AppSettings? settings = null)
     /// Tars files and/or folders into one archive. A single folder is flattened to the archive
     /// root (its contents extract directly, matching the original folder-encode behavior); with
     /// multiple inputs each folder keeps its own name as a prefix so their trees cannot collide.
+    /// Distinct inputs that would land at the same archive path (e.g. two loose files with the
+    /// same name from different folders) are refused rather than silently overwritten — this is
+    /// an integrity tool; losing a file without a word is the one thing it must never do.
     /// </summary>
     private static void WriteTar(IReadOnlyList<string> inputs, string tarPath)
     {
         bool prefixFolders = inputs.Count > 1;
-        using var fs = new FileStream(tarPath, FileMode.Create, FileAccess.Write, FileShare.None);
-        using var writer = new System.Formats.Tar.TarWriter(fs, System.Formats.Tar.TarEntryFormat.Pax);
+        var entries = new List<(string Source, string Name)>();
         foreach (string input in inputs)
         {
             if (Directory.Exists(input))
@@ -484,14 +487,25 @@ internal sealed class Cli(AppSettings? settings = null)
                 foreach (string f in Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories))
                 {
                     string rel = Path.GetRelativePath(root, f).Replace(Path.DirectorySeparatorChar, '/');
-                    writer.WriteEntry(f, prefix + rel);
+                    entries.Add((f, prefix + rel));
                 }
             }
             else
             {
-                writer.WriteEntry(input, Path.GetFileName(input));
+                entries.Add((input, Path.GetFileName(input)));
             }
         }
+
+        var collision = entries.GroupBy(e => e.Name, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        if (collision is not null)
+            throw new ArgumentException(
+                $"Two inputs map to the same archive path '{collision.Key}'; rename one or place them in separate folders " +
+                "(a folder input keeps its subtree, so files with the same name in different subfolders are fine).");
+
+        using var fs = new FileStream(tarPath, FileMode.Create, FileAccess.Write, FileShare.None);
+        using var writer = new System.Formats.Tar.TarWriter(fs, System.Formats.Tar.TarEntryFormat.Pax);
+        foreach (var (source, name) in entries)
+            writer.WriteEntry(source, name);
     }
 
     /// <summary>Opens the slideshow in the platform's default browser (suppressed by the
