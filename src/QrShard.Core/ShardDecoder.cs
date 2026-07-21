@@ -141,6 +141,62 @@ internal sealed class ShardDecoder(
 
     public DecodedShard DecodeImage(string path, DecodeScratch scratch) => DecodeImage(path, scratch, null);
 
+    /// <summary>Decodes one image already in memory (encoded bytes), for callers that receive
+    /// captures over a wire rather than as files — the incremental session path.</summary>
+    public DecodedShard DecodeImageBytes(ReadOnlySpan<byte> imageBytes, DecodeScratch scratch, string label)
+    {
+        Image<Rgb24> image;
+        try
+        {
+            image = Image.Load<Rgb24>(imageBytes);
+        }
+        catch (ImageFormatException ex)
+        {
+            throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
+        }
+        Bitmap bmp;
+        using (image)
+        {
+            var px = scratch.Pixels(image.Width * image.Height);
+            image.CopyPixelDataTo(px.AsSpan(0, image.Width * image.Height));
+            bmp = new Bitmap(px, image.Width, image.Height);
+        }
+        return DecodeBitmapWithCameraFallback(bmp, scratch, label);
+    }
+
+    /// <summary>Axis-aligned decode with the camera-rectification fallback, shared by the file
+    /// and in-memory entry points.</summary>
+    private DecodedShard DecodeBitmapWithCameraFallback(Bitmap bmp, DecodeScratch scratch, string label)
+    {
+        try
+        {
+            return DecodeBitmap(bmp, scratch, label, null);
+        }
+        catch (ShardDecodeException axisAlignedError)
+        {
+            Bitmap? rectified;
+            try
+            {
+                rectified = cameraRectifier.TryRectify(bmp);
+            }
+            catch (ShardDecodeException)
+            {
+                rectified = null;
+            }
+            if (rectified is null)
+                throw;
+            try
+            {
+                return DecodeBitmap(rectified, scratch, label, null);
+            }
+            catch (ShardDecodeException cameraError)
+            {
+                throw new ShardDecodeException(
+                    $"Camera-rectified decode failed: {cameraError.Message} (axis-aligned attempt: {axisAlignedError.Message})");
+            }
+        }
+    }
+
     private DecodedShard DecodeImage(string path, DecodeScratch scratch, DecodeDiagnostics? diagnostics)
     {
         Bitmap bmp = LoadBitmap(path, scratch);
