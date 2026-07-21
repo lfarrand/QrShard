@@ -78,6 +78,58 @@ public class FuzzTests
     }
 
     [Fact]
+    public void CraftedValidHeaders_ThroughReassemblyMath_NeverCrash()
+    {
+        // Byte-mutation rarely lands on a valid header CRC, so it never exercises the stripe
+        // MATH with crafted-but-accepted geometry. This target builds CRC-valid headers with
+        // random field values, then runs deserialize + the completeness check + assembly —
+        // the divisor/array-size paths — asserting only ShardDecodeException may escape.
+        var crc = new Crc();
+        var parity = new ParityReassembler();
+        var assembler = new ShardAssembler();
+        for (int seed = 0; seed < Iterations; seed++)
+        {
+            var rng = new Random(seed);
+            int count = rng.Next(1, 40);
+            int stripeData = rng.Next(0, 40);
+            int stripeParity = rng.Next(0, 40);
+            byte flags = (byte)(rng.Next(2) == 0 ? 0 : ShardHeader.FlagParity | (rng.Next(2) == 0 ? ShardHeader.FlagFountain : 0));
+            var payload = TestData.Random(rng.Next(1, 32), seed);
+            var header = new ShardHeader
+            {
+                FileId = (ulong)rng.Next(),
+                Index = rng.Next(0, 40),
+                Count = count,
+                PayloadLength = payload.Length,
+                PayloadCrc32 = crc.Crc32(payload),
+                TotalLength = rng.Next(0, 10_000),
+                OriginalLength = rng.Next(0, 10_000),
+                Flags = flags,
+                Sha256 = new byte[32],
+                FileName = "f.bin",
+                StripeData = stripeData,
+                StripeParity = stripeParity,
+            };
+
+            // A directly-constructed shard bypasses Deserialize's guards, so completeness and
+            // assembly must be total on their own.
+            var shard = new DecodedShard(header, payload, "crafted", 0, 0);
+            try
+            {
+                parity.IsSetComplete([shard]);
+                assembler.Assemble([shard], null, _ => { });
+            }
+            catch (ShardDecodeException)
+            {
+            }
+            catch (Exception ex)
+            {
+                Assert.Fail($"crafted header crashed at seed {seed}: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
+    [Fact]
     public void ShardHeader_Deserialize_NeverCrashes()
     {
         var header = new ShardHeader

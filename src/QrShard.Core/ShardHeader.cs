@@ -110,6 +110,12 @@ internal sealed class ShardHeader
                 return null;
             if (!isParity && index >= count)
                 return null; // data ordinal must fall within the data range
+            // Cross-shard coding needs a positive stripe width: stripeData is a divisor and an
+            // array dimension in the reassembler and the completeness check. Reject the crafted
+            // combination here — the single choke point every header passes through — so no
+            // downstream math ever sees stripeData == 0 with parity present.
+            if (stripeParity > 0 && stripeData < 1)
+                return null;
 
             headerLength = bodyLen + 4;
             return new ShardHeader
