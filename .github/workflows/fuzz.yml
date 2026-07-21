@@ -1,0 +1,23 @@
+name: Fuzz (deep)
+
+on:
+  schedule:
+    - cron: '17 4 * * 1' # weekly, Monday 04:17 UTC
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    env:
+      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+      QRSHARD_FUZZ_ITERATIONS: '20000'
+      DOTNET_NOLOGO: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Deep randomized robustness run
+        run: dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release --filter "FullyQualifiedName~FuzzTests" --logger "console;verbosity=minimal"
