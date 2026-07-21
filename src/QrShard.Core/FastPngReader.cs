@@ -199,6 +199,7 @@ internal sealed class FastPngReader
 
         public override int Read(Span<byte> buffer)
         {
+            Span<byte> header = stackalloc byte[5]; // outside the loop: stackalloc in a loop never frees (CA2014)
             while (true)
             {
                 if (_remainingInBlock > 0)
@@ -210,7 +211,6 @@ internal sealed class FastPngReader
                 if (_finalSeen)
                     return 0;
 
-                Span<byte> header = stackalloc byte[5];
                 if (!ReadFully(_inner, header))
                     return 0; // truncated — surfaces as EndOfStreamException at the row reader
                 if ((header[0] & 0x06) != 0)
