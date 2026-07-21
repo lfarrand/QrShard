@@ -1,4 +1,8 @@
 using System.Text;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
+using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace QrShard;
 
@@ -15,6 +19,44 @@ internal sealed class SlideshowWriter : ISlideshowWriter
 {
     public const int DefaultIntervalMs = 500;
     public const int MinIntervalMs = 100;
+
+    /// <summary>
+    /// Writes slideshow.apng next to the shards: a single animated PNG cycling every image with
+    /// the given per-frame delay. Loops forever. An alternative to the HTML page for viewers
+    /// that prefer one media file (image viewers, video capture setups) — every frame is a
+    /// lossless, exact copy of its shard, so the recorded output decodes identically.
+    /// </summary>
+    public string WriteApng(string outDir, IReadOnlyList<string> imageFiles, int intervalMs)
+    {
+        if (intervalMs < MinIntervalMs)
+            throw new ArgumentException($"Slideshow interval must be at least {MinIntervalMs} ms.");
+        if (imageFiles.Count == 0)
+            throw new ArgumentException("No shard images to build a slideshow from.");
+
+        using var animation = Image.Load<Rgb24>(imageFiles[0]);
+        SetFrameTiming(animation.Frames.RootFrame.Metadata.GetPngMetadata(), intervalMs);
+        for (int i = 1; i < imageFiles.Count; i++)
+        {
+            using var next = Image.Load<Rgb24>(imageFiles[i]);
+            var frame = animation.Frames.AddFrame(next.Frames.RootFrame);
+            SetFrameTiming(frame.Metadata.GetPngMetadata(), intervalMs);
+        }
+
+        var pngMeta = animation.Metadata.GetPngMetadata();
+        pngMeta.RepeatCount = 0; // 0 = loop forever
+        string path = Path.Combine(outDir, "slideshow.apng");
+        animation.Save(path, new PngEncoder { ColorType = PngColorType.Rgb, BitDepth = PngBitDepth.Bit8 });
+        return path;
+    }
+
+    /// <summary>Each shard fully replaces the previous frame — Source blend (overwrite, never
+    /// alpha-composite) with background disposal — so every recorded frame is an exact copy.</summary>
+    private static void SetFrameTiming(PngFrameMetadata meta, int intervalMs)
+    {
+        meta.FrameDelay = new SixLabors.ImageSharp.Rational((uint)intervalMs, 1000);
+        meta.BlendMode = FrameBlendMode.Source;
+        meta.DisposalMode = FrameDisposalMode.RestoreToBackground;
+    }
 
     /// <summary>Writes slideshow.html next to the shard images; returns its path.</summary>
     public string Write(string outDir, IReadOnlyList<string> imageFiles, int intervalMs)

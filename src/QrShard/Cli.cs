@@ -55,16 +55,21 @@ internal sealed class Cli(AppSettings? settings = null)
             case "encode":
             {
                 var (positional, named, flags) = ParseArgs(args[1..]);
-                if (positional.Count != 1)
-                    return Help(@out, err, "encode requires exactly one input file or folder.");
-                string input = positional[0];
-                bool isArchive = Directory.Exists(input);
-                if (!isArchive && !File.Exists(input))
-                    return Help(@out, err, $"file not found: {input}");
+                if (positional.Count == 0)
+                    return Help(@out, err, "encode requires one or more input files or folders.");
+                foreach (string p in positional)
+                    if (!File.Exists(p) && !Directory.Exists(p))
+                        return Help(@out, err, $"not found: {p}");
+                bool json = flags.Contains("--json");
+                Action<string> preLog = json ? _ => { } : @out.WriteLine; // keep stdout clean for --json
 
-                // A folder is tar-ed into a temp archive and encoded as one payload; decoding
-                // extracts it back into a directory automatically.
-                string inputName = Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(input)));
+                // One file → encoded directly. A folder, or more than one input, is tar-ed into a
+                // temp archive and encoded as one payload; decoding extracts it back to a directory.
+                bool isArchive = positional.Count > 1 || Directory.Exists(positional[0]);
+                string input = positional[0];
+                string inputName = positional.Count > 1
+                    ? "bundle"
+                    : Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(input)));
                 string file = input;
                 string? tempTarDir = null;
                 if (isArchive)
@@ -72,16 +77,27 @@ internal sealed class Cli(AppSettings? settings = null)
                     tempTarDir = Path.Combine(Path.GetTempPath(), "qrshard-tar-" + Guid.NewGuid().ToString("N")[..8]);
                     Directory.CreateDirectory(tempTarDir);
                     file = Path.Combine(tempTarDir, inputName + ".tar");
-                    @out.WriteLine($"Archiving folder '{input}'...");
-                    System.Formats.Tar.TarFile.CreateFromDirectory(input, file, includeBaseDirectory: false);
+                    preLog(positional.Count > 1
+                        ? $"Archiving {positional.Count} inputs..."
+                        : $"Archiving folder '{input}'...");
+                    WriteTar(positional, file);
                 }
                 try
                 {
 
-                // Flag > appsettings.json EncodeDefaults > built-in default. The camera profile
-                // swaps in photo-appropriate density defaults (big cells, few colors, heavy
-                // ECC); explicit flags still win.
+                Action<string> encLog = preLog;
+
+                // Precedence: flag > --profile preset > appsettings.json EncodeDefaults >
+                // built-in default. The camera profile swaps in photo-appropriate density
+                // defaults (big cells, few colors, heavy ECC); explicit flags still win.
                 var defaults = settings.EncodeDefaults;
+                string? profileName = Get(named, "--profile");
+                if (profileName is not null)
+                {
+                    if (!settings.EncodeProfiles.TryGetValue(profileName, out var profile))
+                        return Help(@out, err, $"unknown profile '{profileName}'. Defined: {(settings.EncodeProfiles.Count == 0 ? "(none)" : string.Join(", ", settings.EncodeProfiles.Keys))}");
+                    defaults = profile;
+                }
                 bool camera = flags.Contains("--camera");
                 string resolutionValue = Get(named, "-r", "--resolution") ?? defaults.Resolution;
                 var (width, height, resolutionNote) = ResolveResolution(resolutionValue);
@@ -105,12 +121,29 @@ internal sealed class Cli(AppSettings? settings = null)
                     Path.GetDirectoryName(Path.GetFullPath(Path.TrimEndingDirectorySeparator(input)))!,
                     inputName + settings.ShardFolderSuffix);
 
-                @out.WriteLine($"Encoding '{input}' → {outDir}");
-                @out.WriteLine($"  {opt.Width}x{opt.Height}px{resolutionNote}, cell {opt.CellPx}px, {opt.BitsPerCell} bits/cell, " +
-                               $"ECC parity {opt.EccParity}, recovery {opt.RecoveryPercent}%, " +
-                               $"format {opt.ImageFormat}, compression {(opt.Compress ? "on" : "off")}" +
-                               (camera ? ", camera profile (finder patterns)" : ""));
-                var result = services.Encoder.Encode(file, outDir, opt, @out.WriteLine);
+                encLog($"Encoding '{input}' → {outDir}");
+                encLog($"  {opt.Width}x{opt.Height}px{resolutionNote}, cell {opt.CellPx}px, {opt.BitsPerCell} bits/cell, " +
+                       $"ECC parity {opt.EccParity}, recovery {opt.RecoveryPercent}%, " +
+                       $"format {opt.ImageFormat}, compression {(opt.Compress ? "on" : "off")}" +
+                       (camera ? ", camera profile (finder patterns)" : ""));
+                var result = services.Encoder.Encode(file, outDir, opt, encLog);
+
+                string? slideshowPath = null;
+                if (flags.Contains("--video"))
+                {
+                    int intervalMs = GetInt(named, "-i", "--interval", SlideshowWriter.DefaultIntervalMs);
+                    bool apng = string.Equals(Get(named, "--slideshow"), "apng", StringComparison.OrdinalIgnoreCase);
+                    slideshowPath = apng
+                        ? services.Slideshow.WriteApng(outDir, result.Files, intervalMs)
+                        : services.Slideshow.Write(outDir, result.Files, intervalMs);
+                }
+
+                if (json)
+                {
+                    @out.WriteLine(new JsonReports().EncodeReport(result, outDir, slideshowPath));
+                    return 0;
+                }
+
                 @out.WriteLine($"Done: {result.ImageCount} image(s) of {result.Width}x{result.Height}px, up to {result.BytesPerImage:N0} payload bytes each.");
                 if (result.ParityImages > 0)
                     @out.WriteLine(opt.FountainPercent > 0
@@ -118,15 +151,15 @@ internal sealed class Cli(AppSettings? settings = null)
                           $"any ~{result.StripeData} captured frames per stripe reconstruct the data."
                         : $"  {result.DataImages} data + {result.ParityImages} parity image(s); " +
                           $"can recover up to {result.StripeParity} lost image(s) per {result.StripeData + result.StripeParity}.");
-
-                if (flags.Contains("--video"))
+                if (slideshowPath is not null)
                 {
                     int intervalMs = GetInt(named, "-i", "--interval", SlideshowWriter.DefaultIntervalMs);
-                    string slideshow = services.Slideshow.Write(outDir, result.Files, intervalMs);
-                    @out.WriteLine($"Slideshow: {slideshow} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
-                    @out.WriteLine("  Open it in a browser, press F11, and record the screen for at least one full cycle.");
+                    @out.WriteLine($"Slideshow: {slideshowPath} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
+                    @out.WriteLine(slideshowPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                        ? "  Open it, view fullscreen, and record the screen for at least one full cycle."
+                        : "  Open it in a browser, press F11, and record the screen for at least one full cycle.");
                     if (flags.Contains("--open"))
-                        OpenInBrowser(slideshow, @out);
+                        OpenInBrowser(slideshowPath, @out);
                 }
                 return 0;
                 }
@@ -161,7 +194,10 @@ internal sealed class Cli(AppSettings? settings = null)
                 {
                     double fps = GetDouble(named, "--fps", 8.0);
                     @out.WriteLine($"Decoding video '{positional[0]}' (extracting at {fps} fps)...");
-                    var fromVideo = services.VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps, @out.WriteLine, out _, password);
+                    // Escalate fps automatically for file recordings unless the user pinned --fps.
+                    bool userSetFps = Get(named, "--fps") is not null;
+                    var fromVideo = services.VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps,
+                        @out.WriteLine, out _, password, decodeWorkers: 1, escalateFps: !userSetFps);
                     @out.WriteLine($"Restored {fromVideo.Count} file(s).");
                     return 0;
                 }
@@ -429,6 +465,35 @@ internal sealed class Cli(AppSettings? settings = null)
         return 3;
     }
 
+    /// <summary>
+    /// Tars files and/or folders into one archive. A single folder is flattened to the archive
+    /// root (its contents extract directly, matching the original folder-encode behavior); with
+    /// multiple inputs each folder keeps its own name as a prefix so their trees cannot collide.
+    /// </summary>
+    private static void WriteTar(IReadOnlyList<string> inputs, string tarPath)
+    {
+        bool prefixFolders = inputs.Count > 1;
+        using var fs = new FileStream(tarPath, FileMode.Create, FileAccess.Write, FileShare.None);
+        using var writer = new System.Formats.Tar.TarWriter(fs, System.Formats.Tar.TarEntryFormat.Pax);
+        foreach (string input in inputs)
+        {
+            if (Directory.Exists(input))
+            {
+                string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(input));
+                string prefix = prefixFolders ? Path.GetFileName(root) + "/" : "";
+                foreach (string f in Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories))
+                {
+                    string rel = Path.GetRelativePath(root, f).Replace(Path.DirectorySeparatorChar, '/');
+                    writer.WriteEntry(f, prefix + rel);
+                }
+            }
+            else
+            {
+                writer.WriteEntry(input, Path.GetFileName(input));
+            }
+        }
+    }
+
     /// <summary>Opens the slideshow in the platform's default browser (suppressed by the
     /// QRSHARD_NO_LAUNCH environment variable, e.g. in tests and scripts).</summary>
     private static void OpenInBrowser(string path, TextWriter @out)
@@ -595,7 +660,7 @@ internal sealed class Cli(AppSettings? settings = null)
 
     private static bool IsImageFile(string path) =>
         Path.GetExtension(path).ToLowerInvariant()
-            is ".png" or ".bmp" or ".jpg" or ".jpeg" or ".webp" or ".tga" or ".qoi" or ".tif" or ".tiff";
+            is ".png" or ".apng" or ".bmp" or ".jpg" or ".jpeg" or ".webp" or ".tga" or ".qoi" or ".tif" or ".tiff";
 
     private static (List<string> Positional, Dictionary<string, string> Named, HashSet<string> Flags) ParseArgs(string[] args)
     {
@@ -670,10 +735,17 @@ internal sealed class Cli(AppSettings? settings = null)
                                          cycles the images forever — record the screen for a
                                          full cycle instead of screenshotting by hand
                 -i, --interval <ms>      Slideshow interval per image (default: 500, min 100)
+                --slideshow <kind>       With --video: "html" (default) or "apng" (a single
+                                         animated PNG cycling the shards)
                 --interleave2            v2 permuted interleave: spreads VERTICAL damage as well
                                          as horizontal (needs ECC; older decoders reject it)
+                --profile <name>         Apply a named encode preset from appsettings.json
+                                         (flags still override it)
+                --json                   Emit the encode result as JSON on stdout
                 --no-compress            Skip compression of the payload
-              qrshard send <file|folder> [encode options]
+                Multiple inputs (files and/or folders) are bundled into one archive and
+                extracted on decode: qrshard encode a.bin b.bin docs/ -o out.shards
+              qrshard send <file|folder...> [encode options]
                                          One-step sender: encode with a slideshow and open it
                                          in the default browser
 

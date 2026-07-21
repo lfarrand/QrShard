@@ -46,7 +46,7 @@ public class CliTests
     {
         var (code, _, err) = Run("encode", @"Z:\does\not\exist.bin");
         Assert.Equal(2, code);
-        Assert.Contains("file not found", err);
+        Assert.Contains("not found", err);
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public class CliTests
     {
         var (code, _, err) = Run("encode");
         Assert.Equal(2, code);
-        Assert.Contains("exactly one input file", err);
+        Assert.Contains("one or more input", err);
     }
 
     [Fact]

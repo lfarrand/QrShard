@@ -68,7 +68,7 @@ internal interface IParityReassembler
 internal interface IVideoDecoder
 {
     List<RestoredFile> Decode(string path, string? outputPath, double extractFps, Action<string> log,
-        out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1);
+        out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1, bool escalateFps = false);
 }
 
 /// <summary>Yields the frames of a recording (video file or animated image) in display order.</summary>
@@ -135,6 +135,8 @@ internal interface IFrameEdgeTracer
 internal interface ISlideshowWriter
 {
     string Write(string outDir, IReadOnlyList<string> imageFiles, int intervalMs);
+
+    string WriteApng(string outDir, IReadOnlyList<string> imageFiles, int intervalMs);
 }
 
 /// <summary>End-to-end round-trip self-test, run via `qrshard test`.</summary>

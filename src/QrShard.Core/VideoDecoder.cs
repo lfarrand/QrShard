@@ -56,12 +56,34 @@ internal sealed class VideoDecoder(
     }
 
     public List<RestoredFile> Decode(string path, string? outputPath, double extractFps, Action<string> log,
-        out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1)
+        out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1, bool escalateFps = false)
     {
-        var frames = frameSource.Frames(path, extractFps);
-        var shards = decodeWorkers > 1
-            ? CollectShardsParallel(frames, log, decodeWorkers, out stats)
-            : CollectShards(frames, log, out stats);
+        var shards = new List<DecodedShard>();
+        var seen = new HashSet<(ulong FileId, int Index, bool Parity)>();
+        int totalExamined = 0, totalDecoded = 0;
+        bool stoppedEarly = false;
+
+        // A re-extractable file source (not live capture) that decodes incomplete can be
+        // re-run at a higher extraction rate — the transfer may cycle faster than the frames
+        // we sampled. Passes accumulate into the shard set, stopping the moment it completes.
+        double fps = extractFps;
+        var ladder = escalateFps && IsVideoFile(path) ? new[] { fps, fps * 2, fps * 4 } : [fps];
+        foreach (double passFps in ladder)
+        {
+            if (passFps != extractFps)
+                log($"  set still incomplete — re-extracting at {passFps} fps");
+            var frames = frameSource.Frames(path, passFps);
+            bool complete = decodeWorkers > 1
+                ? CollectShardsParallel(frames, shards, seen, log, decodeWorkers, out var passStats)
+                : CollectShards(frames, shards, seen, log, out passStats);
+            totalExamined += passStats.FramesExamined;
+            totalDecoded += passStats.FramesDecoded;
+            stoppedEarly = passStats.StoppedEarly;
+            if (complete)
+                break;
+        }
+
+        stats = new VideoDecodeStats(totalExamined, totalDecoded, shards.Count, stoppedEarly);
         log($"  video: examined {stats.FramesExamined} frame(s), fully decoded {stats.FramesDecoded}, " +
             $"collected {stats.ShardsCollected} shard(s){(stats.StoppedEarly ? ", stopped early — set complete" : "")}");
         if (shards.Count == 0)
@@ -71,11 +93,12 @@ internal sealed class VideoDecoder(
 
     // ---------- Shard collection with dedupe + early stop ----------
 
-    private List<DecodedShard> CollectShards(IEnumerable<Bitmap> frames, Action<string> log, out VideoDecodeStats stats)
+    /// <summary>Collects into a caller-owned shard set (so escalation passes accumulate);
+    /// returns true when the set became complete.</summary>
+    private bool CollectShards(IEnumerable<Bitmap> frames, List<DecodedShard> shards,
+        HashSet<(ulong FileId, int Index, bool Parity)> seen, Action<string> log, out VideoDecodeStats stats)
     {
         var scratch = new DecodeScratch();
-        var shards = new List<DecodedShard>();
-        var seen = new HashSet<(ulong FileId, int Index, bool Parity)>();
         var signature = new byte[SignatureLength];
         var previousSignature = new byte[SignatureLength];
         bool hasPrevious = false;
@@ -121,7 +144,7 @@ internal sealed class VideoDecoder(
         }
 
         stats = new VideoDecodeStats(examined, decoded, shards.Count, stoppedEarly);
-        return shards;
+        return stoppedEarly || parityReassembler.IsSetComplete(shards);
     }
 
     /// <summary>
@@ -132,11 +155,10 @@ internal sealed class VideoDecoder(
     /// disposal kills ffmpeg. (File recordings keep the sequential path: its early-stop
     /// guarantees are exact, which the tests — and the "no wasted demux" promise — rely on.)
     /// </summary>
-    private List<DecodedShard> CollectShardsParallel(IEnumerable<Bitmap> frames, Action<string> log, int workers,
+    private bool CollectShardsParallel(IEnumerable<Bitmap> frames, List<DecodedShard> shards,
+        HashSet<(ulong FileId, int Index, bool Parity)> seen, Action<string> log, int workers,
         out VideoDecodeStats stats)
     {
-        var shards = new List<DecodedShard>();
-        var seen = new HashSet<(ulong FileId, int Index, bool Parity)>();
         using var queue = new System.Collections.Concurrent.BlockingCollection<(Bitmap Frame, int Index)>(workers * 2);
         using var cts = new CancellationTokenSource();
         int examined = 0, decodedCount = 0;
@@ -216,7 +238,7 @@ internal sealed class VideoDecoder(
         Task.WaitAll(workerTasks);
         producer.Wait();
         stats = new VideoDecodeStats(examined, decodedCount, shards.Count, stoppedEarly);
-        return shards;
+        return stoppedEarly || parityReassembler.IsSetComplete(shards);
     }
 
     /// <summary>
@@ -260,11 +282,46 @@ internal sealed class VideoDecoder(
             }
         }
 
+        // Sharpness gate: full finder detection + rectification is the most expensive per-frame
+        // work, and a motion-blurred handheld frame cannot decode anyway. A cheap high-frequency
+        // energy check rejects the blurriest frames before that work — the transfer cycles, so a
+        // sharp capture of the same shard comes around again.
+        if (FocusEnergy(frame) < BlurRejectThreshold)
+            throw new ShardDecodeException("Frame too blurred to attempt rectification.");
+
         var pose = cameraRectifier.DetectPose(frame)
             ?? throw new ShardDecodeException("No finder patterns in this frame.");
         var shard = decoder.DecodeBitmap(cameraRectifier.RectifyWithPose(frame, pose), scratch, $"frame {examined}");
         cachedPose = pose; // latch only after a successful decode
         return shard;
+    }
+
+    /// <summary>Mean squared horizontal-gradient over a sampled grid — a cheap focus proxy. A
+    /// sharp shard (hard cell edges) has high gradient energy; motion blur smears it toward 0.</summary>
+    internal const long BlurRejectThreshold = 40;
+
+    internal static long FocusEnergy(Bitmap frame)
+    {
+        const int grid = 48;
+        int w = frame.Width, h = frame.Height;
+        if (w < 4)
+            return long.MaxValue; // too small to gate meaningfully — never reject
+        long sum = 0;
+        int samples = 0;
+        for (int gy = 0; gy < grid; gy++)
+        {
+            int y = (2 * gy + 1) * h / (2 * grid);
+            for (int gx = 0; gx < grid; gx++)
+            {
+                int x = Math.Min(w - 2, (2 * gx + 1) * w / (2 * grid));
+                var a = frame.At(x, y);
+                var b = frame.At(x + 1, y);
+                int d = (a.R + a.G + a.B) / 3 - (b.R + b.G + b.B) / 3;
+                sum += (long)d * d;
+                samples++;
+            }
+        }
+        return samples == 0 ? long.MaxValue : sum / samples;
     }
 
     private const int SignatureGrid = 32;

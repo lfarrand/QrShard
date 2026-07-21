@@ -103,5 +103,105 @@ public sealed class QrShardCodec
     }
 }
 
+/// <summary>
+/// Per-file completeness within a decode session. <see cref="MissingImages"/> holds the
+/// zero-based ordinals of the data images not yet captured (matching the wire index); when
+/// <see cref="Recoverable"/> is true the file assembles even with some still missing, via
+/// parity or fountain frames.
+/// </summary>
+public sealed record QrShardFileStatus(
+    string FileName, int DataPresent, int DataTotal, int ParityPresent,
+    IReadOnlyList<int> MissingImages, bool Recoverable);
+
+/// <summary>Outcome of adding one image to a session.</summary>
+public sealed record QrShardAddResult(bool Accepted, bool WasNew, string? Error);
+
+/// <summary>
+/// Incremental decode: feed captures one at a time as they arrive (files or in-memory image
+/// bytes), inspect what is still missing, and assemble the moment the set is recoverable —
+/// the embedding counterpart to the CLI's --session/--watch. Not thread-safe; drive it from a
+/// single consumer. Duplicate captures are harmless (deduplicated by file/part identity).
+/// </summary>
+public sealed class QrShardDecodeSession(string? password = null)
+{
+    private readonly ShardDecoder _decoder = new();
+    private readonly ParityReassembler _parity = new();
+    private readonly ShardAssembler _assembler = new();
+    private readonly DecodeScratch _scratch = new();
+    private readonly List<DecodedShard> _shards = [];
+    private readonly HashSet<(ulong, int, bool)> _seen = [];
+
+    /// <summary>Decodes an image file and adds its shard to the session.</summary>
+    public QrShardAddResult AddImage(string path)
+    {
+        try
+        {
+            return Add(_decoder.DecodeImage(path, _scratch));
+        }
+        catch (ShardDecodeException ex)
+        {
+            return new QrShardAddResult(false, false, ex.Message);
+        }
+    }
+
+    /// <summary>Decodes an in-memory encoded image (PNG/BMP/…) and adds its shard.</summary>
+    public QrShardAddResult AddImageBytes(ReadOnlySpan<byte> imageBytes, string label = "image")
+    {
+        try
+        {
+            return Add(_decoder.DecodeImageBytes(imageBytes, _scratch, label));
+        }
+        catch (ShardDecodeException ex)
+        {
+            return new QrShardAddResult(false, false, ex.Message);
+        }
+    }
+
+    private QrShardAddResult Add(DecodedShard shard)
+    {
+        bool isNew = _seen.Add((shard.Header.FileId, shard.Header.Index, shard.Header.IsParity));
+        if (isNew)
+            _shards.Add(shard);
+        return new QrShardAddResult(true, isNew, null);
+    }
+
+    /// <summary>True when every file in the session can be fully reassembled.</summary>
+    public bool IsComplete => _shards.Count > 0 && _parity.IsSetComplete(_shards);
+
+    /// <summary>Per-file progress: what is present, what is missing, and whether parity covers it.</summary>
+    public IReadOnlyList<QrShardFileStatus> Status()
+    {
+        var result = new List<QrShardFileStatus>();
+        foreach (var group in _shards.GroupBy(s => s.Header.FileId))
+        {
+            var first = group.First().Header;
+            var have = group.Where(s => !s.Header.IsParity).Select(s => s.Header.Index).ToHashSet();
+            var missing = Enumerable.Range(0, first.Count).Where(i => !have.Contains(i)).ToList();
+            result.Add(new QrShardFileStatus(
+                first.FileName, have.Count, first.Count, group.Count(s => s.Header.IsParity),
+                missing, _parity.IsSetComplete([.. group])));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Assembles the collected shards into the restored file(s). Throws
+    /// <see cref="QrShardDecodeException"/> if the set is not yet complete (check
+    /// <see cref="IsComplete"/> first) or if verification fails.
+    /// </summary>
+    public IReadOnlyList<QrShardDecodedFile> Assemble(string? outputPath = null, Action<string>? progress = null)
+    {
+        try
+        {
+            var restored = _assembler.Assemble(_shards, outputPath, progress ?? (_ => { }), password);
+            return restored.Select(r => new QrShardDecodedFile(r.FileName, r.OutputPath, r.Length)).ToList();
+        }
+        catch (ShardDecodeException ex)
+        {
+            throw new QrShardDecodeException(ex.Message);
+        }
+    }
+}
+
 /// <summary>A decode failure; the message is user-facing and actionable.</summary>
 public sealed class QrShardDecodeException(string message) : Exception(message);
