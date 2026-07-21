@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\QrShard.Core\QrShard.Core.csproj" />
     <ProjectReference Include="..\..\src\QrShard\QrShard.csproj" />
   </ItemGroup>
 

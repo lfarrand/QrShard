@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/QrShard.Core/QrShard.Core.csproj" />
     <Project Path="src/QrShard/QrShard.csproj" />
   </Folder>
   <Folder Name="/tests/">

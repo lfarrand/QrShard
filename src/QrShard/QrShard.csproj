@@ -18,7 +18,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>qrshard</ToolCommandName>
     <PackageId>QrShard.Tool</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>Lee Farrand</Authors>
     <Description>Transfer any file between machines through the screen: encode to dense QR-style images, capture by screenshot, photo, or recording, and reconstitute bit-for-bit (SHA-256 verified).</Description>
     <PackageProjectUrl>https://github.com/lfarrand/QrShard</PackageProjectUrl>
@@ -27,6 +27,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\QrShard.Core\QrShard.Core.csproj" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
     <PackageReference Include="SixLabors.ImageSharp" Version="4.0.0" />
   </ItemGroup>
