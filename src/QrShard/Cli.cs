@@ -670,7 +670,12 @@ internal sealed class Cli(AppSettings? settings = null)
                                          cycles the images forever — record the screen for a
                                          full cycle instead of screenshotting by hand
                 -i, --interval <ms>      Slideshow interval per image (default: 500, min 100)
-                --no-compress            Skip deflate compression of the payload
+                --interleave2            v2 permuted interleave: spreads VERTICAL damage as well
+                                         as horizontal (needs ECC; older decoders reject it)
+                --no-compress            Skip compression of the payload
+              qrshard send <file|folder> [encode options]
+                                         One-step sender: encode with a slideshow and open it
+                                         in the default browser
 
               qrshard decode <folder|images...|recording> [-o <file>]
                                          Reconstitute the original file from captured images, or
@@ -685,16 +690,22 @@ internal sealed class Cli(AppSettings? settings = null)
                 --watch                  Keep watching the folder: decode captures as they land
                                          and assemble the moment the set completes (Ctrl+C
                                          stops; progress persists when --session is given)
-              qrshard receive [--device d] [--format f] [--fps n] [-o file] [-p pw]
-                                         LIVE receiver: read a webcam via ffmpeg, point it at
-                                         the sender's slideshow, and decode in real time —
-                                         stops automatically when the transfer completes
-                                         (Windows: --device "<webcam name>"; list with
+                --clipboard              (Windows) decode the bitmap on the clipboard —
+                                         Win+Shift+S a displayed shard, no file saving;
+                                         accumulates with --session
+              qrshard receive [--device d] [--screen] [--region x,y,w,h] [--fps n] [-o f] [-p pw]
+                                         LIVE receiver: decode a webcam pointed at the sender's
+                                         slideshow — or, with --screen, THIS machine's own
+                                         screen (put the slideshow in an RDP/VM window and
+                                         transfer out of locked-down remotes). Stops
+                                         automatically when the transfer completes.
+                                         (Windows webcams: --device "<name>"; list with
                                          ffmpeg -list_devices true -f dshow -i dummy)
-              qrshard calibrate [-o dir] [-r res]
-                                         Write a ladder of density probes; capture them like a
-                                         real transfer, then run qrshard calibrate <folder> to
-                                         get recommended -c/-b settings for YOUR setup
+              qrshard calibrate [-o dir] [-r res] [--camera]
+                                         Write a ladder of density probes (--camera for the
+                                         photo-capture ladder); capture them like a real
+                                         transfer, then run qrshard calibrate <folder> to get
+                                         recommended -c/-b settings for YOUR setup
               qrshard verify <folder|images...> [--session f] [--json]
                                          Report per-file completeness (missing images, parity
                                          coverage) without writing output; exit 0 when complete
