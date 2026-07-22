@@ -21,7 +21,11 @@ internal sealed class QuadSelector(CameraMath math) : IQuadSelector
     {
         var strong = clusters.Where(c => c.Count >= 2).OrderByDescending(c => c.Count).Take(12).ToList();
         if (strong.Count < 4)
-            return null;
+            // Partial occlusion (a finger/glare/edge-clip over one corner) leaves only three
+            // finders. Reconstruct the fourth by parallelogram completion so a common handheld
+            // capture that today fails outright still decodes — the payload CRC gates any bad
+            // reconstruction, so a wrong quad simply produces a capture that does not decode.
+            return strong.Count == 3 ? ThreeFinderQuad(strong) : null;
 
         FinderQuad? best = null;
         double bestArea = 0;
@@ -55,6 +59,58 @@ internal sealed class QuadSelector(CameraMath math) : IQuadSelector
             }
         }
         return best;
+    }
+
+    /// <summary>
+    /// Reconstructs a finder quad from exactly three clusters (one corner occluded). Identifies
+    /// the right-angle corner of the L they form, synthesizes the opposite corner by
+    /// parallelogram completion (fourth = a + c − vertex), and validates it with the same edge
+    /// and module checks as the four-finder path. Deliberately strict on the corner angle and
+    /// module agreement to bound false accepts — anything wrong is caught later by the CRC.
+    /// </summary>
+    private FinderQuad? ThreeFinderQuad(List<FinderCluster> three)
+    {
+        double minM = three.Min(s => s.Module), maxM = three.Max(s => s.Module);
+        if (maxM > minM * 1.6) // tighter than the 4-finder path: less evidence, demand more agreement
+            return null;
+        double avgModule = three.Average(s => s.Module);
+        var p = three.Select(s => (X: s.X, Y: s.Y)).ToArray();
+
+        // The right-angle vertex is the point whose two edges to the others are most perpendicular.
+        int vertex = -1;
+        double bestCos = double.MaxValue;
+        for (int i = 0; i < 3; i++)
+        {
+            int j = (i + 1) % 3, k = (i + 2) % 3;
+            double v1x = p[j].X - p[i].X, v1y = p[j].Y - p[i].Y;
+            double v2x = p[k].X - p[i].X, v2y = p[k].Y - p[i].Y;
+            double len1 = Math.Sqrt(v1x * v1x + v1y * v1y), len2 = Math.Sqrt(v2x * v2x + v2y * v2y);
+            if (len1 < avgModule * 8 || len2 < avgModule * 8)
+                return null; // corners implausibly close
+            double cos = Math.Abs((v1x * v2x + v1y * v2y) / (len1 * len2));
+            if (cos < bestCos)
+            {
+                bestCos = cos;
+                vertex = i;
+            }
+        }
+        if (vertex < 0 || bestCos > 0.30) // within ~17° of a right angle (allows moderate perspective)
+            return null;
+
+        int a = (vertex + 1) % 3, c = (vertex + 2) % 3;
+        var fourth = (X: p[a].X + p[c].X - p[vertex].X, Y: p[a].Y + p[c].Y - p[vertex].Y);
+        var pts = OrderConvex([p[vertex], p[a], fourth, p[c]]);
+        if (pts is null)
+            return null;
+
+        // Same opposite-edge and min-edge sanity as the four-finder path.
+        double e0 = math.Dist(pts[0], pts[1]), e1 = math.Dist(pts[1], pts[2]);
+        double e2 = math.Dist(pts[2], pts[3]), e3 = math.Dist(pts[3], pts[0]);
+        if (Math.Min(e0, e2) * 1.8 < Math.Max(e0, e2) || Math.Min(e1, e3) * 1.8 < Math.Max(e1, e3))
+            return null;
+        if (Math.Min(Math.Min(e0, e1), Math.Min(e2, e3)) < avgModule * 8)
+            return null;
+        return new FinderQuad(pts, avgModule);
     }
 
     /// <summary>Orders four points into a convex cycle around their centroid; null if not convex.</summary>

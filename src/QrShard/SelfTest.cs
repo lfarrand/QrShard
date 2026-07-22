@@ -39,6 +39,114 @@ internal sealed class SelfTest(IShardEncoder encoder, IShardDecoder decoder) : I
         return allPass;
     }
 
+    /// <summary>
+    /// Round-trips the USER's own file at THEIR settings through the simulated-screenshot
+    /// degradation and reports the ECC headroom actually consumed. Answers "will my file at my
+    /// settings survive?" — which the fixed-fixture <see cref="Run"/> cannot. It is a FLOOR
+    /// (clean synthetic pad + rescale + cursor), not a real-capture guarantee.
+    /// </summary>
+    public int RunFile(string filePath, EncodeOptions opt, TextWriter output)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "qrshard-filetest-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(root);
+        try
+        {
+            byte[] wantSha;
+            using (var fs = File.OpenRead(filePath))
+                wantSha = SHA256.HashData(fs);
+            long len = new FileInfo(filePath).Length;
+
+            string shardDir = Path.Combine(root, "shards");
+            var result = encoder.Encode(filePath, shardDir, opt);
+            output.WriteLine($"Testing '{Path.GetFileName(filePath)}' ({len:N0} bytes) at your settings:");
+            output.WriteLine($"  {result.ImageCount} image(s), {result.Width}x{result.Height}px, cell {opt.CellPx}px, " +
+                             $"{opt.BitsPerCell} bits/cell, ECC {opt.EccParity}{(opt.CameraMode ? ", camera profile" : "")}.");
+
+            bool exact = DecodeMatches(shardDir, wantSha, out _);
+            output.WriteLine($"  {(exact ? "PASS" : "FAIL")}  exact round-trip (pristine images)");
+
+            bool degradedOk = true;
+            double worstUtil = -1;
+            foreach (double scale in new[] { 1.0, 1.25, 1.5 })
+            {
+                string capDir = Path.Combine(root, $"cap{(int)(scale * 100)}");
+                Directory.CreateDirectory(capDir);
+                bool damage = scale == 1.25; // one pass draws a cursor over the data area
+                foreach (string f in result.Files)
+                    SimulateScreenshot(f, Path.Combine(capDir, Path.GetFileName(f)), scale, damage);
+                bool ok = DecodeMatches(capDir, wantSha, out double util);
+                degradedOk &= ok;
+                if (util >= 0)
+                    worstUtil = Math.Max(worstUtil, util);
+                string utilNote = util >= 0 ? $", ECC used {util:P0}" : "";
+                output.WriteLine($"  {(ok ? "PASS" : "FAIL")}  simulated screenshot: pad + {scale:0.00}x scale" +
+                                 $"{(damage ? " + cursor damage" : "")}{utilNote}");
+            }
+
+            bool pass = exact && degradedOk;
+            output.WriteLine();
+            if (pass)
+            {
+                string margin = worstUtil < 0 ? "no ECC — add --ecc for headroom against worse captures"
+                    : worstUtil < 0.5 ? "comfortable headroom"
+                    : worstUtil < 0.8 ? "tight — consider more --ecc or lower density"
+                    : "very tight — raise --ecc or lower density";
+                output.WriteLine(worstUtil >= 0
+                    ? $"PASS — survives the simulated-screenshot floor (worst-case ECC used {worstUtil:P0}, {margin})."
+                    : $"PASS — survives the simulated-screenshot floor ({margin}).");
+                output.WriteLine("This is a FLOOR: synthetic padding + rescale (+ a cursor). Real photos, glare, and angle");
+                output.WriteLine("are harsher — run `qrshard calibrate` against your actual screen/camera for real-world settings.");
+            }
+            else
+            {
+                output.WriteLine("FAIL — your file did NOT survive the simulated degradation at these settings.");
+                output.WriteLine("Lower the density (bigger --cell, fewer --bits), raise --ecc, or add --recovery, then test again.");
+            }
+            return pass ? 0 : 1;
+        }
+        catch (Exception ex) when (ex is IOException or ShardDecodeException or ArgumentException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            output.WriteLine($"error: {ex.Message}");
+            return 1;
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>Decodes an image folder and checks the SHA against the original; also reports the
+    /// worst-case ECC utilization across the images (-1 when no ECC or nothing decoded).</summary>
+    private bool DecodeMatches(string imageDir, byte[] wantSha, out double worstUtilization)
+    {
+        worstUtilization = -1;
+        var images = Directory.EnumerateFiles(imageDir, "*.png").ToList();
+        string outPath = Path.Combine(imageDir, "restored.out");
+        try
+        {
+            decoder.DecodeFolder(images, outPath, _ => { });
+        }
+        catch (ShardDecodeException)
+        {
+            return false;
+        }
+
+        foreach (string img in images)
+        {
+            var diag = decoder.Diagnose(img);
+            if (diag.Layout is { EccParity: > 0 } layout && diag.Shard is not null)
+            {
+                double correctable = Math.Max(1, layout.CodewordCount * (layout.EccParity / 2.0));
+                worstUtilization = Math.Max(worstUtilization, diag.Shard.CorrectedBytes / correctable);
+            }
+        }
+
+        byte[] gotSha;
+        using (var fs = File.OpenRead(outPath))
+            gotSha = SHA256.HashData(fs);
+        return gotSha.AsSpan().SequenceEqual(wantSha);
+    }
+
     private bool Case(string root, string name, byte[] content, EncodeOptions opt, double[] captureScales, bool damage = false)
     {
         Console.WriteLine($"\n=== {name} ({content.Length:N0} bytes) ===");

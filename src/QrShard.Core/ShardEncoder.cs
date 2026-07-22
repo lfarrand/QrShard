@@ -23,6 +23,11 @@ internal sealed record EncodeResult(
     int ImageCount, long BytesPerImage, int Width, int Height, List<string> Files,
     int DataImages, int ParityImages, int StripeData, int StripeParity);
 
+/// <summary>What an encode WOULD produce, computed without rendering — the dry-run preview.</summary>
+internal sealed record EncodePlan(
+    int ImageCount, int DataImages, int ParityImages, long BytesPerImage,
+    int Width, int Height, int StripeData, int StripeParity, string Format);
+
 /// <summary>
 /// The encode orchestrator: sizes the layout, plans stripes, computes cross-shard parity, and
 /// runs the parallel per-image render loop. Payload preparation, stripe planning, and
@@ -43,7 +48,22 @@ internal sealed class ShardEncoder(
     {
     }
 
-    public EncodeResult Encode(string filePath, string outDir, EncodeOptions opt, Action<string>? log = null)
+    /// <summary>Computes what an encode would produce (image counts, geometry) WITHOUT rendering —
+    /// backs `encode --dry-run`. Opens the payload so the count reflects real post-compression
+    /// size, which is cheap relative to rendering.</summary>
+    public EncodePlan Plan(string filePath, EncodeOptions opt)
+    {
+        bool fountain = ValidateEncodeOptions(opt);
+        string format = formats.Normalize(opt.ImageFormat);
+        long originalLength = FileSizeChecked(filePath);
+        string fileName = Path.GetFileName(filePath);
+        using var payload = payloadPreparer.Open(filePath, originalLength, opt.Compress, opt.Password, settings, out _, out _);
+        var g = ComputeGeometry(opt, fileName, payload.Source.Length, fountain);
+        return new EncodePlan(g.Count + g.ParityTotal, g.Count, g.ParityTotal, g.Capacity,
+            g.Layout.Width, g.Layout.Height, g.StripeData, g.StripeParity, format);
+    }
+
+    private static bool ValidateEncodeOptions(EncodeOptions opt)
     {
         if (opt.RecoveryPercent is < 0 or > MaxRecoveryPercent)
             throw new ArgumentException($"Recovery percent must be between 0 and {MaxRecoveryPercent}.");
@@ -51,11 +71,42 @@ internal sealed class ShardEncoder(
             throw new ArgumentException($"Fountain percent must be between 0 and {MaxFountainPercent}.");
         if (opt.FountainPercent > 0 && opt.RecoveryPercent > 0)
             throw new ArgumentException("Use either recovery parity or fountain coding, not both.");
-        bool fountain = opt.FountainPercent > 0;
-        string format = formats.Normalize(opt.ImageFormat);
-        long originalLength = new FileInfo(filePath).Length;
-        if (originalLength > MaxFileBytes)
+        return opt.FountainPercent > 0;
+    }
+
+    private static long FileSizeChecked(string filePath)
+    {
+        long len = new FileInfo(filePath).Length;
+        if (len > MaxFileBytes)
             throw new InvalidOperationException($"Files larger than {MaxFileBytes / 1_000_000:N0} MB are not supported.");
+        return len;
+    }
+
+    /// <summary>Layout + image/stripe counts for a given post-preparation payload size. Shared by
+    /// Encode and Plan so the dry-run count can never drift from the real one.</summary>
+    private (Layout Layout, int HeaderSize, int Capacity, int Count, int StripeData, int StripeParity, int Stripes, int ParityTotal)
+        ComputeGeometry(EncodeOptions opt, string fileName, long dataLength, bool fountain)
+    {
+        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity, opt.CameraMode,
+            opt.Interleave2);
+        int headerSize = ShardHeader.Size(fileName);
+        long capacityLong = layout.UsableBytes - headerSize;
+        if (capacityLong < 1)
+            throw new InvalidOperationException("Image capacity is too small for the header; increase resolution or density.");
+        int capacity = (int)capacityLong;
+        int count = Math.Max(1, (int)((dataLength + capacity - 1) / capacity));
+        var (stripeData, stripeParity) = fountain
+            ? stripePlanner.PlanFountain(count, opt.FountainPercent)
+            : stripePlanner.PlanStripes(count, opt.RecoveryPercent);
+        int stripes = stripeParity > 0 ? (count + stripeData - 1) / stripeData : 0;
+        return (layout, headerSize, capacity, count, stripeData, stripeParity, stripes, stripes * stripeParity);
+    }
+
+    public EncodeResult Encode(string filePath, string outDir, EncodeOptions opt, Action<string>? log = null)
+    {
+        bool fountain = ValidateEncodeOptions(opt);
+        string format = formats.Normalize(opt.ImageFormat);
+        long originalLength = FileSizeChecked(filePath);
         string fileName = Path.GetFileName(filePath);
 
         using var payload = payloadPreparer.Open(filePath, originalLength, opt.Compress, opt.Password, settings,
@@ -67,20 +118,8 @@ internal sealed class ShardEncoder(
         var source = payload.Source;
         long dataLength = source.Length;
 
-        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity, opt.CameraMode,
-            opt.Interleave2);
-        int headerSize = ShardHeader.Size(fileName);
-        long capacityLong = layout.UsableBytes - headerSize;
-        if (capacityLong < 1)
-            throw new InvalidOperationException("Image capacity is too small for the header; increase resolution or density.");
-        int capacity = (int)capacityLong;
-
-        int count = Math.Max(1, (int)((dataLength + capacity - 1) / capacity));
-        var (stripeData, stripeParity) = fountain
-            ? stripePlanner.PlanFountain(count, opt.FountainPercent)
-            : stripePlanner.PlanStripes(count, opt.RecoveryPercent);
-        int stripes = stripeParity > 0 ? (count + stripeData - 1) / stripeData : 0;
-        int parityTotal = stripes * stripeParity;
+        var (layout, headerSize, capacity, count, stripeData, stripeParity, stripes, parityTotal) =
+            ComputeGeometry(opt, fileName, dataLength, fountain);
 
         ulong fileId = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         var palette = paletteBuilder.Build(opt.BitsPerCell);
