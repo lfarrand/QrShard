@@ -23,11 +23,15 @@ internal sealed class InnerRectScanner : IInnerRectScanner
             throw new ShardDecodeException("Frame interior is too small to decode.");
         return new InnerRect(x0, y0, x1, y1);
 
+        // ClampedAt, not At: a frame candidate whose box touches an image border makes the walk
+        // probe i+dir one pixel outside the array; clamping reads the border pixel instead of
+        // indexing out of bounds. A clamped (dark) border finds no crossing, so Edge falls
+        // through to its clean ShardDecodeException rather than throwing IndexOutOfRange.
         double EdgeX(int start, int dir, int y) =>
-            Edge(start, dir, Math.Abs(frame.W), i => Lum(bmp.At(i, y)));
+            Edge(start, dir, Math.Abs(frame.W), i => Lum(bmp.ClampedAt(i, y)));
 
         double EdgeY(int start, int dir, int x) =>
-            Edge(start, dir, Math.Abs(frame.H), i => Lum(bmp.At(x, i)));
+            Edge(start, dir, Math.Abs(frame.H), i => Lum(bmp.ClampedAt(x, i)));
 
         // Walks from inside the frame toward the interior until luminance crosses 128,
         // then interpolates the crossing. Returns the subpixel edge coordinate.

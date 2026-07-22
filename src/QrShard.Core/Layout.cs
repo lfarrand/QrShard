@@ -185,6 +185,18 @@ internal sealed class Layout
             return null;
         if (eccParity is < 0 or > Fec.MaxParity)
             return null;
+        // Upper-bound and cross-check the geometry so a crafted CRC-16-valid strip (these 16-bit
+        // fields reach 65535) cannot drive an overflowing or absurd buffer size downstream —
+        // GridSampler sizes `streamLength = (int)((GridW*GridH*BitsPerCell+7)/8)`, which without a
+        // cap overflows int to a negative length or demands multi-GB. This mirrors the encoder
+        // invariants in Create: every dimension fits the max encodable image, and the inner
+        // rectangle equals the exact size the grid + gutters (metaH) + metadata/palette strips
+        // imply, so the whole strip must be internally consistent to be accepted.
+        if (gridW > MaxResolution || gridH > MaxResolution || cellPx > MaxCellPx || metaH > MaxResolution
+            || innerW is < 1 or > MaxResolution || innerH is < 1 or > MaxResolution)
+            return null;
+        if (innerW != 2 * metaH + gridW * cellPx || innerH != 6 * metaH + gridH * cellPx)
+            return null;
 
         return new Layout
         {

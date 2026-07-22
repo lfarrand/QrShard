@@ -150,16 +150,16 @@ internal sealed class ShardDecoder(
         {
             image = Image.Load<Rgb24>(imageBytes);
         }
-        catch (ImageFormatException ex)
+        // NotSupportedException too: ImageSharp throws it (not ImageFormatException) for a
+        // recognized-but-unsupported image, and this in-memory path is fed attacker-controlled bytes.
+        catch (Exception ex) when (ex is ImageFormatException or NotSupportedException)
         {
             throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
         }
         Bitmap bmp;
         using (image)
         {
-            var px = scratch.Pixels(image.Width * image.Height);
-            image.CopyPixelDataTo(px.AsSpan(0, image.Width * image.Height));
-            bmp = new Bitmap(px, image.Width, image.Height);
+            bmp = ToBitmap(image, scratch);
         }
         return DecodeBitmapWithCameraFallback(bmp, scratch, label);
     }
@@ -238,25 +238,39 @@ internal sealed class ShardDecoder(
     /// reader and falling back to ImageSharp for anything outside its truecolor subset.</summary>
     private Bitmap LoadBitmap(string path, DecodeScratch scratch)
     {
-        if (pngReader.TryRead(path, scratch, out Bitmap bmp))
-            return bmp;
-
-        Image<Rgb24> image;
         try
         {
-            image = Image.Load<Rgb24>(path);
+            if (pngReader.TryRead(path, scratch, out Bitmap bmp))
+                return bmp;
+            using var image = Image.Load<Rgb24>(path);
+            return ToBitmap(image, scratch);
         }
-        catch (ImageFormatException ex)
+        // A missing/deleted file, a directory path, a permission error, or a recognized-but-
+        // unsupported image (ImageSharp throws NotSupportedException for those) must all surface
+        // as the typed decode failure — so the session API returns an error result and
+        // DecodeFolder's per-image catch handles it — never leak a raw exception. TryRead is
+        // inside the try because its FileStream open throws UnauthorizedAccessException on a
+        // directory/ACL path, which its own catch filter does not swallow. ToBitmap's
+        // ShardDecodeException ("too large") is deliberately not in this filter, so it propagates.
+        catch (Exception ex) when (ex is ImageFormatException or IOException
+                                       or UnauthorizedAccessException or NotSupportedException)
         {
             throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
         }
+    }
 
-        using (image)
-        {
-            var px = scratch.Pixels(image.Width * image.Height);
-            image.CopyPixelDataTo(px.AsSpan(0, image.Width * image.Height));
-            return new Bitmap(px, image.Width, image.Height);
-        }
+    private const long MaxDecodablePixels = 500_000_000; // matches FastPngReader's cap
+
+    /// <summary>Copies a decoded ImageSharp frame into a pooled Bitmap, rejecting an implausibly
+    /// large image before the pixel-count multiply can overflow int.</summary>
+    private static Bitmap ToBitmap(Image<Rgb24> image, DecodeScratch scratch)
+    {
+        if ((long)image.Width * image.Height > MaxDecodablePixels)
+            throw new ShardDecodeException("Image is too large to decode.");
+        int count = image.Width * image.Height;
+        var px = scratch.Pixels(count);
+        image.CopyPixelDataTo(px.AsSpan(0, count));
+        return new Bitmap(px, image.Width, image.Height);
     }
 
     public DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path) =>
@@ -336,7 +350,7 @@ internal sealed class ShardDecoder(
         if ((header.Flags & ~ShardHeader.KnownFlags) != 0)
             throw new ShardDecodeException(
                 $"This shard uses features from a newer QrShard (unknown flags 0x{header.Flags & ~ShardHeader.KnownFlags:X2}). Update QrShard to decode it.");
-        if (headerLen + header.PayloadLength > stream.Length)
+        if ((long)headerLen + header.PayloadLength > stream.Length) // long: never overflow on a crafted length
         {
             Salvage();
             throw new ShardDecodeException("Shard header declares more payload than the image holds.");

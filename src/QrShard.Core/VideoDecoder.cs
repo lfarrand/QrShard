@@ -246,7 +246,7 @@ internal sealed class VideoDecoder(
         })).ToArray();
 
         Task.WaitAll(workerTasks);
-        producer.Wait();
+        producer.GetAwaiter().GetResult(); // unwrap: surface the producer's ShardDecodeException, not an AggregateException
         stats = new VideoDecodeStats(examined, decodedCount, shards.Count, stoppedEarly);
         return stoppedEarly || parityReassembler.IsSetComplete(shards);
     }

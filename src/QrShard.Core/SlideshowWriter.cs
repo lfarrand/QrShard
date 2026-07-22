@@ -85,17 +85,9 @@ internal sealed class SlideshowWriter : ISlideshowWriter
 
         foreach (string file in imageFiles)
         {
-            string mime = Path.GetExtension(file).ToLowerInvariant() switch
-            {
-                ".png" => "image/png",
-                ".bmp" => "image/bmp",
-                ".webp" => "image/webp",
-                ".gif" => "image/gif",
-                ".tiff" or ".tif" => "image/tiff",
-                _ => "application/octet-stream",
-            };
+            var (mime, bytes) = EmbedFrame(file);
             sb.Append("\"data:").Append(mime).Append(";base64,");
-            sb.Append(Convert.ToBase64String(File.ReadAllBytes(file)));
+            sb.Append(Convert.ToBase64String(bytes));
             sb.Append("\",\n");
         }
 
@@ -127,5 +119,30 @@ internal sealed class SlideshowWriter : ISlideshowWriter
         string path = Path.Combine(outDir, "slideshow.html");
         File.WriteAllText(path, sb.ToString());
         return path;
+    }
+
+    /// <summary>
+    /// Returns the (MIME, bytes) to embed for one shard. Browsers render png/bmp/webp/gif via an
+    /// &lt;img&gt; data URI, but not tga/qoi/tiff — so those are transcoded to a lossless PNG (a
+    /// pixel-exact copy that decodes identically). Without this the HTML slideshow silently shows
+    /// nothing for half the supported encode formats, and a screen recording of it transmits
+    /// nothing. (WriteApng already re-encodes every frame, so only this HTML path needed it.)
+    /// </summary>
+    private static (string Mime, byte[] Bytes) EmbedFrame(string file)
+    {
+        switch (Path.GetExtension(file).ToLowerInvariant())
+        {
+            case ".png": return ("image/png", File.ReadAllBytes(file));
+            case ".bmp": return ("image/bmp", File.ReadAllBytes(file));
+            case ".webp": return ("image/webp", File.ReadAllBytes(file));
+            case ".gif": return ("image/gif", File.ReadAllBytes(file));
+            default:
+                using (var img = Image.Load<Rgb24>(file))
+                using (var ms = new MemoryStream())
+                {
+                    img.Save(ms, new PngEncoder { ColorType = PngColorType.Rgb, BitDepth = PngBitDepth.Bit8 });
+                    return ("image/png", ms.ToArray());
+                }
+        }
     }
 }

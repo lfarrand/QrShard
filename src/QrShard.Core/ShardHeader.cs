@@ -111,6 +111,11 @@ internal sealed class ShardHeader
                 return null;
 
             bool isParity = (flags & FlagParity) != 0;
+            // Note: payloadLength is NOT bounded against stream.Length here — Deserialize is
+            // legitimately called on a header-only buffer (the payload lives in the full cell
+            // stream, validated at the consumer sites). Those guards use `(long)headerLen +
+            // PayloadLength` so a crafted PayloadLength = int.MaxValue can no longer overflow the
+            // comparison and slip past into the slice; it is rejected cleanly instead.
             if (count < 1 || count > MaxImages || payloadLength < 0 || stripeData < 0 || stripeParity < 0)
                 return null;
             if (index < 0)
