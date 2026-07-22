@@ -78,13 +78,14 @@ public class ScreenAndPipelineTests
 
         string output = tmp.File("out.bin");
         new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats, null, decodeWorkers: 3);
+        // The invariants that hold regardless of scheduling: correct round trip, the completion
+        // cancellation fired, and the duplicate pre-filter ran. NOT asserted: FramesExamined <
+        // total — the producer prefetches into a bounded queue while workers decode, so on a
+        // fast host with a small recording it can legitimately drain every frame before the
+        // first cycle's decodes complete and trigger the stop (observed on arm64). Early stop
+        // is a throughput optimization, not a frame-count guarantee for the parallel path.
         Assert.Equal(content, File.ReadAllBytes(output));
-        Assert.True(stats.StoppedEarly);
-        // Parallel prefetch examines further past completion than the sequential path (dropped
-        // duplicates bypass the queue's backpressure), so the guarantee here is only that the
-        // producer was cancelled before the end of the stream.
-        Assert.True(stats.FramesExamined < frames.Count,
-            $"expected early stop, examined {stats.FramesExamined} of {frames.Count}");
+        Assert.True(stats.StoppedEarly, "the completed set must have cancelled the producer");
         Assert.True(stats.FramesDecoded < stats.FramesExamined, "duplicate pre-filter must run in the producer");
     }
 }

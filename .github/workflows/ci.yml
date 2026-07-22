@@ -10,7 +10,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        # Every platform the release matrix publishes a binary for must also run the suite here,
+        # so a platform-specific failure is caught on the PR, not at release time. (linux-arm64
+        # was release-only until an arm64-timing test failure blocked its v1.3.0 binary.)
+        os: [windows-latest, ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
       # ImageSharp 4.x validates a license at build time. Add your Six Labors license key
