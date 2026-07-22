@@ -11,7 +11,7 @@
   <!-- Embeddable codec package; the CLI tool ships separately as QrShard.Tool. -->
   <PropertyGroup>
     <PackageId>QrShard.Core</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.3.0</Version>
     <Authors>Lee Farrand</Authors>
     <Description>Codec library for QrShard: encode any file into dense QR-style images and decode captures (screenshots, photos, recordings) back into the original, bit-for-bit (SHA-256 verified). Public API: QrShardCodec.</Description>
     <PackageProjectUrl>https://github.com/lfarrand/QrShard</PackageProjectUrl>
