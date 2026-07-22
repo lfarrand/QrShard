@@ -1,0 +1,7 @@
+{
+  "version": "v1.0.0",
+  "config": "highecc",
+  "expectedSha256": "cbf14533c060fd6376ed9e0294c7fc356fd8fa7171715ef2f6c6037ef76abfab",
+  "expectedLength": 6000,
+  "password": null
+}

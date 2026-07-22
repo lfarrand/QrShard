@@ -409,10 +409,16 @@ https://sixlabors.com/pricing/) and either drop `sixlabors.lic` at the solution 
 `SIXLABORS_LICENSE_KEY` repository secret). The license is build-time only; published binaries
 and end users need nothing.
 
-- `dotnet test` — 362 xUnit tests, ~5 s. Covers the codec math (CRC vectors, GF(2⁸) field laws,
-  Reed-Solomon incl. errors-and-erasures, interleaving, Cauchy and fountain erasure codes),
-  round trips across every density/ECC/format/flag combination, simulated screenshots and
-  camera photos, video recordings (duplicates, torn frames, early stop, camera video with pose
-  drift), encryption, archives, sessions, watch mode, fusion, calibration, and the CLI.
+- `dotnet test` — the xUnit suite (~15 s). Covers the codec math (CRC vectors, GF(2⁸) field
+  laws, Reed-Solomon incl. errors-and-erasures, interleaving, Cauchy and fountain erasure
+  codes), round trips across every density/ECC/format/flag combination, simulated screenshots
+  and camera photos, non-truecolor capture shapes, video recordings (duplicates, torn frames,
+  early stop, camera video with pose drift), encryption, archives, sessions, watch mode,
+  fusion, calibration, randomized robustness fuzzing of every untrusted-input parser, and the
+  CLI.
+- **Cross-version interop**: `tests/QrShard.Tests/golden/` holds frozen shard fixtures encoded
+  by each released tag (v1.0.0, v1.1.0, …); the suite asserts the current decoder still
+  reconstructs every one byte-for-byte, so a shard you encoded with an old release always
+  decodes. Regenerate/extend with `golden/regenerate.ps1` when tagging a new version.
 - `qrshard test` — end-to-end self-test at real resolutions, including simulated screenshots
   with cursor damage and a cross-shard recovery scenario.

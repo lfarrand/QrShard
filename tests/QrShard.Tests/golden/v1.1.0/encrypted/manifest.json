@@ -1,0 +1,7 @@
+{
+  "version": "v1.1.0",
+  "config": "encrypted",
+  "expectedSha256": "5b76d0b712f47cee274678e040b3f40e9f2969660a2391f6527b823207102ddc",
+  "expectedLength": 6000,
+  "password": "goldpw"
+}

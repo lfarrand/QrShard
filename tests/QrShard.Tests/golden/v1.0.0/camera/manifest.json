@@ -1,0 +1,7 @@
+{
+  "version": "v1.0.0",
+  "config": "camera",
+  "expectedSha256": "48a704a85b794b76dc5aa02db861b3ea9b3510572b8bbe899a91cf56821e804f",
+  "expectedLength": 2000,
+  "password": null
+}

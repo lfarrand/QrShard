@@ -1,0 +1,7 @@
+{
+  "version": "v1.1.0",
+  "config": "compressed",
+  "expectedSha256": "b305465bd31f586c5ded016f1e6192993afbaf99dbba1e6d3bcfe0d4d0ba202a",
+  "expectedLength": 6000,
+  "password": null
+}

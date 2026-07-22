@@ -1,0 +1,7 @@
+{
+  "version": "v1.1.0",
+  "config": "parity",
+  "expectedSha256": "5ec9dc32c2f7a7916a5c53231c194a914831951c2504d98873b727b7a414287a",
+  "expectedLength": 40000,
+  "password": null
+}
