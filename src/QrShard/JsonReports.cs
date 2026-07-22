@@ -9,6 +9,28 @@ namespace QrShard;
 /// </summary>
 internal sealed class JsonReports
 {
+    public string DryRunReport(EncodePlan plan, string outputDir)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
+        {
+            w.WriteStartObject();
+            w.WriteBoolean("dryRun", true);
+            w.WriteString("outputDir", outputDir);
+            w.WriteNumber("imageCount", plan.ImageCount);
+            w.WriteNumber("dataImages", plan.DataImages);
+            w.WriteNumber("recoveryImages", plan.ParityImages);
+            w.WriteNumber("bytesPerImage", plan.BytesPerImage);
+            w.WriteNumber("width", plan.Width);
+            w.WriteNumber("height", plan.Height);
+            w.WriteNumber("stripeData", plan.StripeData);
+            w.WriteNumber("stripeParity", plan.StripeParity);
+            w.WriteString("format", plan.Format);
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
+
     public string EncodeReport(EncodeResult result, string outputDir, string? slideshowPath)
     {
         using var ms = new MemoryStream();

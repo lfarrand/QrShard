@@ -58,7 +58,19 @@ internal sealed class Cli(AppSettings? settings = null)
         if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
             return Help(@out, err);
 
-        switch (args[0].ToLowerInvariant())
+        string command = args[0].ToLowerInvariant();
+        // Reject unknown/misspelled options up front. Without this, ParseArgs accepts any
+        // `-x value` pair blindly, so a typo like `--pasword pw` silently encodes UNENCRYPTED and
+        // `--recvery 30` silently yields zero parity — data-exposure/data-loss for an integrity
+        // tool. Validated against a per-command allowlist so it can't drift from the handlers.
+        if (ArgSpecs.TryGetValue(command, out var spec))
+        {
+            var (pos, nm, fl) = ParseArgs(args[1..]);
+            if (ValidateOptions(spec, nm, fl, pos) is { } optionError)
+                return Help(@out, err, optionError);
+        }
+
+        switch (command)
         {
             case "encode":
             {
@@ -110,25 +122,13 @@ internal sealed class Cli(AppSettings? settings = null)
                 bool camera = flags.Contains("--camera");
                 string resolutionValue = Get(named, "-r", "--resolution") ?? defaults.Resolution;
                 var (width, height, resolutionNote) = ResolveResolution(resolutionValue);
-                var opt = new EncodeOptions
-                {
-                    Width = width,
-                    Height = height,
-                    CellPx = GetInt(named, "-c", "--cell", camera ? 8 : defaults.CellPx),
-                    BitsPerCell = GetInt(named, "-b", "--bits", camera ? 2 : defaults.BitsPerCell),
-                    EccParity = GetInt(named, "-e", "--ecc", camera ? 32 : defaults.EccParity),
-                    RecoveryPercent = GetInt(named, "-R", "--recovery", defaults.RecoveryPercent),
-                    FountainPercent = GetInt(named, "-F", "--fountain", 0),
-                    ImageFormat = Get(named, "-f", "--format") ?? defaults.ImageFormat,
-                    Compress = !flags.Contains("--no-compress") && defaults.Compress,
-                    CameraMode = camera,
-                    Password = Get(named, "-p", "--password"),
-                    IsArchive = isArchive,
-                    Interleave2 = flags.Contains("--interleave2"),
-                };
+                var opt = BuildEncodeOptions(named, flags, defaults, camera, width, height) with { IsArchive = isArchive };
                 string outDir = Get(named, "-o", "--out") ?? Path.Combine(
                     Path.GetDirectoryName(Path.GetFullPath(Path.TrimEndingDirectorySeparator(input)))!,
                     inputName + settings.ShardFolderSuffix);
+
+                if (flags.Contains("--dry-run"))
+                    return DryRun(services.Encoder.Plan(file, opt), outDir, json, @out);
 
                 encLog($"Encoding '{input}' → {outDir}");
                 encLog($"  {opt.Width}x{opt.Height}px{resolutionNote}, cell {opt.CellPx}px, {opt.BitsPerCell} bits/cell, " +
@@ -229,7 +229,25 @@ internal sealed class Cli(AppSettings? settings = null)
                     return DecodeWithSession(services, images, sessionPath, Get(named, "-o", "--out"), password, @out);
 
                 @out.WriteLine($"Decoding {images.Count} image(s)...");
-                var restored = services.Decoder.DecodeFolder(images, Get(named, "-o", "--out"), @out.WriteLine, password);
+                var shards = services.Decoder.CollectShards(images, @out.WriteLine);
+                if (shards.Count == 0)
+                {
+                    err.WriteLine("error: no decodable shard images were found.");
+                    return 1;
+                }
+                // Distinguish "whole images still missing" (recoverable by capturing more) from a
+                // complete-but-corrupt set. Only the former should nudge toward the resumable flow
+                // and return the documented incomplete exit code; genuine corruption falls through
+                // to Assemble, which throws a CRC/SHA error handled as a hard failure (exit 1).
+                if (!services.Parity.IsSetComplete(shards))
+                {
+                    PrintSetStatus(@out, shards, services.Parity);
+                    @out.WriteLine("Incomplete — some images are still missing. Capture them and decode again, or:");
+                    @out.WriteLine("  • add --session <file> to accumulate captures across sittings (resumes from what you have),");
+                    @out.WriteLine("  • or --watch to decode images as they land and finish automatically.");
+                    return 3;
+                }
+                var restored = services.Assembler.Assemble(shards, Get(named, "-o", "--out"), @out.WriteLine, password);
                 @out.WriteLine($"Restored {restored.Count} file(s).");
                 return 0;
             }
@@ -389,7 +407,17 @@ internal sealed class Cli(AppSettings? settings = null)
             }
 
             case "test":
-                return services.SelfTest.Run() ? 0 : 1;
+            {
+                var (positional, named, tflags) = ParseArgs(args[1..]);
+                if (positional.Count == 0)
+                    return services.SelfTest.Run() ? 0 : 1; // built-in fixed-fixture self-test
+                if (positional.Count != 1 || !File.Exists(positional[0]))
+                    return Help(@out, err, "test takes no arguments (built-in self-test) or one file to round-trip at your settings.");
+                bool camera = tflags.Contains("--camera");
+                var (width, height, _) = ResolveResolution(Get(named, "-r", "--resolution") ?? settings.EncodeDefaults.Resolution);
+                var opt = BuildEncodeOptions(named, tflags, settings.EncodeDefaults, camera, width, height);
+                return services.SelfTest.RunFile(positional[0], opt, @out);
+            }
 
             default:
                 return Help(@out, err, $"unknown command: {args[0]}");
@@ -691,7 +719,7 @@ internal sealed class Cli(AppSettings? settings = null)
         var flags = new HashSet<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch" or "--screen" or "--open" or "--interleave2" or "--clipboard")
+            if (args[i] is "--no-compress" or "--camera" or "--video" or "--json" or "--watch" or "--screen" or "--open" or "--interleave2" or "--clipboard" or "--dry-run")
                 flags.Add(args[i]);
             else if (args[i].StartsWith('-') && i + 1 < args.Length)
                 named[args[i]] = args[++i];
@@ -714,6 +742,137 @@ internal sealed class Cli(AppSettings? settings = null)
     {
         string? v = Get(named, key);
         return v is null ? fallback : double.Parse(v, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Recognized options (take a value) and flags (boolean) per subcommand. The single
+    /// source of truth for option validation; keep in sync with each handler's Get/flags calls.</summary>
+    private sealed record ArgSpec(string[] Options, string[] Flags);
+
+    private static readonly Dictionary<string, ArgSpec> ArgSpecs = new()
+    {
+        ["encode"] = new(
+            ["-o", "--out", "-r", "--resolution", "-c", "--cell", "-b", "--bits", "-e", "--ecc",
+             "-R", "--recovery", "-F", "--fountain", "-f", "--format", "-p", "--password",
+             "-i", "--interval", "--slideshow", "--profile"],
+            ["--json", "--camera", "--no-compress", "--interleave2", "--video", "--open", "--dry-run"]),
+        // `test <file> [encode opts]` shares the encode surface, plus --camera for the photo profile.
+        ["test"] = new(
+            ["-r", "--resolution", "-c", "--cell", "-b", "--bits", "-e", "--ecc", "-p", "--password",
+             "-f", "--format", "--profile"],
+            ["--camera", "--no-compress", "--interleave2", "--json"]),
+        ["decode"] = new(["-o", "--out", "-p", "--password", "--session", "--fps"], ["--clipboard", "--watch"]),
+        ["verify"] = new(["--session"], ["--json"]),
+        ["info"] = new(["--heatmap"], ["--json"]),
+        ["receive"] = new(["-o", "--out", "-p", "--password", "--region", "--device", "--format", "--fps"], ["--screen"]),
+        ["calibrate"] = new(["-o", "--out", "-r", "--resolution"], ["--camera"]),
+    };
+
+    /// <summary>Returns an actionable error if any option/flag is unrecognized for the command, else null.</summary>
+    private static string? ValidateOptions(ArgSpec spec, Dictionary<string, string> named, HashSet<string> flags, List<string> positional)
+    {
+        var known = new HashSet<string>(spec.Options, StringComparer.Ordinal);
+        foreach (var f in spec.Flags)
+            known.Add(f);
+
+        // Named options and flags that are not part of this command's surface (catches --pasword,
+        // and a valid-but-wrong-command flag like --camera on decode).
+        foreach (string key in named.Keys)
+            if (!known.Contains(key))
+                return UnknownOption(key, known);
+        foreach (string flag in flags)
+            if (!known.Contains(flag))
+                return UnknownOption(flag, known);
+
+        // A '-'-prefixed positional is a misspelled flag that fell through ParseArgs (e.g. a typo'd
+        // trailing flag). Genuine negative-number values are never positional here.
+        foreach (string p in positional)
+            if (p.Length > 1 && p[0] == '-' && !(p.Length > 1 && (char.IsDigit(p[1]) || p[1] == '.')))
+                return UnknownOption(p, known);
+
+        // A value that is itself a known option means the option before it lost its value (e.g.
+        // `--recovery --camera` silently drops --recovery). Skip -p/--password: a password may
+        // legitimately start with '-'.
+        foreach (var (key, val) in named)
+            if (key is not ("-p" or "--password") && val.Length > 1 && val[0] == '-' && known.Contains(val))
+                return $"option '{key}' is missing a value ('{val}' is another option).";
+
+        return null;
+    }
+
+    private static string UnknownOption(string got, HashSet<string> known)
+    {
+        string? best = null;
+        int bestDist = int.MaxValue;
+        foreach (string k in known)
+        {
+            int d = Levenshtein(got, k);
+            if (d < bestDist)
+            {
+                bestDist = d;
+                best = k;
+            }
+        }
+        string hint = best is not null && bestDist <= 3 ? $" Did you mean '{best}'?" : "";
+        return $"unknown option '{got}'.{hint}";
+    }
+
+    private static int Levenshtein(string a, string b)
+    {
+        var d = new int[b.Length + 1];
+        for (int j = 0; j <= b.Length; j++)
+            d[j] = j;
+        for (int i = 1; i <= a.Length; i++)
+        {
+            int prev = d[0];
+            d[0] = i;
+            for (int j = 1; j <= b.Length; j++)
+            {
+                int tmp = d[j];
+                d[j] = a[i - 1] == b[j - 1] ? prev : 1 + Math.Min(prev, Math.Min(d[j], d[j - 1]));
+                prev = tmp;
+            }
+        }
+        return d[b.Length];
+    }
+
+    /// <summary>Maps the shared density options (-c/-b/-e/-f/-p/--camera/--interleave2/--no-compress)
+    /// from parsed args, honoring the camera-profile defaults. The encode path layers IsArchive/
+    /// recovery on top; `test` reuses it directly so the two can't diverge.</summary>
+    private static EncodeOptions BuildEncodeOptions(Dictionary<string, string> named, HashSet<string> flags,
+        AppSettings.EncodeDefaultSettings defaults, bool camera, int width, int height) => new()
+    {
+        Width = width,
+        Height = height,
+        CellPx = GetInt(named, "-c", "--cell", camera ? 8 : defaults.CellPx),
+        BitsPerCell = GetInt(named, "-b", "--bits", camera ? 2 : defaults.BitsPerCell),
+        EccParity = GetInt(named, "-e", "--ecc", camera ? 32 : defaults.EccParity),
+        RecoveryPercent = GetInt(named, "-R", "--recovery", defaults.RecoveryPercent),
+        FountainPercent = GetInt(named, "-F", "--fountain", 0),
+        ImageFormat = Get(named, "-f", "--format") ?? defaults.ImageFormat,
+        Compress = !flags.Contains("--no-compress") && defaults.Compress,
+        CameraMode = camera,
+        Password = Get(named, "-p", "--password"),
+        Interleave2 = flags.Contains("--interleave2"),
+    };
+
+    private const int DryRunImageWarnThreshold = 500;
+
+    /// <summary>Prints the encode plan (image counts, geometry) without rendering anything.</summary>
+    private static int DryRun(EncodePlan plan, string outDir, bool json, TextWriter @out)
+    {
+        if (json)
+        {
+            @out.WriteLine(new JsonReports().DryRunReport(plan, outDir));
+            return 0;
+        }
+        @out.WriteLine($"Dry run — no images written. This encode would produce, in {outDir}:");
+        string split = plan.ParityImages > 0
+            ? $"{plan.DataImages} data + {plan.ParityImages} recovery image(s)"
+            : $"{plan.DataImages} data image(s)";
+        @out.WriteLine($"  {plan.ImageCount} image(s) of {plan.Width}x{plan.Height}px ({split}), up to {plan.BytesPerImage:N0} payload bytes each, format {plan.Format}.");
+        if (plan.ImageCount > DryRunImageWarnThreshold)
+            @out.WriteLine($"  note: {plan.ImageCount} images is a lot to capture — raise density with a larger --resolution, bigger --cell, or more --bits, or lower --recovery.");
+        return 0;
     }
 
     private static int Help(TextWriter @out, TextWriter err, string? error = null)
@@ -764,6 +923,8 @@ internal sealed class Cli(AppSettings? settings = null)
                 --profile <name>         Apply a named encode preset from appsettings.json
                                          (flags still override it)
                 --json                   Emit the encode result as JSON on stdout
+                --dry-run                Print the image count and geometry without writing any
+                                         images (preview before a folder emits hundreds of PNGs)
                 --no-compress            Skip compression of the payload
                 Multiple inputs (files and/or folders) are bundled into one archive and
                 extracted on decode: qrshard encode a.bin b.bin docs/ -o out.shards
@@ -808,7 +969,11 @@ internal sealed class Cli(AppSettings? settings = null)
                                          Show and validate a single shard image; --heatmap renders
                                          a per-cell ECC damage map (green=clean, red=corrected,
                                          dark red=beyond correction) even for failed decodes
-              qrshard test               Round-trip self-test, including simulated screenshots.
+              qrshard test [<file> [encode opts]]
+                                         With no file: built-in round-trip self-test. With a file:
+                                         encode YOUR file at YOUR settings (-c/-b/-e/--camera/...),
+                                         run it through simulated screenshots, and report whether
+                                         it survives and how much ECC headroom it used.
 
             Density guide (per image, after default ECC): bytes ≈ cells x bits/cell / 8 x 0.94.
               Robust default (2160px, cell 3, 4 bits) ≈ 216 KB/image.

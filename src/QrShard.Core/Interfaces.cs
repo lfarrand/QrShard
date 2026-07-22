@@ -6,6 +6,8 @@ namespace QrShard;
 internal interface IShardEncoder
 {
     EncodeResult Encode(string filePath, string outDir, EncodeOptions options, Action<string>? log = null);
+
+    EncodePlan Plan(string filePath, EncodeOptions options);
 }
 
 /// <summary>Decodes captured shard images back into the original file(s).</summary>
@@ -143,4 +145,8 @@ internal interface ISlideshowWriter
 internal interface ISelfTest
 {
     bool Run();
+
+    /// <summary>Round-trips the user's own file at their settings through simulated screenshots;
+    /// returns a process exit code (0 = survived).</summary>
+    int RunFile(string filePath, EncodeOptions options, TextWriter output);
 }
