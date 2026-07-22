@@ -63,7 +63,11 @@ internal sealed class FastPngReader
                 int bitDepth = ihdr[8], colorType = ihdr[9], compression = ihdr[10], filter = ihdr[11], interlace = ihdr[12];
                 if (bitDepth != 8 || (colorType != 2 && colorType != 6) || compression != 0 || filter != 0 || interlace != 0)
                     return false;
-                if (width < 1 || height < 1 || (long)width * height > 500_000_000)
+                // Bound EACH dimension, not just the product: an extreme aspect ratio (e.g.
+                // 500,000,000 x 1) passes a product cap yet makes the per-row buffer
+                // (rowBytes = width * bytesPerPixel) balloon to multiple GB. 100k on a side is far
+                // beyond any real capture while keeping legitimate square/near-square images.
+                if (width is < 1 or > 100_000 || height is < 1 or > 100_000 || (long)width * height > 500_000_000)
                     return false;
                 bytesPerPixel = colorType == 2 ? 3 : 4;
                 haveHeader = true;

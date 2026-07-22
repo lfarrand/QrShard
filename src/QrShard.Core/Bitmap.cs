@@ -74,5 +74,5 @@ internal sealed class Bitmap(Rgb24[] px, int width, int height)
         }
     }
 
-    private Rgb24 ClampedAt(int x, int y) => At(Math.Clamp(x, 0, Width - 1), Math.Clamp(y, 0, Height - 1));
+    public Rgb24 ClampedAt(int x, int y) => At(Math.Clamp(x, 0, Width - 1), Math.Clamp(y, 0, Height - 1));
 }

@@ -50,7 +50,7 @@ internal sealed class PhotoFusion(Fec fec, Crc crc) : IPhotoFusion
                 continue;
 
             var header = ShardHeader.Deserialize(stream, out int headerLen);
-            if (header is null || headerLen + header.PayloadLength > stream.Length)
+            if (header is null || (long)headerLen + header.PayloadLength > stream.Length) // long: crafted-length safe
                 continue;
             byte[] payload = stream[headerLen..(headerLen + header.PayloadLength)];
             if (crc.Crc32(payload) != header.PayloadCrc32)

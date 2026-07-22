@@ -33,6 +33,10 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         var offsets = Math.Min(cellW, cellH) >= 3.5 ? NineOffsets : CenterOnly;
 
         int bits = layout.BitsPerCell;
+        // Defense in depth: Layout.UnpackMetadata already bounds the geometry, but guard the
+        // allocation site directly so no path can size a negative or absurd buffer from TotalBits.
+        if (layout.TotalBytes is < 0 or > (long)Layout.MaxResolution * Layout.MaxResolution)
+            throw new ShardDecodeException("Shard metadata declares an implausible data-grid size.");
         int streamLength = (int)((layout.TotalBits + 7) / 8);
         byte[] stream = scratch.ClearedCells(streamLength);
         // Ambiguity flags + second-choice values feed erasure and Chase decoding — only

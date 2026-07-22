@@ -32,16 +32,24 @@ internal sealed class Cli(AppSettings? settings = null)
                 provider.GetRequiredService<ICalibration>());
             return RunCore(args, @out, err, cfg, services);
         }
-        catch (ShardDecodeException ex)
+        catch (Exception ex)
         {
-            err.WriteLine($"error: {ex.Message}");
-            return 1;
-        }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException
-                                       or UnauthorizedAccessException or FormatException or OverflowException)
-        {
-            err.WriteLine($"error: {ex.Message}");
-            return 1;
+            // A bad image decoded under Parallel.For (or the pipelined producer) surfaces wrapped
+            // in AggregateException; unwrap so the handlers see the real type. Handle only when
+            // EVERY surfaced exception is one we translate — otherwise rethrow, so an unexpected
+            // sibling (a real bug) is never masked by a handled one that merely sorted first.
+            var inners = ex is AggregateException agg
+                ? (IReadOnlyList<Exception>)agg.Flatten().InnerExceptions
+                : [ex];
+            static bool Handled(Exception e) => e is ShardDecodeException or ArgumentException
+                or InvalidOperationException or IOException or UnauthorizedAccessException
+                or FormatException or OverflowException;
+            if (inners.Count > 0 && inners.All(Handled))
+            {
+                err.WriteLine($"error: {inners[0].Message}");
+                return 1;
+            }
+            throw;
         }
     }
 
