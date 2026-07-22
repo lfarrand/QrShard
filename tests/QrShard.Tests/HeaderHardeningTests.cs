@@ -77,4 +77,43 @@ public class HeaderHardeningTests
         Assert.NotNull(ShardHeader.Deserialize(BuildHeaderBytes(10, 8, 2), out _));
         Assert.NotNull(ShardHeader.Deserialize(BuildHeaderBytes(10, 0, 0), out _)); // no cross-shard code
     }
+
+    [Theory]
+    // The geometry fields had lower bounds but no upper bounds, so their products could overflow
+    // int or allocate absurd arrays in the reassembler. Each of these is CRC-valid yet must be
+    // rejected at deserialize.
+    [InlineData(100_000, 1, 30_000)]      // stripes*StripeParity = 3e9 → overflowed int (the reported bug)
+    [InlineData(5_000_000, 1, 21)]        // 5e6 * 21 = 1.05e8 > 100M ordinal ceiling
+    [InlineData(10_000_000, 8, 2)]        // Count above MaxImages
+    [InlineData(1_000, 999, 2)]           // stripeData above a stripe's capacity (255)
+    public void CraftedOversizeGeometry_IsRejectedAtDeserialize(int count, int stripeData, int stripeParity)
+    {
+        byte[] bytes = BuildHeaderBytes(count, stripeData, stripeParity, ShardHeader.FlagParity);
+        Assert.Null(ShardHeader.Deserialize(bytes, out _));
+    }
+
+    [Fact]
+    public void PlausibleLargeCauchyGeometry_StillAccepted()
+    {
+        // A big-but-legal encode: 2M data images, full 254-wide Cauchy stripes with 1 parity each
+        // (stripes ≈ 7875, ordinal space ≈ 7875 ≪ ceiling). Must not be caught by the new bounds.
+        Assert.NotNull(ShardHeader.Deserialize(BuildHeaderBytes(2_000_000, 254, 1, ShardHeader.FlagParity), out _));
+    }
+
+    [Fact]
+    public void FormerlyCrashingHeader_ReachingIsSetComplete_DoesNotCrash()
+    {
+        // Directly constructed (bypassing Deserialize's guards) — the reassembler's own defense
+        // must still make this total, never an OverflowException.
+        var header = new ShardHeader
+        {
+            FileId = 1, Index = 0, Count = 100_000, PayloadLength = 4,
+            PayloadCrc32 = new Crc().Crc32([1, 2, 3, 4]), TotalLength = 4, OriginalLength = 4,
+            Flags = ShardHeader.FlagParity, Sha256 = new byte[32], FileName = "x",
+            StripeData = 1, StripeParity = 30_000,
+        };
+        var shard = new DecodedShard(header, [1, 2, 3, 4], "crafted", 0, 0);
+        var ex = Record.Exception(() => new ParityReassembler().IsSetComplete([shard]));
+        Assert.True(ex is null or ShardDecodeException, $"unexpected {ex?.GetType().Name}: {ex?.Message}");
+    }
 }

@@ -68,10 +68,12 @@ internal sealed class VideoDecoder(
         // we sampled. Passes accumulate into the shard set, stopping the moment it completes.
         double fps = extractFps;
         var ladder = escalateFps && IsVideoFile(path) ? new[] { fps, fps * 2, fps * 4 } : [fps];
-        foreach (double passFps in ladder)
+        for (int pass = 0; pass < ladder.Length; pass++)
         {
-            if (passFps != extractFps)
+            double passFps = ladder[pass];
+            if (pass > 0)
                 log($"  set still incomplete — re-extracting at {passFps} fps");
+            int shardsBefore = shards.Count;
             var frames = frameSource.Frames(path, passFps);
             bool complete = decodeWorkers > 1
                 ? CollectShardsParallel(frames, shards, seen, log, decodeWorkers, out var passStats)
@@ -81,6 +83,14 @@ internal sealed class VideoDecoder(
             stoppedEarly = passStats.StoppedEarly;
             if (complete)
                 break;
+            // A re-extraction pass samples the video more densely than the last, so if it added
+            // no new shards the video's decodable content is saturated — a still-denser pass
+            // cannot reveal shards that simply are not in it. Stop rather than re-demux again.
+            if (pass > 0 && shards.Count == shardsBefore)
+            {
+                log("  higher-rate pass found no new shards — video is fully sampled, stopping");
+                break;
+            }
         }
 
         stats = new VideoDecodeStats(totalExamined, totalDecoded, shards.Count, stoppedEarly);

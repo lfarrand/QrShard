@@ -10,6 +10,24 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
     {
     }
 
+    // Mirrors ShardHeader's ceiling on the parity ordinal space (stripes*StripeParity), so the
+    // reassembler is total on directly-constructed shards too, not only on deserialized ones.
+    private const long MaxParityOrdinals = 100_000_000;
+
+    /// <summary>True when the stripe geometry can be reassembled without dividing by zero,
+    /// overflowing int, or allocating an absurd ordinal array.</summary>
+    private static bool StripeGeometryUsable(int count, int stripeData, int stripeParity)
+    {
+        if (count < 1 || stripeParity < 0)
+            return false;
+        if (stripeParity == 0)
+            return true; // no cross-shard code — stripe width is unused
+        if (stripeData < 1)
+            return false;
+        long stripes = ((long)count + stripeData - 1) / stripeData;
+        return stripes * (long)stripeParity <= MaxParityOrdinals;
+    }
+
     /// <summary>
     /// True when every file in the shard set can be fully reassembled — all data images
     /// present, or (with cross-shard parity) every stripe holds at least StripeData of its
@@ -25,10 +43,11 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
             var first = group.First().Header;
             int count = first.Count, s = first.StripeData, p = first.StripeParity;
 
-            // Defense in depth: ShardHeader.Deserialize already rejects p>0 with s<1, but a
-            // DecodedShard could be constructed directly (tests, future callers), and this
-            // check drives divisor math below. A malformed stripe set is simply not complete.
-            if (p > 0 && s < 1)
+            // Defense in depth: ShardHeader.Deserialize already bounds the geometry, but a
+            // DecodedShard can be constructed directly (tests, future callers). These fields drive
+            // divisor and array-size math below, so a malformed stripe set is simply not complete
+            // — never a DivideByZero or OverflowException.
+            if (!StripeGeometryUsable(count, s, p))
                 return false;
 
             var dataPresent = new bool[count];
@@ -120,6 +139,8 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
         if ((first.Flags & ShardHeader.FlagFountain) != 0)
             return ReassembleFountain(shards, first, log, out chunkCapacity);
         int count = first.Count, s = first.StripeData, p = first.StripeParity;
+        if (!StripeGeometryUsable(count, s, p))
+            throw new ShardDecodeException($"'{first.FileName}': shard header declares invalid stripe geometry.");
         int stripes = (count + s - 1) / s;
         int cap = shards.Max(x => x.Payload.Length); // full per-image capacity (parity images are always full)
 
@@ -214,6 +235,8 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
         out int chunkCapacity)
     {
         int count = first.Count, s = first.StripeData;
+        if (!StripeGeometryUsable(count, s, first.StripeParity))
+            throw new ShardDecodeException($"'{first.FileName}': shard header declares invalid stripe geometry.");
         int stripes = (count + s - 1) / s;
         int cap = shards.Max(x => x.Payload.Length); // coded frames are always full capacity
 

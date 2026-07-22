@@ -156,7 +156,7 @@ internal sealed class Cli(AppSettings? settings = null)
                 {
                     int intervalMs = GetInt(named, "-i", "--interval", SlideshowWriter.DefaultIntervalMs);
                     @out.WriteLine($"Slideshow: {slideshowPath} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
-                    @out.WriteLine(slideshowPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                    @out.WriteLine(slideshowPath.EndsWith(".apng", StringComparison.OrdinalIgnoreCase)
                         ? "  Open it, view fullscreen, and record the screen for at least one full cycle."
                         : "  Open it in a browser, press F11, and record the screen for at least one full cycle.");
                     if (flags.Contains("--open"))
