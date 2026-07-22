@@ -1,0 +1,7 @@
+{
+  "version": "v1.0.0",
+  "config": "raw",
+  "expectedSha256": "f99f3d466cb40b4044e3526e05a6b394eb8d160b84fd5e10bfc77d113717684a",
+  "expectedLength": 6000,
+  "password": null
+}

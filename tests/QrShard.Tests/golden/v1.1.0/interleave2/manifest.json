@@ -1,0 +1,7 @@
+{
+  "version": "v1.1.0",
+  "config": "interleave2",
+  "expectedSha256": "251acb13b70f2af2e0fcc97d4f9f62e6907b7d5e42df93866e665153fd3cecad",
+  "expectedLength": 40000,
+  "password": null
+}

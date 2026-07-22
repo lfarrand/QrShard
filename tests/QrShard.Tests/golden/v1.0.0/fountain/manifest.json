@@ -1,0 +1,7 @@
+{
+  "version": "v1.0.0",
+  "config": "fountain",
+  "expectedSha256": "7bc14e2da87227e70869fc42d34b81ef64a92d0eb01639b964e1813999819856",
+  "expectedLength": 40000,
+  "password": null
+}
