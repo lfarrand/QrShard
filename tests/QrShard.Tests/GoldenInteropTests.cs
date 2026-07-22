@@ -25,15 +25,34 @@ public class GoldenInteropTests
             yield return [Path.GetRelativePath(GoldenRoot, Path.GetDirectoryName(manifestPath)!)];
     }
 
+    // Every version's fixture set must at least cover this core matrix. New configs (e.g.
+    // interleave2, present only from v1.1.0) are allowed on top; these must always be there.
+    private static readonly string[] CoreConfigs =
+        ["compressed", "raw", "parity", "fountain", "encrypted", "highecc", "camera"];
+
     [Fact]
-    public void GoldenFixtures_ArePresent()
+    public void GoldenFixtures_ArePresent_AndEachVersionIsComplete()
     {
-        // Guards against the Content-copy silently dropping the fixtures (which would make the
-        // theory below vacuously pass). Both released versions must contribute fixtures.
-        var dirs = Fixtures().Select(f => (string)f[0]).ToList();
-        Assert.Contains(dirs, d => d.StartsWith("v1.0.0"));
-        Assert.Contains(dirs, d => d.StartsWith("v1.1.0"));
-        Assert.True(dirs.Count >= 12, $"expected the full fixture matrix, found {dirs.Count}");
+        // Guards against the Content-copy silently dropping fixtures (which would make the theory
+        // below vacuously pass). Rather than a hardcoded floor, this scales with the matrix: it
+        // discovers every version directory actually present and asserts each carries the full
+        // core config set — so a partially-dropped copy, or a newly added version missing configs,
+        // fails here.
+        Assert.True(Directory.Exists(GoldenRoot), "golden fixtures were not copied to the test output");
+        var byVersion = Fixtures()
+            .Select(f => (string)f[0])
+            .Select(rel => (Version: rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0],
+                            Config: Path.GetFileName(rel)))
+            .GroupBy(x => x.Version)
+            .ToList();
+
+        Assert.True(byVersion.Count >= 2, $"expected fixtures from multiple released versions, found {byVersion.Count}");
+        foreach (var version in byVersion)
+        {
+            var configs = version.Select(x => x.Config).ToHashSet();
+            var missing = CoreConfigs.Where(c => !configs.Contains(c)).ToList();
+            Assert.True(missing.Count == 0, $"golden version '{version.Key}' is missing config(s): {string.Join(", ", missing)}");
+        }
     }
 
     [Theory]

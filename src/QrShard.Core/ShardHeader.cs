@@ -25,6 +25,13 @@ internal sealed class ShardHeader
     public const byte KnownFlags = 0x3F;      // every flag this build understands
     private const byte HeaderVersion = 2;
 
+    // Sanity ceilings for a crafted/corrupt header. The real encoder never approaches these:
+    // even the sparsest camera profile packs >1 KB per image, so the 1.5 GB file cap yields far
+    // fewer than MaxImages data images. They exist only so the geometry fields cannot drive an
+    // integer overflow or an absurd allocation in the reassembler (see the Deserialize guards).
+    private const int MaxImages = 5_000_000;             // ceiling on Count
+    private const long MaxParityOrdinals = 100_000_000;  // ceiling on stripes*StripeParity (fountain 10x headroom)
+
     public required ulong FileId { get; init; }
     public required int Index { get; init; }
     public required int Count { get; init; }             // number of DATA images
@@ -104,18 +111,28 @@ internal sealed class ShardHeader
                 return null;
 
             bool isParity = (flags & FlagParity) != 0;
-            if (count < 1 || payloadLength < 0 || stripeData < 0 || stripeParity < 0)
+            if (count < 1 || count > MaxImages || payloadLength < 0 || stripeData < 0 || stripeParity < 0)
                 return null;
             if (index < 0)
                 return null;
             if (!isParity && index >= count)
                 return null; // data ordinal must fall within the data range
-            // Cross-shard coding needs a positive stripe width: stripeData is a divisor and an
-            // array dimension in the reassembler and the completeness check. Reject the crafted
-            // combination here — the single choke point every header passes through — so no
-            // downstream math ever sees stripeData == 0 with parity present.
-            if (stripeParity > 0 && stripeData < 1)
-                return null;
+            // Cross-shard coding: bound the whole stripe geometry at this single choke point every
+            // header passes through, so no downstream math can divide by zero, overflow int, or
+            // allocate an absurd array from crafted fields.
+            //   * stripeData is a divisor and a stripe width — must be positive and no larger than a
+            //     stripe can hold.
+            //   * stripes*StripeParity is the parity ordinal space: an array dimension (new bool[…])
+            //     and the index range for parity images. Computed in long here so a crafted
+            //     Count/StripeParity pair (which overflowed int before) is rejected, not crashed.
+            if (stripeParity > 0)
+            {
+                if (stripeData < 1 || stripeData > CrossShardFec.MaxShardsPerStripe)
+                    return null;
+                long stripes = ((long)count + stripeData - 1) / stripeData;
+                if (stripes * (long)stripeParity > MaxParityOrdinals)
+                    return null;
+            }
 
             headerLength = bodyLen + 4;
             return new ShardHeader

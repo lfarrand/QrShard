@@ -90,9 +90,15 @@ public class FuzzTests
         for (int seed = 0; seed < Iterations; seed++)
         {
             var rng = new Random(seed);
-            int count = rng.Next(1, 40);
-            int stripeData = rng.Next(0, 40);
-            int stripeParity = rng.Next(0, 40);
+            // Mix small values (dense, likely-valid geometry) with occasional large ones so the
+            // product stripes*StripeParity reaches the int-overflow region that byte-mutation
+            // never lands on. Count stays allocatable (the directly-constructed reassembler path
+            // dimensions arrays by it) while StripeParity ranges to int.MaxValue — enough, with a
+            // thin stripe width, to overflow stripes*StripeParity.
+            bool large = rng.Next(4) == 0;
+            int count = large ? rng.Next(1, 200_000) : rng.Next(1, 40);
+            int stripeData = large ? rng.Next(0, 4) : rng.Next(0, 40);
+            int stripeParity = large ? rng.Next(0, int.MaxValue) : rng.Next(0, 40);
             byte flags = (byte)(rng.Next(2) == 0 ? 0 : ShardHeader.FlagParity | (rng.Next(2) == 0 ? ShardHeader.FlagFountain : 0));
             var payload = TestData.Random(rng.Next(1, 32), seed);
             var header = new ShardHeader
