@@ -131,6 +131,28 @@ public class DecodeSafetyRoundTests
         Assert.Contains("did NOT survive", output);
     }
 
+    [Fact]
+    public void RoundtripTest_AcceptsEncodeOptionsItHonors()
+    {
+        // Regression for spec-vs-handler drift: BuildEncodeOptions reads -R/-F, so the test
+        // ArgSpec must accept them rather than reject a legitimate flag as unknown.
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("mine.bin", TestData.Random(60_000));
+        Assert.Equal(0, Run("test", input, "-r", "900", "-R", "20").Code);
+    }
+
+    [Fact]
+    public void RoundtripTest_UnknownProfile_IsRejectedNotSilentlyIgnored()
+    {
+        // --profile must be honored (like encode), not silently ignored while claiming to test
+        // "your settings".
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("mine.bin", TestData.Random(2000));
+        var (code, _, err) = Run("test", input, "-r", "900", "--profile", "nonesuch");
+        Assert.Equal(2, code);
+        Assert.Contains("unknown profile", err);
+    }
+
     // ---- Item 2: 3-finder pose reconstruction ----
 
     private static FinderCluster Cluster(double x, double y, double module, int count) =>

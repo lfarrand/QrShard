@@ -111,14 +111,9 @@ internal sealed class Cli(AppSettings? settings = null)
                 // Precedence: flag > --profile preset > appsettings.json EncodeDefaults >
                 // built-in default. The camera profile swaps in photo-appropriate density
                 // defaults (big cells, few colors, heavy ECC); explicit flags still win.
-                var defaults = settings.EncodeDefaults;
-                string? profileName = Get(named, "--profile");
-                if (profileName is not null)
-                {
-                    if (!settings.EncodeProfiles.TryGetValue(profileName, out var profile))
-                        return Help(@out, err, $"unknown profile '{profileName}'. Defined: {(settings.EncodeProfiles.Count == 0 ? "(none)" : string.Join(", ", settings.EncodeProfiles.Keys))}");
-                    defaults = profile;
-                }
+                var defaults = ResolveProfile(named, settings, out string? profileError);
+                if (defaults is null)
+                    return Help(@out, err, profileError);
                 bool camera = flags.Contains("--camera");
                 string resolutionValue = Get(named, "-r", "--resolution") ?? defaults.Resolution;
                 var (width, height, resolutionNote) = ResolveResolution(resolutionValue);
@@ -235,21 +230,31 @@ internal sealed class Cli(AppSettings? settings = null)
                     err.WriteLine("error: no decodable shard images were found.");
                     return 1;
                 }
-                // Distinguish "whole images still missing" (recoverable by capturing more) from a
-                // complete-but-corrupt set. Only the former should nudge toward the resumable flow
-                // and return the documented incomplete exit code; genuine corruption falls through
-                // to Assemble, which throws a CRC/SHA error handled as a hard failure (exit 1).
-                if (!services.Parity.IsSetComplete(shards))
+                try
                 {
+                    // Assemble restores each complete file (writing them out as it goes) and throws
+                    // on the first that can't be reassembled — so a folder mixing a complete file
+                    // with an incomplete one still yields the complete one on disk.
+                    var restored = services.Assembler.Assemble(shards, Get(named, "-o", "--out"), @out.WriteLine, password);
+                    @out.WriteLine($"Restored {restored.Count} file(s).");
+                    return 0;
+                }
+                catch (ShardDecodeException ex)
+                {
+                    // Distinguish "whole images missing/unreadable" (recoverable by capturing more)
+                    // from a complete-but-corrupt set (genuine data corruption). Only the former is
+                    // nudged toward the resumable flow with the documented incomplete exit code.
+                    if (services.Parity.IsSetComplete(shards))
+                    {
+                        err.WriteLine($"error: {ex.Message}");
+                        return 1;
+                    }
                     PrintSetStatus(@out, shards, services.Parity);
-                    @out.WriteLine("Incomplete — some images are still missing. Capture them and decode again, or:");
+                    @out.WriteLine("Incomplete — some images are missing or unreadable. Capture them and decode again, or:");
                     @out.WriteLine("  • add --session <file> to accumulate captures across sittings (resumes from what you have),");
                     @out.WriteLine("  • or --watch to decode images as they land and finish automatically.");
                     return 3;
                 }
-                var restored = services.Assembler.Assemble(shards, Get(named, "-o", "--out"), @out.WriteLine, password);
-                @out.WriteLine($"Restored {restored.Count} file(s).");
-                return 0;
             }
 
             case "verify":
@@ -413,9 +418,12 @@ internal sealed class Cli(AppSettings? settings = null)
                     return services.SelfTest.Run() ? 0 : 1; // built-in fixed-fixture self-test
                 if (positional.Count != 1 || !File.Exists(positional[0]))
                     return Help(@out, err, "test takes no arguments (built-in self-test) or one file to round-trip at your settings.");
+                var tDefaults = ResolveProfile(named, settings, out string? tProfileError);
+                if (tDefaults is null)
+                    return Help(@out, err, tProfileError);
                 bool camera = tflags.Contains("--camera");
-                var (width, height, _) = ResolveResolution(Get(named, "-r", "--resolution") ?? settings.EncodeDefaults.Resolution);
-                var opt = BuildEncodeOptions(named, tflags, settings.EncodeDefaults, camera, width, height);
+                var (width, height, _) = ResolveResolution(Get(named, "-r", "--resolution") ?? tDefaults.Resolution);
+                var opt = BuildEncodeOptions(named, tflags, tDefaults, camera, width, height);
                 return services.SelfTest.RunFile(positional[0], opt, @out);
             }
 
@@ -755,11 +763,12 @@ internal sealed class Cli(AppSettings? settings = null)
              "-R", "--recovery", "-F", "--fountain", "-f", "--format", "-p", "--password",
              "-i", "--interval", "--slideshow", "--profile"],
             ["--json", "--camera", "--no-compress", "--interleave2", "--video", "--open", "--dry-run"]),
-        // `test <file> [encode opts]` shares the encode surface, plus --camera for the photo profile.
+        // `test <file> [encode opts]` shares the encode density surface (BuildEncodeOptions reads
+        // all of these), plus --camera. No --json: the test emits only a human verdict.
         ["test"] = new(
-            ["-r", "--resolution", "-c", "--cell", "-b", "--bits", "-e", "--ecc", "-p", "--password",
-             "-f", "--format", "--profile"],
-            ["--camera", "--no-compress", "--interleave2", "--json"]),
+            ["-r", "--resolution", "-c", "--cell", "-b", "--bits", "-e", "--ecc", "-R", "--recovery",
+             "-F", "--fountain", "-p", "--password", "-f", "--format", "--profile"],
+            ["--camera", "--no-compress", "--interleave2"]),
         ["decode"] = new(["-o", "--out", "-p", "--password", "--session", "--fps"], ["--clipboard", "--watch"]),
         ["verify"] = new(["--session"], ["--json"]),
         ["info"] = new(["--heatmap"], ["--json"]),
@@ -838,6 +847,26 @@ internal sealed class Cli(AppSettings? settings = null)
     /// <summary>Maps the shared density options (-c/-b/-e/-f/-p/--camera/--interleave2/--no-compress)
     /// from parsed args, honoring the camera-profile defaults. The encode path layers IsArchive/
     /// recovery on top; `test` reuses it directly so the two can't diverge.</summary>
+    /// <summary>Resolves the encode defaults, applying a named --profile if given. Returns null and
+    /// sets <paramref name="error"/> when the profile name is unknown. Shared by encode and test.</summary>
+    private static AppSettings.EncodeDefaultSettings? ResolveProfile(Dictionary<string, string> named, AppSettings settings, out string? error)
+    {
+        error = null;
+        var defaults = settings.EncodeDefaults;
+        string? profileName = Get(named, "--profile");
+        if (profileName is not null)
+        {
+            if (!settings.EncodeProfiles.TryGetValue(profileName, out var profile))
+            {
+                error = $"unknown profile '{profileName}'. Defined: " +
+                    (settings.EncodeProfiles.Count == 0 ? "(none)" : string.Join(", ", settings.EncodeProfiles.Keys));
+                return null;
+            }
+            defaults = profile;
+        }
+        return defaults;
+    }
+
     private static EncodeOptions BuildEncodeOptions(Dictionary<string, string> named, HashSet<string> flags,
         AppSettings.EncodeDefaultSettings defaults, bool camera, int width, int height) => new()
     {
