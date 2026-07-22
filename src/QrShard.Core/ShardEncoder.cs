@@ -144,6 +144,7 @@ internal sealed class ShardEncoder(
         int degree = (int)Math.Clamp(budget / Math.Max(1, pixelBytes), 1, Environment.ProcessorCount);
         var po = new ParallelOptions { MaxDegreeOfParallelism = degree };
         var writer = renderer.CreateWriter(format, layout, settings);
+        var logLock = new object(); // serializes the per-image progress callback across workers
 
         // Data and parity images in ONE parallel loop (no barrier between the phases), with
         // thread-local scratch (pixel canvas + stream/cell byte buffers) so each worker
@@ -196,7 +197,13 @@ internal sealed class ShardEncoder(
                 renderer.RenderShard(layout, palette, metaModules, stream, streamLength, outPath, scratch, writer);
                 files[i] = outPath;
                 int finished = Interlocked.Increment(ref done);
-                log?.Invoke($"  [{finished}/{totalImages}] {Path.GetFileName(outPath)}" +
+                // Serialize the progress callback: it runs on every parallel worker, and a caller
+                // may pass a delegate that is not thread-safe (a StringBuilder/StringWriter sink,
+                // a List.Add). The real CLI writes to a synchronized Console.Out, but library
+                // consumers of the progress action must be protected too. Cost is negligible.
+                if (log is not null)
+                    lock (logLock)
+                        log($"  [{finished}/{totalImages}] {Path.GetFileName(outPath)}" +
                             (isParity ? " (parity)" : $" ({payloadLen:N0} bytes)"));
                 return scratch;
             },

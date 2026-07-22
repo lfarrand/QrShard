@@ -199,4 +199,34 @@ public class AuditFixTests
         string dir = tmp.Sub("a-directory-not-an-image");
         Assert.Throws<QrShardDecodeException>(() => new QrShardCodec().DecodeImages([dir]));
     }
+
+    // ---- Finding: encode invokes the progress callback concurrently from parallel workers ----
+
+    [Fact]
+    public void Encode_ProgressCallback_IsInvokedSerially_NotConcurrently()
+    {
+        // The encoder renders images on parallel workers and reports progress via a caller
+        // callback. If that callback were invoked concurrently, a non-thread-safe sink (a
+        // StringWriter — as the CLI test harness uses — or a List) races and can throw
+        // intermittently (it did, on the slower/weaker-ordered arm64 release runner). The
+        // callback must be serialized. This detects any re-entrant (concurrent) invocation.
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("input.bin", TestData.Random(400_000));
+
+        int active = 0, reentrancy = 0, calls = 0;
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"),
+            new EncodeOptions { Width = 700, Height = 700, CellPx = 2, BitsPerCell = 4 },
+            _ =>
+            {
+                if (Interlocked.Increment(ref active) != 1)
+                    Interlocked.Increment(ref reentrancy);
+                Interlocked.Increment(ref calls);
+                Thread.Sleep(25); // hold longer than a worker's render, so a racing worker overlaps
+                Interlocked.Decrement(ref active);
+            });
+
+        Assert.True(result.ImageCount >= 4, $"test needs several images for real concurrency; got {result.ImageCount}");
+        Assert.Equal(0, reentrancy);              // never invoked while another invocation is in flight
+        Assert.Equal(result.ImageCount, calls);   // one message per image, none lost to a race
+    }
 }
