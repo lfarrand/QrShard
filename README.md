@@ -20,7 +20,8 @@ can be AES-256-GCM encrypted end to end.
 [How to use](#how-to-use-it) · [Options](#commands-and-options) ·
 [Workflow tools](#workflow-tools-sessions-watch-verify-heatmap-calibrate) ·
 [Configuration](#configuration-appsettingsjson) · [Capacity](#capacity-and-throughput) ·
-[Formats](#image-formats) · [Resilience](#resilience) · [Camera capture](#camera-capture) ·
+[Sample output](#sample-output) · [Formats](#image-formats) · [Resilience](#resilience) ·
+[Camera capture](#camera-capture) ·
 [Benchmarks](#benchmark-snapshot) · [Design notes](#how-it-works) ·
 [Building & testing](#building-and-testing)
 
@@ -245,6 +246,46 @@ screenshot, ~72 images ≈ **3-4 minutes** (~1 MB/s effective); an automated cap
 that several-fold. Not sure what density your setup survives? `qrshard calibrate`. Hard limits:
 ≤ 1.5 GB per file; display size caps per-image resolution.
 
+## Sample output
+
+Real, unmodified encoder output. Each row is one shard image: the left view is the **whole
+image** scaled down to fit the page, the right view is an exact **150 x 150 pixel region
+magnified 3x** with no resampling, so you can see the individual cells at their true relative
+size. The payload is random bytes sized to fill the grid — that is why the data field looks like
+noise and why there is no blank space.
+
+| Configuration | Whole image (scaled) | Cells at 1:1 (150 px region, 3x) |
+|---|---|---|
+| **Default** — `-c 3 -b 4`<br>2159 x 2159 px · 3 px cells · 16 colours<br>~212 KB per image | <img src="docs/samples/default-full.png" alt="Default preset shard: white quiet zone, black frame, metadata and palette strips top and bottom, dense multicoloured data field" width="380"> | <img src="docs/samples/default-detail.png" alt="Default preset cells magnified: 3-pixel square cells in 16 colours" width="380"> |
+| **Dense** — `-c 2 -b 6`<br>2160 x 2160 px · 2 px cells · 64 colours<br>~716 KB per image | <img src="docs/samples/dense-full.png" alt="Dense preset shard at 2 pixel cells and 64 colours" width="380"> | <img src="docs/samples/dense-detail.png" alt="Dense preset cells magnified: 2-pixel cells in 64 colours" width="380"> |
+| **Max4K** — `-r 3840x2160 -c 1 -b 6`<br>3840 x 2160 px · 1 px cells · 64 colours<br>~4.9 MB per image | <img src="docs/samples/max4k-full.png" alt="Max4K preset shard filling a 4K display at one pixel per cell" width="380"> | <img src="docs/samples/max4k-detail.png" alt="Max4K cells magnified: one pixel per cell in 64 colours" width="380"> |
+| **Camera** — `--camera`<br>3836 x 2160 px · 8 px cells · 4 colours<br>~16 KB per image | <img src="docs/samples/camera-full.png" alt="Camera profile shard with four QR-style finder patterns in bands above and below the data area" width="380"> | <img src="docs/samples/camera-detail.png" alt="Camera profile cells magnified: 8-pixel cells in 4 colours" width="380"> |
+| **Monochrome** — `-c 8 -b 1`<br>2154 x 2158 px · 8 px cells · black/white<br>~7 KB per image | <img src="docs/samples/mono-full.png" alt="Monochrome shard: 8 pixel black and white cells" width="380"> | <img src="docs/samples/mono-detail.png" alt="Monochrome cells magnified: 8-pixel black and white cells, QR-like" width="380"> |
+
+What you are looking at, from the outside in: a white **quiet zone**, the black **frame** the
+decoder traces to find and rectify the image, then the **metadata strip** (the black/white run
+carrying geometry and part numbers) and the **palette calibration strip** (the coloured swatches
+the classifier calibrates against) — both duplicated top *and* bottom so an overlay across either
+edge cannot brick the image — and finally the data field itself.
+
+The `--camera` row is the odd one out: it adds four QR-style **finder patterns** in bands above
+and below the data, plus the small orientation tick beside the top-left finder, which is what
+lets a photo or handheld video be located and de-skewed. It pays for that in density — 4 colours
+at 8 px cells is ~16 KB per image against Max4K's ~4.9 MB, roughly 300x less.
+
+The monochrome row is the opposite extreme and the one that looks most like a conventional QR
+code. It is not a preset, just `-c 8 -b 1`; every setting in between is available.
+
+> The whole-image views are scaled down for the page and **will not decode** — a real capture has
+> to be pixel-accurate. The 1:1 detail crops are true pixels, but only a fragment of a shard.
+
+Regenerate them with [`docs/samples/regenerate.ps1`](docs/samples/regenerate.ps1). Only these
+derived views are committed: a filled Max4K shard is ~25 MB of essentially incompressible pixels
+at full resolution. The payload comes from a fixed seed, so the data field is stable between
+runs — but the images are not byte-identical, because every encode stamps a random 64-bit file
+id (that is what lets shards of *different* files share a folder without being confused), and
+that id lives in the metadata strip.
+
 ## Image formats
 
 Shards can be written in any of six lossless container formats (`-f`); the container is
@@ -354,20 +395,109 @@ Presets: **Default** = 2160², 3 px cells, 4 bits (robust); **Dense** = 2160², 
 
 | Size | Default enc / dec | Dense | Max4K | Max4K-R10 |
 |---:|---:|---:|---:|---:|
-| 1 KB | 11 / 50 ms | 15 / 57 ms | 78 / 109 ms | 100 / 128 ms |
-| 1 MB | 70 / 57 ms | 128 / 60 ms | 79 / 123 ms | 110 / 133 ms |
-| 10 MB | 264 / 176 ms | 224 / 92 ms | 157 / 135 ms | 165 / 147 ms |
-| 100 MB | 2.35 / 1.32 s | 1.47 / 0.61 s | **0.26 / 0.42 s** | 0.32 / 0.38 s |
+| 1 KB | 13 / 50 ms | 16 / 67 ms | 78 / 114 ms | 99 / 129 ms |
+| 1 MB | 75 / 49 ms | 127 / 62 ms | 85 / 132 ms | 90 / 146 ms |
+| 10 MB | 225 / 246 ms | 236 / 129 ms | 106 / 142 ms | 152 / 137 ms |
+| 100 MB | 2.57 / 1.31 s | 1.35 / 0.60 s | **0.31 / 0.37 s** | 0.30 / 0.36 s |
+| 1 GB | 16.97 / 11.41 s | 11.42 / 5.76 s | **2.53 / 3.80 s** | 3.36 / 2.99 s |
 
-Current-build means (BenchmarkDotNet v0.15.8, Monitoring strategy, .NET 10.0.10) — these include
-the specialized PNG reader and sampling-table work, so 100 MB Max4K now decodes in ~0.42 s and
-encodes in ~0.26 s. Macro IO benchmarks are noisy across three iterations (some cases carry wide
-error bars); the persisted medians track the means closely. A relative **perf gate** runs on every
-PR: base and head builds race the same 30 MB round trip, failing on a >30% median regression.
+One full-matrix run: all 40 cases (10 sizes x 4 presets) measured back to back on the same build,
+so nothing here is stitched together from different sittings. BenchmarkDotNet v0.15.8 means,
+Monitoring strategy, 3 iterations per case, .NET 10.0.10, decoded output SHA-verified every
+iteration. Macro IO benchmarks are noisy at this iteration count — some small cases carry wide
+error bars — so treat sub-20 ms differences as noise. A relative **perf gate** runs on every PR:
+base and head builds race the same 30 MB round trip, failing on a >30% median regression.
 
 The crossover: below ~1 MB every preset needs one image, so the smaller Default canvas wins on
 fixed cost; at scale, Max4K packs ~13x more payload per pixel, so 100 MB is 22 images instead
-of 495 — which dominates end-to-end time too, since every image is a capture.
+of 495 — which dominates end-to-end time too, since every image is a capture. At 1 GB it is 220
+images against 5,068, and Max4K also finishes the codec work ~4.5x faster (6.3 s vs 28.4 s
+round trip).
+
+### Charts
+
+Codec time is only half the story: on a real transfer the *capture cadence* dominates, so the
+last two charts add the per-image cost of actually getting each shard onto the receiving screen.
+All four are log-log, generated from the same measurements as the table below.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/codec-time-dark.svg">
+  <img alt="Codec time by file size: encode (solid) and decode (dashed) for all four presets, log-log" src="docs/benchmarks/codec-time-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/throughput-dark.svg">
+  <img alt="Codec round-trip throughput in MB/s of payload per second of codec time" src="docs/benchmarks/throughput-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/transfer-manual-dark.svg">
+  <img alt="Estimated end-to-end transfer time with manual capture at 3 seconds per image" src="docs/benchmarks/transfer-manual-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/transfer-auto-dark.svg">
+  <img alt="Estimated end-to-end transfer time with automated capture at 0.5 seconds per image" src="docs/benchmarks/transfer-auto-light.svg">
+</picture>
+
+The two transfer charts are where the density presets earn their keep: they are codec time plus
+`images x seconds-per-image`, so they rank by **image count**, not by codec speed. At 100 MB that
+is a 495-image Default set against a 22-image Max4K one — about 25 minutes of hand-driven capture
+versus about 1 minute. The presets differ by roughly 3 seconds of codec time at that size, which
+is simply irrelevant next to a 24-minute difference in capture. At 1 GB the same effect is
+brutal: 5,068 images is over four hours of manual capture, where Max4K's 220 images is about
+eleven minutes.
+
+### All measurements
+
+Every case in the matrix. **Images** is the shard count (`+Np` = parity images); **Est. manual**
+and **Est. auto** add capture cadence at 3 s and 0.5 s per image to the measured codec time.
+Encode and decode are BenchmarkDotNet means.
+
+<!-- BENCH:TABLE:START -->
+| Size | Preset | Images | Encode | Decode | Codec MB/s | Est. manual (3 s/img) | Est. auto (0.5 s/img) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 1KB | Default | 1 | 13.2 ms | 49.5 ms | 0.016 | 3.06 s | 562.7 ms |
+| 1KB | Dense | 1 | 15.7 ms | 66.9 ms | 0.012 | 3.08 s | 582.7 ms |
+| 1KB | Max4K | 1 | 78.1 ms | 113.8 ms | 0.005 | 3.19 s | 691.9 ms |
+| 1KB | Max4K-R10 | 1+1p | 98.5 ms | 129.1 ms | 0.004 | 6.23 s | 1.23 s |
+| 10KB | Default | 1 | 14.4 ms | 55.6 ms | 0.139 | 3.07 s | 570 ms |
+| 10KB | Dense | 1 | 18.1 ms | 61.7 ms | 0.122 | 3.08 s | 579.8 ms |
+| 10KB | Max4K | 1 | 80.6 ms | 124.3 ms | 0.048 | 3.2 s | 704.9 ms |
+| 10KB | Max4K-R10 | 1+1p | 81.7 ms | 113.2 ms | 0.05 | 6.19 s | 1.19 s |
+| 100KB | Default | 1 | 52.1 ms | 53.9 ms | 0.921 | 3.11 s | 606.1 ms |
+| 100KB | Dense | 1 | 37.5 ms | 65.2 ms | 0.951 | 3.1 s | 602.7 ms |
+| 100KB | Max4K | 1 | 84.4 ms | 115.9 ms | 0.488 | 3.2 s | 700.2 ms |
+| 100KB | Max4K-R10 | 1+1p | 108.2 ms | 124.5 ms | 0.42 | 6.23 s | 1.23 s |
+| 500KB | Default | 3 | 73.1 ms | 56.6 ms | 3.8 | 9.13 s | 1.63 s |
+| 500KB | Dense | 1 | 112.4 ms | 55.5 ms | 2.9 | 3.17 s | 668 ms |
+| 500KB | Max4K | 1 | 90.6 ms | 128.2 ms | 2.2 | 3.22 s | 718.8 ms |
+| 500KB | Max4K-R10 | 1+1p | 104.6 ms | 144.6 ms | 2 | 6.25 s | 1.25 s |
+| 1MB | Default | 5 | 75.1 ms | 49 ms | 8.1 | 15.12 s | 2.62 s |
+| 1MB | Dense | 2 | 127.2 ms | 61.5 ms | 5.3 | 6.19 s | 1.19 s |
+| 1MB | Max4K | 1 | 84.5 ms | 132.1 ms | 4.6 | 3.22 s | 716.6 ms |
+| 1MB | Max4K-R10 | 1+1p | 90.4 ms | 145.8 ms | 4.2 | 6.24 s | 1.24 s |
+| 10MB | Default | 50 | 225.4 ms | 246.4 ms | 21.2 | 2.5 min | 25.47 s |
+| 10MB | Dense | 15 | 235.5 ms | 129.4 ms | 27.4 | 45.36 s | 7.86 s |
+| 10MB | Max4K | 3 | 106.4 ms | 142.3 ms | 40.2 | 9.25 s | 1.75 s |
+| 10MB | Max4K-R10 | 3+1p | 151.9 ms | 137.3 ms | 34.6 | 12.29 s | 2.29 s |
+| 100MB | Default | 495 | 2.57 s | 1.31 s | 25.8 | 24.8 min | 4.2 min |
+| 100MB | Dense | 147 | 1.35 s | 604.1 ms | 51.3 | 7.4 min | 1.3 min |
+| 100MB | Max4K | 22 | 308.6 ms | 369.7 ms | 147 | 1.1 min | 11.68 s |
+| 100MB | Max4K-R10 | 22+3p | 304.8 ms | 357 ms | 151 | 1.3 min | 13.16 s |
+| 250MB | Default | 1238 | 4.73 s | 2.95 s | 32.5 | 1.03 h | 10.4 min |
+| 250MB | Dense | 366 | 3.73 s | 1.76 s | 45.6 | 18.4 min | 3.1 min |
+| 250MB | Max4K | 54 | 557.1 ms | 997.2 ms | 161 | 2.7 min | 28.55 s |
+| 250MB | Max4K-R10 | 54+6p | 842.8 ms | 1.04 s | 133 | 3 min | 31.88 s |
+| 500MB | Default | 2475 | 8.5 s | 5.53 s | 35.6 | 2.07 h | 20.9 min |
+| 500MB | Dense | 732 | 6.66 s | 3.04 s | 51.6 | 36.8 min | 6.3 min |
+| 500MB | Max4K | 108 | 1.15 s | 1.86 s | 166 | 5.5 min | 57.01 s |
+| 500MB | Max4K-R10 | 108+11p | 1.45 s | 2.01 s | 145 | 6 min | 1 min |
+| 1GB | Default | 5068 | 16.97 s | 11.41 s | 36.1 | 4.23 h | 42.7 min |
+| 1GB | Dense | 1499 | 11.42 s | 5.76 s | 59.6 | 1.25 h | 12.8 min |
+| 1GB | Max4K | 220 | 2.53 s | 3.8 s | 162 | 11.1 min | 1.9 min |
+| 1GB | Max4K-R10 | 220+22p | 3.36 s | 2.99 s | 161 | 12.2 min | 2.1 min |
+<!-- BENCH:TABLE:END -->
 
 ### Running the benchmarks
 
@@ -376,13 +506,23 @@ encode and decode across file sizes **1 KB – 1 GB** and the four presets:
 
 ```
 cd tests/QrShard.Benchmarks
-dotnet run -c Release                      # full matrix — ~2 hours, ~5 GB temp disk
+dotnet run -c Release                      # full matrix — ~14 min on the machine above, ~5 GB temp disk
 QRSHARD_BENCH_SIZES=1KB,1MB,100MB QRSHARD_BENCH_PRESETS=Default,Max4K dotnet run -c Release
 dotnet run -c Release -- --graphs-only     # regenerate graphs from persisted results
+dotnet run -c Release -- --readme-assets   # refresh this README's charts + table
 ```
 
 Results persist and **merge across runs**; output includes the machine-spec header and a
-self-contained `transfer-graphs.html`.
+self-contained `transfer-graphs.html`. That merge is what lets the matrix be measured in several
+sittings — but it also means a partial re-run leaves the untouched sizes at their older numbers,
+silently mixing builds in one table. After perf work, re-measure every size you intend to
+publish (a stale row usually gives itself away as a non-monotonic kink in the charts).
+
+`--readme-assets` re-exports what you see above from those same persisted results: one
+standalone SVG per chart per colour scheme into [`docs/benchmarks/`](docs/benchmarks/), and the
+measurements table spliced back into this file between its `BENCH:TABLE` marker comments. The
+charts are emitted with every presentation attribute inlined — GitHub's SVG sanitizer strips
+`<style>` blocks, which would otherwise render them as unstyled black shapes.
 
 ## How it works
 

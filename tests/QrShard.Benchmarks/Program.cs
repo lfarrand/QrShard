@@ -10,6 +10,20 @@ if (args.Contains("--graphs-only"))
     return;
 }
 
+// `--readme-assets` re-exports the README's benchmark figures from those same persisted results:
+// one standalone .svg per chart per theme into docs/benchmarks/, and the measurements table
+// spliced into README.md between its BENCH:TABLE markers. Run it after a benchmark session.
+if (args.Contains("--readme-assets"))
+{
+    string repoRoot = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "..", ".."));
+    GraphReport.WriteReadmeAssets(
+        Path.Combine(Environment.CurrentDirectory, "BenchmarkDotNet.Artifacts", "results"),
+        Path.Combine(repoRoot, "docs", "benchmarks"),
+        Path.Combine(repoRoot, "README.md"),
+        Console.Out);
+    return;
+}
+
 // `--gf-probe` runs the in-process GF(2^8) primitive micro-benchmark (throughput of the RS
 // encode, syndrome scan, and MulAdd hot loops). Compare acceleration tiers by re-running with
 // DOTNET_EnableGFNI=0 and/or DOTNET_EnableAVX512F=0 — same build, only the JIT path differs.

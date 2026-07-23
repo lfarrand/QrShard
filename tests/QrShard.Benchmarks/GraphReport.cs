@@ -23,6 +23,26 @@ internal static class GraphReport
 
     private sealed record Series(string Name, int Slot, bool Dashed, List<(double X, double Y)> Points);
 
+    private sealed record Chart(string Slug, string Title, string Caption, List<Series> Series,
+        Func<double, string> YFormat);
+
+    /// <summary>
+    /// Concrete colors for a standalone chart. The HTML report drives the same values through CSS
+    /// custom properties, but a .svg file embedded in Markdown cannot: GitHub's sanitizer drops
+    /// &lt;style&gt; blocks, so every attribute has to be inlined and each theme needs its own file.
+    /// </summary>
+    private sealed record Palette(string Name, string Surface, string Ink, string Ink2, string Muted,
+        string Grid, string Axis, string[] Colors)
+    {
+        public static readonly Palette Light = new("light", "#fcfcfb", "#0b0b0b", "#52514e", "#898781",
+            "#e1e0d9", "#c3c2b7", ["#2a78d6", "#1baf7a", "#eda100", "#008300"]);
+
+        public static readonly Palette Dark = new("dark", "#1a1a19", "#ffffff", "#c3c2b7", "#898781",
+            "#2c2c2a", "#383835", ["#3987e5", "#199e70", "#c98500", "#008300"]);
+    }
+
+    private const string SvgFont = "system-ui, -apple-system, Segoe UI, sans-serif";
+
     public static void Write(IReadOnlyList<Summary> summaries, TextWriter log)
     {
         var rows = Collect(summaries);
@@ -138,9 +158,22 @@ internal static class GraphReport
 
     private static string Render(List<Row> rows)
     {
-        var presets = rows.Select(r => r.Preset).Distinct().OrderBy(PresetSlot).ToList();
         var sb = new StringBuilder();
         sb.Append(Header());
+        foreach (var chart in Charts(rows))
+            sb.Append(Section(chart, rows));
+        sb.Append(Table(rows));
+        sb.Append("</main>");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The chart set, defined once and rendered by both the HTML report and the standalone
+    /// README assets, so the two can never drift apart.
+    /// </summary>
+    private static List<Chart> Charts(List<Row> rows)
+    {
+        var presets = rows.Select(r => r.Preset).Distinct().OrderBy(PresetSlot).ToList();
 
         // Chart 1: codec time (encode solid, decode dashed) vs size, log-log.
         var codec = new List<Series>();
@@ -151,32 +184,30 @@ internal static class GraphReport
             codec.Add(new Series($"{p} decode", PresetSlot(p), true,
                 Points(rows, p, r => r.DecodeSec)));
         }
-        sb.Append(Section("Codec time by file size",
-            "Mean wall-clock for turning a file into shard PNGs on disk (encode, solid) and PNGs back into a verified file (decode, dashed). Log-log.",
-            codec, rows));
 
-        // Chart 2: estimated end-to-end transfer including capture cadence.
-        var manual = presets.Select(p => new Series(p, PresetSlot(p), false,
-            Points(rows, p, r => EstimatedTransferSec(r, 3.0)))).ToList();
-        var auto = presets.Select(p => new Series(p, PresetSlot(p), false,
-            Points(rows, p, r => EstimatedTransferSec(r, 0.5)))).ToList();
-        sb.Append(Section("Estimated end-to-end transfer, manual capture (3 s/image)",
-            "Codec time plus screenshot cadence: encode + decode + images x 3 s. This is the realistic hand-driven number.",
-            manual, rows));
-        sb.Append(Section("Estimated end-to-end transfer, automated capture (0.5 s/image)",
-            "Same, with a scripted display-and-screenshot loop at 0.5 s per image.",
-            auto, rows));
+        List<Series> PerPreset(Func<Row, double> y) =>
+            presets.Select(p => new Series(p, PresetSlot(p), false, Points(rows, p, y))).ToList();
 
-        // Chart 3: codec round-trip throughput.
-        var throughput = presets.Select(p => new Series(p, PresetSlot(p), false,
-            Points(rows, p, r => r.Complete ? r.SizeBytes / 1048576.0 / r.CodecSec : double.NaN))).ToList();
-        sb.Append(Section("Codec round-trip throughput",
-            "MB of payload processed per second of codec time (encode + decode, capture excluded).",
-            throughput, rows, yFormatter: v => $"{Compact(v)} MB/s"));
+        return
+        [
+            new Chart("codec-time", "Codec time by file size",
+                "Mean wall-clock for turning a file into shard PNGs on disk (encode, solid) and PNGs back into a verified file (decode, dashed). Log-log.",
+                codec, FormatSeconds),
 
-        sb.Append(Table(rows));
-        sb.Append("</main>");
-        return sb.ToString();
+            // Charts 2 and 3: estimated end-to-end transfer including capture cadence.
+            new Chart("transfer-manual", "Estimated end-to-end transfer, manual capture (3 s/image)",
+                "Codec time plus screenshot cadence: encode + decode + images x 3 s. This is the realistic hand-driven number.",
+                PerPreset(r => EstimatedTransferSec(r, 3.0)), FormatSeconds),
+            new Chart("transfer-auto", "Estimated end-to-end transfer, automated capture (0.5 s/image)",
+                "Same, with a scripted display-and-screenshot loop at 0.5 s per image.",
+                PerPreset(r => EstimatedTransferSec(r, 0.5)), FormatSeconds),
+
+            // Chart 4: codec round-trip throughput.
+            new Chart("throughput", "Codec round-trip throughput",
+                "MB of payload processed per second of codec time (encode + decode, capture excluded).",
+                PerPreset(r => r.Complete ? r.SizeBytes / 1048576.0 / r.CodecSec : double.NaN),
+                v => $"{Compact(v)} MB/s"),
+        ];
     }
 
     private static List<(double, double)> Points(List<Row> rows, string preset, Func<Row, double> y) =>
@@ -194,33 +225,56 @@ internal static class GraphReport
         return r.CodecSec + (data + parity) * secondsPerImage;
     }
 
-    private static string Section(string title, string caption, List<Series> series, List<Row> rows,
-        Func<double, string>? yFormatter = null)
+    private static string Section(Chart chart, List<Row> rows)
     {
         var sb = new StringBuilder();
-        sb.Append($"<section><h2>{title}</h2><p class=\"caption\">{caption}</p>");
+        sb.Append($"<section><h2>{chart.Title}</h2><p class=\"caption\">{chart.Caption}</p>");
         sb.Append("<div class=\"legend\">");
-        foreach (var s in series)
+        foreach (var s in chart.Series)
         {
             string dash = s.Dashed ? " stroke-dasharray=\"6 4\"" : "";
             sb.Append($"<span class=\"key\"><svg width=\"22\" height=\"10\"><line x1=\"1\" y1=\"5\" x2=\"21\" y2=\"5\" class=\"s{s.Slot}\"{dash} stroke-width=\"2.5\"/></svg>{s.Name}</span>");
         }
         sb.Append("</div>");
-        sb.Append(LineChart(series, rows, yFormatter ?? FormatSeconds));
+        string body = ChartBody(chart.Series, rows, chart.YFormat, palette: null);
+        sb.Append(body.Length == 0
+            ? "<p class=\"caption\">(no data)</p>"
+            : $"<svg viewBox=\"0 0 {ChartW} {ChartH}\" role=\"img\">{body}</svg>");
         sb.Append("</section>");
         return sb.ToString();
     }
 
     // ---------- SVG log-log line chart ----------
 
-    private static string LineChart(List<Series> series, List<Row> rows, Func<double, string> yFormat)
+    private const int ChartW = 680, ChartH = 380;
+
+    /// <summary>
+    /// Emits the chart's inner SVG markup (no &lt;svg&gt; wrapper). With <paramref name="palette"/>
+    /// null it styles via CSS classes for the HTML report; with a palette it inlines every
+    /// presentation attribute so the markup survives as a standalone, sanitizer-proof file.
+    /// </summary>
+    private static string ChartBody(List<Series> series, List<Row> rows, Func<double, string> yFormat,
+        Palette? palette)
     {
-        const int W = 680, H = 380, L = 76, R = 18, T = 14, B = 46;
+        const int W = ChartW, H = ChartH, L = 76, R = 18, T = 14, B = 46;
         double plotW = W - L - R, plotH = H - T - B;
 
         var allPoints = series.SelectMany(s => s.Points).ToList();
         if (allPoints.Count == 0)
-            return "<p class=\"caption\">(no data)</p>";
+            return "";
+
+        // Class-based styling for the HTML report; fully inlined attributes for standalone files.
+        string gridAttr = palette is null ? "class=\"grid\"" : $"stroke=\"{palette.Grid}\" stroke-width=\"1\"";
+        string axisAttr = palette is null ? "class=\"axis\"" : $"stroke=\"{palette.Axis}\" stroke-width=\"1\"";
+        string tickAttr = palette is null
+            ? "class=\"tick\""
+            : $"fill=\"{palette.Muted}\" font-size=\"10.5\" font-family=\"{SvgFont}\"";
+        string LineAttr(int slot) => palette is null
+            ? $"class=\"s{slot} line\""
+            : $"fill=\"none\" stroke=\"{palette.Colors[slot % palette.Colors.Length]}\" stroke-width=\"2\"";
+        string DotAttr(int slot) => palette is null
+            ? $"class=\"s{slot} dot\""
+            : $"fill=\"{palette.Colors[slot % palette.Colors.Length]}\" stroke=\"{palette.Surface}\" stroke-width=\"2\"";
 
         double xMin = allPoints.Min(p => p.Item1), xMax = allPoints.Max(p => p.Item1);
         double yMin = allPoints.Min(p => p.Item2), yMax = allPoints.Max(p => p.Item2);
@@ -238,26 +292,32 @@ internal static class GraphReport
         double Y(double v) => T + plotH - (Math.Log10(v) - lyMin) / (lyMax - lyMin) * plotH;
 
         var sb = new StringBuilder();
-        sb.Append($"<svg viewBox=\"0 0 {W} {H}\" role=\"img\">");
 
         // Y gridlines + labels at decades.
         for (double e = lyMin; e <= lyMax + 0.001; e += 1)
         {
             double y = Y(Math.Pow(10, e));
-            sb.Append($"<line x1=\"{L}\" y1=\"{F(y)}\" x2=\"{W - R}\" y2=\"{F(y)}\" class=\"grid\"/>");
-            sb.Append($"<text x=\"{L - 8}\" y=\"{F(y + 3.5)}\" class=\"tick\" text-anchor=\"end\">{yFormat(Math.Pow(10, e))}</text>");
+            sb.Append($"<line x1=\"{L}\" y1=\"{F(y)}\" x2=\"{W - R}\" y2=\"{F(y)}\" {gridAttr}/>");
+            sb.Append($"<text x=\"{L - 8}\" y=\"{F(y + 3.5)}\" {tickAttr} text-anchor=\"end\">{yFormat(Math.Pow(10, e))}</text>");
         }
 
-        // X gridlines + labels at the benchmarked sizes.
+        // X gridlines + labels at the benchmarked sizes. Adjacent sizes only a factor of two apart
+        // (250MB/500MB) land close enough on a log axis for their labels to collide, so a label
+        // that would overlap its predecessor drops to a second row instead of overprinting it.
+        double[] rowRight = [double.NegativeInfinity, double.NegativeInfinity];
         foreach (var (label, bytes) in rows.Select(r => (r.SizeLabel, r.SizeBytes)).Distinct().OrderBy(t => t.SizeBytes))
         {
             double x = X(bytes);
-            sb.Append($"<line x1=\"{F(x)}\" y1=\"{T}\" x2=\"{F(x)}\" y2=\"{T + plotH}\" class=\"grid\"/>");
-            sb.Append($"<text x=\"{F(x)}\" y=\"{H - B + 18}\" class=\"tick\" text-anchor=\"middle\">{label}</text>");
+            sb.Append($"<line x1=\"{F(x)}\" y1=\"{T}\" x2=\"{F(x)}\" y2=\"{T + plotH}\" {gridAttr}/>");
+
+            double half = label.Length * 5.6 / 2;
+            int row = x - half >= rowRight[0] + 3 ? 0 : 1;
+            rowRight[row] = x + half;
+            sb.Append($"<text x=\"{F(x)}\" y=\"{H - B + 18 + row * 12}\" {tickAttr} text-anchor=\"middle\">{label}</text>");
         }
 
         // Baseline.
-        sb.Append($"<line x1=\"{L}\" y1=\"{T + plotH}\" x2=\"{W - R}\" y2=\"{T + plotH}\" class=\"axis\"/>");
+        sb.Append($"<line x1=\"{L}\" y1=\"{T + plotH}\" x2=\"{W - R}\" y2=\"{T + plotH}\" {axisAttr}/>");
 
         // Series lines and hoverable markers.
         foreach (var s in series)
@@ -266,16 +326,15 @@ internal static class GraphReport
                 continue;
             string dash = s.Dashed ? " stroke-dasharray=\"6 4\"" : "";
             string poly = string.Join(" ", s.Points.Select(p => $"{F(X(p.Item1))},{F(Y(p.Item2))}"));
-            sb.Append($"<polyline points=\"{poly}\" class=\"s{s.Slot} line\"{dash}/>");
+            sb.Append($"<polyline points=\"{poly}\" {LineAttr(s.Slot)}{dash}/>");
             foreach (var (x, y) in s.Points)
             {
                 string sizeLabel = rows.First(r => r.SizeBytes == (long)x).SizeLabel;
-                sb.Append($"<circle cx=\"{F(X(x))}\" cy=\"{F(Y(y))}\" r=\"3.5\" class=\"s{s.Slot} dot\">" +
-                          $"<title>{s.Name} at {sizeLabel}: {yFormat(y)}</title></circle>");
+                sb.Append($"<circle cx=\"{F(X(x))}\" cy=\"{F(Y(y))}\" r=\"3.5\" {DotAttr(s.Slot)}>" +
+                          $"<title>{Esc(s.Name)} at {sizeLabel}: {yFormat(y)}</title></circle>");
             }
         }
 
-        sb.Append("</svg>");
         return sb.ToString();
     }
 
@@ -315,6 +374,164 @@ internal static class GraphReport
 
         static string Cell(double seconds) => double.IsNaN(seconds) ? "—" : FormatSeconds(seconds);
     }
+
+    // ---------- Standalone README assets ----------
+
+    private const string TableStart = "<!-- BENCH:TABLE:START -->";
+    private const string TableEnd = "<!-- BENCH:TABLE:END -->";
+
+    /// <summary>
+    /// Writes each chart as a standalone .svg per theme, plus the measurements table as Markdown,
+    /// and splices that table into the README between marker comments — so the README can carry
+    /// the full benchmark output on GitHub and one command refreshes it after every run.
+    /// </summary>
+    public static void WriteReadmeAssets(string resultsDir, string assetDir, string readmePath, TextWriter log)
+    {
+        // Checked before MergeWithPersisted, which would otherwise try to rewrite the results file
+        // into a directory that does not exist — run from the wrong folder, that throws instead of
+        // saying what is wrong.
+        string resultsJson = Path.Combine(resultsDir, "transfer-results.json");
+        if (!File.Exists(resultsJson))
+        {
+            log.WriteLine($"GraphReport: no persisted results at {resultsJson}; nothing to export.");
+            log.WriteLine("  (run this from tests/QrShard.Benchmarks, after a benchmark session)");
+            return;
+        }
+
+        var rows = MergeWithPersisted([], resultsJson);
+        if (rows.Count == 0)
+        {
+            log.WriteLine("GraphReport: no persisted results found; nothing to export.");
+            return;
+        }
+
+        Directory.CreateDirectory(assetDir);
+        int written = 0;
+        foreach (var chart in Charts(rows))
+        {
+            foreach (var palette in new[] { Palette.Light, Palette.Dark })
+            {
+                string body = ChartBody(chart.Series, rows, chart.YFormat, palette);
+                if (body.Length == 0)
+                    continue;
+                File.WriteAllText(Path.Combine(assetDir, $"{chart.Slug}-{palette.Name}.svg"),
+                    Standalone(chart, body, palette) + "\n");
+                written++;
+            }
+        }
+
+        string table = MarkdownTable(rows);
+        File.WriteAllText(Path.Combine(assetDir, "measurements.md"), table);
+        log.WriteLine();
+        log.WriteLine($"// * README assets: {written} chart SVG(s) + measurements.md in {assetDir} *");
+        SpliceReadme(readmePath, table, log);
+    }
+
+    /// <summary>Wraps a chart body in a self-contained SVG with its own title and legend baked in.</summary>
+    private static string Standalone(Chart chart, string body, Palette p)
+    {
+        const int pad = 18;
+        var legend = LegendRows(chart.Series);
+        int top = 30 + legend.Count * 16;
+        int h = top + ChartH;
+
+        var sb = new StringBuilder();
+        sb.Append($"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {ChartW} {h}\" ")
+          .Append($"width=\"{ChartW}\" height=\"{h}\" role=\"img\" aria-label=\"{Esc(chart.Title)}\">");
+        sb.Append($"<rect width=\"{ChartW}\" height=\"{h}\" fill=\"{p.Surface}\"/>");
+        sb.Append($"<text x=\"{pad}\" y=\"21\" font-family=\"{SvgFont}\" font-size=\"14.5\" ")
+          .Append($"font-weight=\"600\" fill=\"{p.Ink}\">{Esc(chart.Title)}</text>");
+
+        double y = 39;
+        foreach (var row in legend)
+        {
+            double x = pad;
+            foreach (var s in row)
+            {
+                string dash = s.Dashed ? " stroke-dasharray=\"5 3\"" : "";
+                string color = p.Colors[s.Slot % p.Colors.Length];
+                sb.Append($"<line x1=\"{F(x)}\" y1=\"{F(y - 4)}\" x2=\"{F(x + 20)}\" y2=\"{F(y - 4)}\" ")
+                  .Append($"stroke=\"{color}\" stroke-width=\"2.5\"{dash}/>");
+                sb.Append($"<text x=\"{F(x + 26)}\" y=\"{F(y)}\" font-family=\"{SvgFont}\" font-size=\"11.5\" ")
+                  .Append($"fill=\"{p.Ink2}\">{Esc(s.Name)}</text>");
+                x += KeyWidth(s);
+            }
+            y += 16;
+        }
+
+        sb.Append($"<g transform=\"translate(0,{top})\">{body}</g></svg>");
+        return sb.ToString();
+    }
+
+    /// <summary>Approximate advance width of one legend key, used to wrap the legend to the canvas.</summary>
+    private static double KeyWidth(Series s) => 26 + s.Name.Length * 6.15 + 18;
+
+    private static List<List<Series>> LegendRows(List<Series> series)
+    {
+        var rows = new List<List<Series>>();
+        var current = new List<Series>();
+        double x = 0, max = ChartW - 36;
+        foreach (var s in series)
+        {
+            double w = KeyWidth(s);
+            if (current.Count > 0 && x + w > max)
+            {
+                rows.Add(current);
+                current = [];
+                x = 0;
+            }
+            current.Add(s);
+            x += w;
+        }
+        if (current.Count > 0)
+            rows.Add(current);
+        return rows;
+    }
+
+    private static string MarkdownTable(List<Row> rows)
+    {
+        var sb = new StringBuilder();
+        sb.Append("| Size | Preset | Images | Encode | Decode | Codec MB/s | Est. manual (3 s/img) | Est. auto (0.5 s/img) |\n");
+        sb.Append("|---|---|---:|---:|---:|---:|---:|---:|\n");
+        foreach (var r in rows)
+        {
+            var (data, parity) = BenchPresets.EstimateImages(r.Preset, r.SizeBytes);
+            string images = parity > 0 ? $"{data}+{parity}p" : data.ToString(CultureInfo.InvariantCulture);
+            string mbps = r.Complete ? Compact(r.SizeBytes / 1048576.0 / r.CodecSec) : "—";
+            sb.Append($"| {r.SizeLabel} | {r.Preset} | {images} | {Cell(r.EncodeSec)} | {Cell(r.DecodeSec)} ")
+              .Append($"| {mbps} | {Cell(EstimatedTransferSec(r, 3.0))} | {Cell(EstimatedTransferSec(r, 0.5))} |\n");
+        }
+        return sb.ToString();
+
+        static string Cell(double seconds) => double.IsNaN(seconds) ? "—" : FormatSeconds(seconds);
+    }
+
+    private static void SpliceReadme(string readmePath, string table, TextWriter log)
+    {
+        if (!File.Exists(readmePath))
+        {
+            log.WriteLine($"GraphReport: README not found at {readmePath}; table not spliced.");
+            return;
+        }
+        string text = File.ReadAllText(readmePath);
+        int start = text.IndexOf(TableStart, StringComparison.Ordinal);
+        int end = text.IndexOf(TableEnd, StringComparison.Ordinal);
+        if (start < 0 || end < start)
+        {
+            log.WriteLine($"GraphReport: {TableStart} / {TableEnd} markers not found; table not spliced.");
+            return;
+        }
+
+        // Match the file's existing convention rather than forcing LF into a CRLF README —
+        // core.autocrlf would hide that here, but not for a contributor without it.
+        string nl = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        string body = nl == "\n" ? table : table.Replace("\n", nl);
+        File.WriteAllText(readmePath, text[..(start + TableStart.Length)] + nl + body + text[end..]);
+        log.WriteLine($"// * Spliced measurements table into {readmePath} *");
+    }
+
+    private static string Esc(string s) =>
+        s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
 
     private static string MachineSpecTable()
     {
