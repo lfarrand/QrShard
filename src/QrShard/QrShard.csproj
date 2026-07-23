@@ -22,7 +22,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>qrshard</ToolCommandName>
     <PackageId>QrShard.Tool</PackageId>
-    <Version>1.3.4</Version>
+    <Version>1.3.5</Version>
     <Authors>Lee Farrand</Authors>
     <Description>Transfer any file between machines through the screen: encode to dense QR-style images, capture by screenshot, photo, or recording, and reconstitute bit-for-bit (SHA-256 verified).</Description>
     <PackageProjectUrl>https://github.com/lfarrand/QrShard</PackageProjectUrl>
