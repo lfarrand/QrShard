@@ -33,6 +33,14 @@ if (args.Contains("--gf-probe"))
     return;
 }
 
+// `--fps-probe` measures decode frame rate (single-core and parallel), payload bandwidth, and a
+// 250 MB codec-bound transfer time across a selection of resolutions. In-process, ~30s total.
+if (args.Contains("--fps-probe"))
+{
+    FpsProbe.Run(Console.Out);
+    return;
+}
+
 // Run everything by default (no interactive prompt); any BenchmarkDotNet switcher
 // arguments (--filter, --list, --job, ...) pass straight through.
 string[] effectiveArgs = args.Length == 0 ? ["--filter", "*"] : args;
