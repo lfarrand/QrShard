@@ -66,7 +66,7 @@ public class JsonAndGuardTests
             PayloadCrc32 = new Crc().Crc32(payload),
             TotalLength = payload.Length,
             OriginalLength = payload.Length,
-            Flags = 0x40, // a flag bit this build does not define
+            Flags = 0x80, // a flag bit this build does not define (0x40 is now FlagAuthMeta)
             Sha256 = TestData.Sha256(payload),
             FileName = "future.bin",
         };

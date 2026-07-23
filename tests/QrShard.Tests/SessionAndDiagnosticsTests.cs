@@ -151,14 +151,18 @@ public class SessionAndDiagnosticsTests
     }
 
     [Fact]
-    public void Heatmap_NoEcc_ReportsClearError()
+    public void Heatmap_NoEcc_FallsBackToQualityMap()
     {
         using var tmp = new TempDir();
         string input = tmp.WriteFile("input.bin", TestData.Random(5_000));
         var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), Fast with { EccParity = 0 });
 
-        var (code, output) = Run("info", result.Files[0], "--heatmap", tmp.File("heat.png"));
-        Assert.Equal(0, code); // info itself still succeeds
-        Assert.Contains("without ECC", output);
+        // With no ECC there is no correction map, but --heatmap now falls back to the
+        // capture-quality map (per-cell classification confidence) instead of erroring.
+        string heat = tmp.File("heat.png");
+        var (code, output) = Run("info", result.Files[0], "--heatmap", heat);
+        Assert.Equal(0, code);
+        Assert.Contains("capture-quality map", output);
+        Assert.True(File.Exists(heat));
     }
 }

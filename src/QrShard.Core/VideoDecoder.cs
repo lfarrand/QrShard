@@ -24,6 +24,10 @@ internal sealed class VideoDecoder(
     /// <summary>Mean-abs-luminance difference (0-255) below which a frame is treated as a duplicate.</summary>
     private const double DuplicateThreshold = 3.0;
 
+    /// <summary>Cap on frames folded into one temporal average — √32 ≈ 5.7x noise reduction is
+    /// plenty, and it bounds the accumulation work per failed shard group.</summary>
+    private const int MaxAveragedFrames = 32;
+
     /// <summary>Whether the recording shows the screen directly or through a camera.</summary>
     private enum CaptureMode
     {
@@ -117,6 +121,16 @@ internal sealed class VideoDecoder(
         var mode = CaptureMode.Unknown;
         CameraPose? cachedPose = null;
 
+        // Temporal averaging: a slideshow shows each shard across many near-duplicate frames, of
+        // which only the first is normally decoded and the rest discarded. When NO single frame of
+        // a group decodes, average the group's frames — independent sensor noise averages toward
+        // the clean image (~1/sqrt(N)), pushing a sub-cliff shard over. The duplicate threshold
+        // guarantees the frames are registered enough to average in pixel space. Only failed
+        // groups accumulate, so a clean transfer pays nothing.
+        int[]? sum = null;
+        int avgW = 0, avgH = 0, avgCount = 0;
+        bool groupYielded = false;
+
         foreach (var frame in frames)
         {
             examined++;
@@ -124,37 +138,122 @@ internal sealed class VideoDecoder(
             bool duplicate = hasPrevious && MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
             (previousSignature, signature) = (signature, previousSignature);
             hasPrevious = true;
+
             if (duplicate)
-                continue;
-
-            decoded++;
-            try
             {
-                var shard = DecodeFrame(frame, scratch, examined, ref mode, ref cachedPose);
-                if (seen.Add((shard.Header.FileId, shard.Header.Index, shard.Header.IsParity)))
+                if (!groupYielded && sum is not null && avgCount is >= 1 and < MaxAveragedFrames)
                 {
-                    shards.Add(shard);
-                    string which = shard.Header.IsParity
-                        ? $"parity #{shard.Header.Index + 1}"
-                        : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
-                    log($"  ok      frame {examined}  ({which}, {shard.Payload.Length:N0} bytes) — {shards.Count} collected");
+                    Accumulate(sum, frame);
+                    avgCount++;
+                }
+                continue;
+            }
 
-                    if (parityReassembler.IsSetComplete(shards))
-                    {
-                        stoppedEarly = true;
-                        break;
-                    }
+            // Group boundary: fall back to a temporal-average decode of the group that just ended.
+            if (!groupYielded && sum is not null && avgCount >= 2)
+            {
+                decoded++;
+                if (TryCollect(BuildAverage(sum, avgW, avgH, avgCount), scratch, examined, ref mode, ref cachedPose,
+                        shards, seen, log, $"averaged {avgCount} frames"))
+                {
+                    stoppedEarly = true;
+                    break;
                 }
             }
-            catch (ShardDecodeException)
+
+            // Primary path: decode this (first) frame of the new group.
+            avgCount = 0;
+            decoded++;
+            bool complete = TryCollect(frame, scratch, examined, ref mode, ref cachedPose, shards, seen, log,
+                $"frame {examined}", out groupYielded);
+            if (complete)
             {
-                // Torn/blended transition frame, or junk between shards — the loop will bring
-                // the shard around again, so silently skip.
+                stoppedEarly = true;
+                break;
             }
+            if (!groupYielded)
+            {
+                if (sum is null || avgW != frame.Width || avgH != frame.Height)
+                {
+                    avgW = frame.Width;
+                    avgH = frame.Height;
+                    sum = new int[avgW * avgH * 3];
+                }
+                else
+                {
+                    Array.Clear(sum);
+                }
+                Accumulate(sum, frame);
+                avgCount = 1;
+            }
+        }
+
+        // Flush the final group's average if it never decoded.
+        if (!stoppedEarly && !groupYielded && sum is not null && avgCount >= 2)
+        {
+            decoded++;
+            TryCollect(BuildAverage(sum, avgW, avgH, avgCount), scratch, examined, ref mode, ref cachedPose,
+                shards, seen, log, $"averaged {avgCount} frames");
         }
 
         stats = new VideoDecodeStats(examined, decoded, shards.Count, stoppedEarly);
         return stoppedEarly || parityReassembler.IsSetComplete(shards);
+    }
+
+    /// <summary>Decodes one frame and collects its shard (deduplicated). Returns true when the set
+    /// became complete; <paramref name="yielded"/> is true when the frame decoded at all (so its
+    /// group needs no temporal-average retry).</summary>
+    private bool TryCollect(Bitmap frame, DecodeScratch scratch, int examined, ref CaptureMode mode,
+        ref CameraPose? cachedPose, List<DecodedShard> shards,
+        HashSet<(ulong FileId, int Index, bool Parity)> seen, Action<string> log, string label, out bool yielded)
+    {
+        yielded = false;
+        try
+        {
+            var shard = DecodeFrame(frame, scratch, examined, ref mode, ref cachedPose);
+            yielded = true; // decoded to a shard (new or already-seen) — averaging this group is unnecessary
+            if (!seen.Add((shard.Header.FileId, shard.Header.Index, shard.Header.IsParity)))
+                return false;
+            shards.Add(shard);
+            string which = shard.Header.IsParity
+                ? $"parity #{shard.Header.Index + 1}"
+                : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
+            log($"  ok      {label}  ({which}, {shard.Payload.Length:N0} bytes) — {shards.Count} collected");
+            return parityReassembler.IsSetComplete(shards);
+        }
+        catch (ShardDecodeException)
+        {
+            return false; // torn/blended/junk frame — the loop brings the shard around again
+        }
+    }
+
+    private bool TryCollect(Bitmap frame, DecodeScratch scratch, int examined, ref CaptureMode mode,
+        ref CameraPose? cachedPose, List<DecodedShard> shards,
+        HashSet<(ulong FileId, int Index, bool Parity)> seen, Action<string> log, string label)
+        => TryCollect(frame, scratch, examined, ref mode, ref cachedPose, shards, seen, log, label, out _);
+
+    internal static void Accumulate(int[] sum, Bitmap frame)
+    {
+        var px = frame.Px;
+        for (int i = 0; i < px.Length; i++)
+        {
+            int j = i * 3;
+            sum[j] += px[i].R;
+            sum[j + 1] += px[i].G;
+            sum[j + 2] += px[i].B;
+        }
+    }
+
+    internal static Bitmap BuildAverage(int[] sum, int w, int h, int count)
+    {
+        var px = new SixLabors.ImageSharp.PixelFormats.Rgb24[w * h];
+        for (int i = 0; i < px.Length; i++)
+        {
+            int j = i * 3;
+            px[i] = new SixLabors.ImageSharp.PixelFormats.Rgb24(
+                (byte)(sum[j] / count), (byte)(sum[j + 1] / count), (byte)(sum[j + 2] / count));
+        }
+        return new Bitmap(px, w, h);
     }
 
     /// <summary>

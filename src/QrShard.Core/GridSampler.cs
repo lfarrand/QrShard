@@ -21,7 +21,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     private const long AbsoluteSuspectDist = 4000;
 
     public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
-        out bool[]? suspectBytes, out byte[]? secondChoiceBytes)
+        out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null)
     {
         double sx = inner.W / layout.InnerW;
         double sy = inner.H / layout.InnerH;
@@ -45,9 +45,9 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         byte[]? second = layout.EccParity > 0 ? scratch.ClearedSecondChoice(streamLength) : null;
 
         if (palettes.Interpolate)
-            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits);
+            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins);
         else
-            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits);
+            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits, cellMargins);
         suspectBytes = suspects;
         secondChoiceBytes = second;
         return stream;
@@ -103,7 +103,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
 
     private void ReadUniform(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, DecodeScratch scratch,
-        double sx, double sy, int bits)
+        double sx, double sy, int bits, int[]? cellMargins)
     {
         // Lazy nearest-color lookup keyed on 5-bit-per-channel quantized RGB.
         int[] lut = scratch.ResetNearestColorLut();
@@ -176,6 +176,8 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
                 RecordConfidence(suspects, second, palette, best, bestDist, bR, bG, bB, cellIndex, bits);
+                if (cellMargins is not null)
+                    cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }
         }
     }
@@ -186,7 +188,8 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// a photo) moves the classification targets with it. No LUT — the palette changes per row.
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
-        (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits)
+        (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits,
+        int[]? cellMargins)
     {
         double yTopStrip = layout.Gutter + layout.MetaH * 1.5;
         double yBottomStrip = layout.InnerH - layout.Gutter - layout.MetaH * 1.5;
@@ -229,6 +232,8 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
                 RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits);
+                if (cellMargins is not null)
+                    cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }
         }
     }
