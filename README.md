@@ -55,6 +55,12 @@ Video decoding and the live receiver additionally need [ffmpeg](https://ffmpeg.o
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
   [Building](#building-and-testing) for the ImageSharp license note).
 
+Both packages are published to [nuget.org](https://www.nuget.org/packages/QrShard.Tool) by the
+release workflow, using trusted publishing — no API key is stored in this repository. Releases are
+also mirrored to GitHub Packages so they appear under this repository's **Packages** section, but
+**nuget.org is the supported install source**: GitHub Packages requires an access token with
+`read:packages` to install from, even for public repositories.
+
 Shell completions for bash and PowerShell live in [`completions/`](completions/). The wire
 format is fully specified in [SPEC.md](SPEC.md) — an independent implementation can be built
 from it.

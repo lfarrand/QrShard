@@ -14,6 +14,10 @@ a screenshot is a lossless pixel copy, each image carries far more than a real Q
 dotnet add package QrShard.Core
 ```
 
+Each release is also mirrored to GitHub Packages, but **nuget.org is the supported install
+source** — GitHub Packages requires an access token with `read:packages` to install from, even
+for public repositories.
+
 ## Use
 
 ```csharp
