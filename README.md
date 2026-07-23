@@ -369,6 +369,77 @@ The crossover: below ~1 MB every preset needs one image, so the smaller Default 
 fixed cost; at scale, Max4K packs ~13x more payload per pixel, so 100 MB is 22 images instead
 of 495 — which dominates end-to-end time too, since every image is a capture.
 
+### Charts
+
+Codec time is only half the story: on a real transfer the *capture cadence* dominates, so the
+last two charts add the per-image cost of actually getting each shard onto the receiving screen.
+All four are log-log, generated from the same measurements as the table below.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/codec-time-dark.svg">
+  <img alt="Codec time by file size: encode (solid) and decode (dashed) for all four presets, log-log" src="docs/benchmarks/codec-time-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/throughput-dark.svg">
+  <img alt="Codec round-trip throughput in MB/s of payload per second of codec time" src="docs/benchmarks/throughput-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/transfer-manual-dark.svg">
+  <img alt="Estimated end-to-end transfer time with manual capture at 3 seconds per image" src="docs/benchmarks/transfer-manual-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/transfer-auto-dark.svg">
+  <img alt="Estimated end-to-end transfer time with automated capture at 0.5 seconds per image" src="docs/benchmarks/transfer-auto-light.svg">
+</picture>
+
+The two transfer charts are where the density presets earn their keep: they are codec time plus
+`images x seconds-per-image`, so they rank by **image count**, not by codec speed. At 100 MB that
+is a 495-image Default set against a 22-image Max4K one — about 25 minutes of hand-driven capture
+versus about 1 minute. The presets differ by roughly 3 seconds of codec time at that size, which
+is simply irrelevant next to a 24-minute difference in capture.
+
+### All measurements
+
+Every case in the matrix. **Images** is the shard count (`+Np` = parity images); **Est. manual**
+and **Est. auto** add capture cadence at 3 s and 0.5 s per image to the measured codec time.
+Encode and decode are BenchmarkDotNet means.
+
+<!-- BENCH:TABLE:START -->
+| Size | Preset | Images | Encode | Decode | Codec MB/s | Est. manual (3 s/img) | Est. auto (0.5 s/img) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 1KB | Default | 1 | 11.1 ms | 50.1 ms | 0.016 | 3.06 s | 561.3 ms |
+| 1KB | Dense | 1 | 15 ms | 56.6 ms | 0.014 | 3.07 s | 571.6 ms |
+| 1KB | Max4K | 1 | 78.4 ms | 109.1 ms | 0.005 | 3.19 s | 687.4 ms |
+| 1KB | Max4K-R10 | 1+1p | 100.4 ms | 128 ms | 0.004 | 6.23 s | 1.23 s |
+| 10KB | Default | 1 | 14.8 ms | 54.8 ms | 0.14 | 3.07 s | 569.7 ms |
+| 10KB | Dense | 1 | 18.2 ms | 54.2 ms | 0.135 | 3.07 s | 572.5 ms |
+| 10KB | Max4K | 1 | 66.4 ms | 119.3 ms | 0.053 | 3.19 s | 685.7 ms |
+| 10KB | Max4K-R10 | 1+1p | 95.6 ms | 128.2 ms | 0.044 | 6.22 s | 1.22 s |
+| 100KB | Default | 1 | 50.2 ms | 48.8 ms | 0.987 | 3.1 s | 598.9 ms |
+| 100KB | Dense | 1 | 31 ms | 59.4 ms | 1.1 | 3.09 s | 590.4 ms |
+| 100KB | Max4K | 1 | 86.2 ms | 117.4 ms | 0.48 | 3.2 s | 703.5 ms |
+| 100KB | Max4K-R10 | 1+1p | 99.1 ms | 129.3 ms | 0.428 | 6.23 s | 1.23 s |
+| 500KB | Default | 3 | 64.7 ms | 55.8 ms | 4.1 | 9.12 s | 1.62 s |
+| 500KB | Dense | 1 | 118.2 ms | 56.3 ms | 2.8 | 3.17 s | 674.4 ms |
+| 500KB | Max4K | 1 | 85.1 ms | 132.5 ms | 2.2 | 3.22 s | 717.6 ms |
+| 500KB | Max4K-R10 | 1+1p | 80.5 ms | 135.6 ms | 2.3 | 6.22 s | 1.22 s |
+| 1MB | Default | 5 | 69.9 ms | 57.1 ms | 7.9 | 15.13 s | 2.63 s |
+| 1MB | Dense | 2 | 128 ms | 60.3 ms | 5.3 | 6.19 s | 1.19 s |
+| 1MB | Max4K | 1 | 78.9 ms | 123.3 ms | 4.9 | 3.2 s | 702.2 ms |
+| 1MB | Max4K-R10 | 1+1p | 109.6 ms | 132.5 ms | 4.1 | 6.24 s | 1.24 s |
+| 10MB | Default | 50 | 263.6 ms | 176.4 ms | 22.7 | 2.5 min | 25.44 s |
+| 10MB | Dense | 15 | 223.8 ms | 92.1 ms | 31.7 | 45.32 s | 7.82 s |
+| 10MB | Max4K | 3 | 156.7 ms | 134.9 ms | 34.3 | 9.29 s | 1.79 s |
+| 10MB | Max4K-R10 | 3+1p | 165.1 ms | 146.7 ms | 32.1 | 12.31 s | 2.31 s |
+| 100MB | Default | 495 | 2.35 s | 1.32 s | 27.2 | 24.8 min | 4.2 min |
+| 100MB | Dense | 147 | 1.47 s | 610.5 ms | 48.2 | 7.4 min | 1.3 min |
+| 100MB | Max4K | 22 | 264.9 ms | 419.7 ms | 146 | 1.1 min | 11.68 s |
+| 100MB | Max4K-R10 | 22+3p | 321.4 ms | 384.6 ms | 142 | 1.3 min | 13.21 s |
+<!-- BENCH:TABLE:END -->
+
 ### Running the benchmarks
 
 `tests/QrShard.Benchmarks` is a [BenchmarkDotNet](https://benchmarkdotnet.org/) suite measuring
@@ -379,10 +450,20 @@ cd tests/QrShard.Benchmarks
 dotnet run -c Release                      # full matrix — ~2 hours, ~5 GB temp disk
 QRSHARD_BENCH_SIZES=1KB,1MB,100MB QRSHARD_BENCH_PRESETS=Default,Max4K dotnet run -c Release
 dotnet run -c Release -- --graphs-only     # regenerate graphs from persisted results
+dotnet run -c Release -- --readme-assets   # refresh this README's charts + table
 ```
 
 Results persist and **merge across runs**; output includes the machine-spec header and a
-self-contained `transfer-graphs.html`.
+self-contained `transfer-graphs.html`. That merge is what lets the matrix be measured in several
+sittings — but it also means a partial re-run leaves the untouched sizes at their older numbers,
+silently mixing builds in one table. After perf work, re-measure every size you intend to
+publish (a stale row usually gives itself away as a non-monotonic kink in the charts).
+
+`--readme-assets` re-exports what you see above from those same persisted results: one
+standalone SVG per chart per colour scheme into [`docs/benchmarks/`](docs/benchmarks/), and the
+measurements table spliced back into this file between its `BENCH:TABLE` marker comments. The
+charts are emitted with every presentation attribute inlined — GitHub's SVG sanitizer strips
+`<style>` blocks, which would otherwise render them as unstyled black shapes.
 
 ## How it works
 
