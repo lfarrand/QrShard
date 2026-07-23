@@ -47,8 +47,10 @@ Video decoding and the live receiver additionally need [ffmpeg](https://ffmpeg.o
 - **Standalone binaries**: tagged releases attach Native-AOT single-file binaries for
   win-x64 / linux-x64 / linux-arm64 / osx-arm64 — no .NET install needed. `./publish.ps1`
   (or `.sh`) produces the same locally.
-- **As a library**: `dotnet add package QrShard.Core` — the embeddable codec with a small
-  public API (`QrShardCodec.EncodeFile` / `DecodeImages`), wire-compatible with the CLI.
+- **As a library**: `dotnet add package QrShard.Core` — the embeddable codec, wire-compatible with
+  the CLI. `QrShardCodec.EncodeFile` / `DecodeImages` for one-shot use, plus `QrShardDecodeSession`
+  for **incremental** decoding: feed captures (files or in-memory image bytes) as they arrive,
+  query which images are still missing, and assemble the moment the set is recoverable.
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
   [Building](#building-and-testing) for the ImageSharp license note).
 
@@ -86,9 +88,11 @@ bit-identical.
 
 **Video mode — no manual capturing at all.** Add `--video` when encoding and a self-contained
 `slideshow.html` is written next to the shards: open it in any browser, press F11, and it
-cycles every image forever (default 500 ms each; `--interval` to tune). On the receiving side,
-**record the screen** for one full cycle — or point a phone at it (`--camera` shards decode
-from handheld video, with the detected pose cached between frames) — and feed the recording in:
+cycles every image forever (default 500 ms each; `--interval` to tune; `--slideshow apng` writes a
+single animated PNG instead of an HTML page, for setups where one media file is easier to display
+or record). On the receiving side, **record the screen** for one full cycle — or point a phone at
+it (`--camera` shards decode from handheld video, with the detected pose cached between frames) —
+and feed the recording in:
 
 ```
 qrshard decode recording.mp4 -o holiday-photos.zip
@@ -96,7 +100,8 @@ qrshard decode recording.mp4 -o holiday-photos.zip
 
 Near-duplicate frames are skipped cheaply, torn mid-transition frames fail checksums harmlessly
 and come around again next cycle, and decoding **stops early** the moment the collected set is
-complete or recoverable. Add `-F 100` (fountain coding) when encoding and the slideshow also
+complete or recoverable. If a file recording still comes up short, it is automatically re-extracted
+at a higher frame rate before giving up. Add `-F 100` (fountain coding) when encoding and the slideshow also
 cycles random-linear coded frames: **any** enough captured frames per stripe reconstruct the
 data, so lost or glared frames simply don't count — the ideal mode for lossy capture chains.
 
@@ -118,9 +123,9 @@ transfer completes.
 | `qrshard decode <folder\|images...\|recording> [options]` | Reconstitute the original from captures or a recording (`--watch` to keep decoding as captures land; `--clipboard` on Windows) |
 | `qrshard receive [--device d \| --screen] [options]` | Live decode from a webcam — or from THIS machine's screen (`--screen`): put the slideshow in an RDP/VM window and transfer out of locked-down remotes |
 | `qrshard verify <folder\|images...> [--session f] [--json]` | Report set completeness without writing output |
-| `qrshard info <image> [--heatmap out.png] [--json]` | Inspect/validate one shard; render an ECC damage map |
+| `qrshard info <image> [--heatmap out.png] [--quality-heatmap out.png] [--json]` | Inspect/validate one shard; render an ECC damage map or a capture-quality map (works even on a *failed* capture) |
 | `qrshard calibrate [-o dir] [--camera] / calibrate <folder>` | Probe → capture → recommended density settings |
-| `qrshard test` | End-to-end self-test, including simulated screenshots |
+| `qrshard test [<file> [encode opts]]` | Built-in self-test, or round-trip *your* file at *your* settings through simulated screenshots and report the ECC headroom it used |
 
 ### `encode` options
 
@@ -136,9 +141,20 @@ transfer completes.
 | `-p, --password <pw>` | any string | off | AES-256-GCM encrypt the payload (PBKDF2-SHA256 key); decode needs the same password |
 | `-f, --format <fmt>` | `png`, `bmp`, `tga`, `qoi`, `webp`, `tiff` | `png` | Lossless container format |
 | `--camera` | flag | off | Camera profile: finder patterns so shards decode from **photos/handheld video** of the screen; shifts defaults to cell 8 / 2 bits / ECC 32 |
-| `--video` | flag | off | Also write `slideshow.html` for recording-based capture |
-| `-i, --interval <ms>` | ≥ 100 | 500 | Slideshow interval per image |
+| `--video` | flag | off | Also write a slideshow (see `--slideshow`) for recording-based capture |
+| `--slideshow <kind>` | `html`, `apng` | `html` | With `--video`: a self-contained `slideshow.html` page, or a single animated PNG (`slideshow.apng`) cycling the shards — useful where one media file is easier to display/record than a browser page |
+| `-i, --interval <ms>` | ≥ 100 | 500 | Slideshow interval per image (both slideshow kinds) |
+| `--interleave2` | flag | off | v2 permuted interleave: spreads **vertical** damage (a horizontal banner/overlay) across codewords as well as horizontal. Needs ECC; rides a metadata-version nibble so older decoders reject it rather than misread |
+| `--profile <name>` | a name in `appsettings.json` `EncodeProfiles` | — | Apply a named encode preset (see [Configuration](#configuration-appsettingsjson)); explicit flags still override it |
+| `--json` | flag | off | Emit the encode result (image/parity counts, geometry, file list, slideshow path) as JSON on stdout instead of the human summary |
+| `--dry-run` | flag | off | Print the exact image count and geometry — computed after compression, without rendering — then exit. A guardrail before a large folder silently emits hundreds of PNGs. Honors `--json` |
 | `--no-compress` | flag | compression on | Skip Brotli compression of the payload (auto-skipped when a sample shows the file is incompressible) |
+
+**Multiple inputs** are bundled into one archive and extracted on decode:
+`qrshard encode report.pdf photos/ notes.txt -o release.shards`. A single folder flattens to the
+archive root; multiple inputs keep their names (colliding names are refused, never silently
+overwritten). Unknown or misspelled options are rejected up front — a typo'd `--pasword` errors
+with a "did you mean" hint rather than silently encoding **unencrypted**.
 
 ### `decode` options
 
@@ -148,7 +164,12 @@ transfer completes.
 | `-p, --password <pw>` | any string | — | Password for encrypted payloads (clear error if missing or wrong) |
 | `--session <file>` | any path | off | Accumulate shards across sittings: incomplete sets persist (exit 3) with a missing-image report; the next run resumes from the union; deleted on success |
 | `--watch` | flag | off | Keep watching the folder: decode captures as they land, assemble the moment the set completes; Ctrl+C persists to the session |
-| `--fps <n>` | > 0 | 8 | Frame extraction rate when decoding a video recording |
+| `--clipboard` | flag | off | (Windows) decode the bitmap on the clipboard — snip a displayed shard with Win+Shift+S, no file saving; accumulates with `--session` |
+| `--fps <n>` | > 0 | 8 | Frame extraction rate when decoding a video recording. If not pinned, an incomplete file recording is automatically re-extracted at 2× then 4× until the set completes |
+
+A plain `decode` of an incomplete folder prints the same per-file status `verify` shows, names
+the missing images, points you at `--session`/`--watch`, and exits **3** (distinct from a hard
+error) — nothing already collected is lost.
 
 ## Workflow tools: sessions, watch, verify, heatmap, calibrate
 
@@ -159,8 +180,17 @@ transfer completes.
 - **`verify`**: is this set complete/recoverable? Per-file data/parity counts, missing indices,
   parity-coverage status; exit 0 only when fully reassemblable. `--json` for scripts.
 - **`info --heatmap out.png`**: a per-cell ECC damage map — green (clean) through red (heavily
-  corrected) to dark red (beyond correction) — rendered even for images that *fail* to decode,
-  so you can see exactly where the glare blob or cursor landed and adjust the capture.
+  corrected) to dark red (beyond correction) — showing exactly where the glare blob or cursor
+  landed. When a capture fails so badly there is no correction data to map, it falls back to the
+  quality map below.
+- **`info --quality-heatmap out.png`**: a capture-**quality** map from each cell's classification
+  confidence (how cleanly it matched a palette color). Unlike the ECC map it renders even for a
+  capture that never decoded at all — so you can see *where* focus/glare/rescaling hurt a totally
+  failed shot and fix the capture.
+- **`test <file> [encode opts]`**: encode *your* file at *your* settings, run it through the same
+  simulated screenshot degradation the self-test uses, and report whether it survives and the
+  worst-case ECC headroom it consumed — the "will my file at these settings make it?" check the
+  fixed-fixture self-test can't answer. (`test` alone still runs the built-in self-test.)
 - **`calibrate`**: writes a ladder of self-describing density probes; capture them exactly like
   a real transfer and `qrshard calibrate <capturedFolder>` measures what survived, recommending
   the densest `-c/-b` that decoded with comfortable ECC headroom on *your* screen/capture pair.
@@ -185,6 +215,10 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 | `PayloadCompressionLevel` | same four values | `Optimal` | Brotli level for compressing the file payload |
 | `EncodeMemoryBudgetMB` | 64–1000000 | 2000 | Pixel-buffer budget capping parallel encode workers |
 | `DecodeMaxParallelism` | 0–1024 | 0 (auto: cores, capped at 16) | Max parallel image decodes |
+| `ReceiveFps` | 0–120 | 10 | Default frame rate for the live `receive` capture |
+| `WatchPollMs` | 50–60000 | 250 | Folder poll interval (ms) for `decode --watch` |
+| `ReceiveDecodeWorkers` | 0–64 | 0 (auto) | Parallel frame-decode workers for the live receiver |
+| `EncodeProfiles` | `{ "<name>": { …encode-default keys… } }` | (none) | Named encode presets selected with `--profile <name>`; each starts from `EncodeDefaults` and overrides only the keys it names |
 
 Deliberately *not* configurable: anything both sides of a transfer must agree on — frame
 geometry, metadata-strip layout, magic numbers, Reed-Solomon/GF(2⁸) parameters — plus the
@@ -255,7 +289,10 @@ Six independent layers, from within-cell to whole-transfer:
 5. **Detection**: CRC-32 per payload, CRC-32-protected headers, and a SHA-256 of the whole file
    carried in every image and verified after reassembly — a successful decode is a
    cryptographic guarantee of a bit-identical file. Encrypted payloads are additionally
-   authenticated by AES-GCM.
+   authenticated by AES-GCM, which also **binds the cleartext identity fields** (original size,
+   SHA-256, filename) as associated data: because the header CRC is an integrity check, not a MAC,
+   an attacker could recompute it — but a tampered filename/size on an encrypted shard now fails
+   decryption up front rather than silently mis-routing a write.
 6. **Structural redundancy**: the self-describing metadata strip and the palette calibration
    strip are duplicated top and bottom, so an overlay across either edge cannot brick an image.
    When both palette strips are healthy but differ (vertical illumination gradients — screen
@@ -277,10 +314,20 @@ a dense alignment structure** — traced-edge residuals feed a correction field 
 distortion and screen curvature, and per-point black/white samples flatten vignette, glare
 gradients, and white-balance shifts before the color classifier sees anything.
 
+Finder detection runs on a **Sauvola local-contrast binarization** (a per-window threshold driven
+by both local mean and local variance), which holds up under the uneven illumination — screen
+falloff, glare washout — that defeats a single global threshold. When exactly three of the four
+finders survive (a finger or glare over one corner), the fourth is **reconstructed** by
+parallelogram completion, so a partially-occluded capture that used to be discarded still decodes
+(the payload CRC gates any bad reconstruction).
+
 For video, the detected pose is **cached across frames**: consecutive handheld frames share
 nearly the same pose and the refinement absorbs the drift, so full finder detection only reruns
 when a cached pose stops decoding. A capture-mode latch keeps plain screen recordings from ever
-paying for camera detection.
+paying for camera detection, and a cheap **sharpness gate** skips hopelessly motion-blurred frames
+before the expensive rectification. When no single frame of a group decodes, the group's
+near-duplicate frames are **averaged** and retried — independent sensor noise averages down, which
+can push a marginal blurred shard back over the error-correction threshold.
 
 Density is necessarily far lower than screenshots (~16 KB per image at the 4K camera defaults):
 use it for documents, keys, and small payloads. Simulated warps (rotation, ~8% perspective,
@@ -296,10 +343,10 @@ decoded output SHA-verified every iteration):
 |---|---|
 | CPU | AMD Ryzen 9 9950X3D 16-Core @ 4.3 GHz (family 26, model 68, stepping 0) |
 | Cores | 16 physical / 32 logical |
-| Motherboard | ASRock X670E Taichi (firmware 4.20) |
+| Motherboard | ASRock X670E Taichi (firmware 4.43) |
 | RAM | 4x DDR5-3600, 128 GB total |
 | Storage | Crucial T700 2 TB NVMe (temp/work); Corsair MP600 PRO NH 2 TB (artifacts) |
-| OS | Windows 11 Pro 25H2 (build 26200.8737) |
+| OS | Windows 11 Pro 25H2 (build 26200.8968) |
 | .NET | 10.0.10 (win-x64) |
 
 Presets: **Default** = 2160², 3 px cells, 4 bits (robust); **Dense** = 2160², 2 px, 6 bits;
@@ -307,14 +354,16 @@ Presets: **Default** = 2160², 3 px cells, 4 bits (robust); **Dense** = 2160², 
 
 | Size | Default enc / dec | Dense | Max4K | Max4K-R10 |
 |---:|---:|---:|---:|---:|
-| 1 KB | 21 / 42 ms | 31 / 54 ms | 112 / 159 ms | 113 / 180 ms |
-| 1 MB | 102 / 38 ms | 170 / 62 ms | 137 / 165 ms | 173 / 184 ms |
-| 10 MB | 277 / 272 ms | 204 / 95 ms | 217 / 178 ms | 230 / 187 ms |
-| 100 MB | 2.68 / 1.72 s | 1.45 / 0.72 s | **0.35 / 0.58 s** | 0.46 / 0.57 s |
+| 1 KB | 11 / 50 ms | 15 / 57 ms | 78 / 109 ms | 100 / 128 ms |
+| 1 MB | 70 / 57 ms | 128 / 60 ms | 79 / 123 ms | 110 / 133 ms |
+| 10 MB | 264 / 176 ms | 224 / 92 ms | 157 / 135 ms | 165 / 147 ms |
+| 100 MB | 2.35 / 1.32 s | 1.47 / 0.61 s | **0.26 / 0.42 s** | 0.32 / 0.38 s |
 
-(Numbers predate the latest decode-side wins — the specialized PNG reader and sampling-table
-work measured ~20% faster decodes on top of these.) A relative **perf gate** runs on every PR:
-base and head builds race the same 30 MB round trip, failing on a >30% median regression.
+Current-build means (BenchmarkDotNet v0.15.8, Monitoring strategy, .NET 10.0.10) — these include
+the specialized PNG reader and sampling-table work, so 100 MB Max4K now decodes in ~0.42 s and
+encodes in ~0.26 s. Macro IO benchmarks are noisy across three iterations (some cases carry wide
+error bars); the persisted medians track the means closely. A relative **perf gate** runs on every
+PR: base and head builds race the same 30 MB round trip, failing on a >30% median regression.
 
 The crossover: below ~1 MB every preset needs one image, so the smaller Default canvas wins on
 fixed cost; at scale, Max4K packs ~13x more payload per pixel, so 100 MB is 22 images instead
