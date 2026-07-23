@@ -28,7 +28,16 @@
     <PackageProjectUrl>https://github.com/lfarrand/QrShard</PackageProjectUrl>
     <RepositoryUrl>https://github.com/lfarrand/QrShard</RepositoryUrl>
     <PackageTags>qr;file-transfer;air-gap;encoding</PackageTags>
+    <Copyright>Copyright (c) 2026 Lee Farrand</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <!-- A package-specific readme: the repository README is written for GitHub and its relative
+         image links would render broken on nuget.org. -->
+    <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="PACKAGE.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\QrShard.Core\QrShard.Core.csproj" />
