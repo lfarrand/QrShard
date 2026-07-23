@@ -279,11 +279,17 @@ internal sealed class ShardDecoder(
     private DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path, DecodeDiagnostics? diagnostics)
     {
         var (layout, inner) = frameLocator.Locate(bmp, scratch);
+        // Capture per-cell classification margins for diagnostics only — the frame located, so a
+        // quality heatmap can show WHERE a capture is weak even if the grid decode later fails.
+        int[]? cellMargins = diagnostics is not null ? new int[(long)layout.GridW * layout.GridH] : null;
         if (diagnostics is not null)
+        {
             diagnostics.Layout = layout;
+            diagnostics.CellMargins = cellMargins;
+        }
         var palette = stripReader.ReadPalette(bmp, inner, layout);
         byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch,
-            out bool[]? suspectBytes, out byte[]? secondChoiceBytes);
+            out bool[]? suspectBytes, out byte[]? secondChoiceBytes, cellMargins);
 
         // v2 interleave: gather the permuted cell stream back into classic order so the whole
         // SIMD/erasure/Chase machinery — and multi-capture fusion — run unchanged.

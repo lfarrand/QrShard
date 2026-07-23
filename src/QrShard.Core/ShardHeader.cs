@@ -22,7 +22,8 @@ internal sealed class ShardHeader
     public const byte FlagEncrypted = 0x08;   // payload is AES-256-GCM encrypted (password required)
     public const byte FlagArchive = 0x10;     // payload is a tar archive of a folder
     public const byte FlagFountain = 0x20;    // parity images are random-linear fountain frames
-    public const byte KnownFlags = 0x3F;      // every flag this build understands
+    public const byte FlagAuthMeta = 0x40;    // encryption binds the identity header as AES-GCM AAD
+    public const byte KnownFlags = 0x7F;      // every flag this build understands
     private const byte HeaderVersion = 2;
 
     // Sanity ceilings for a crafted/corrupt header. The real encoder never approaches these:

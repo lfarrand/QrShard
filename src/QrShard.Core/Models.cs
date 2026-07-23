@@ -37,4 +37,8 @@ internal sealed class DecodeDiagnostics
 
     /// <summary>Copy of the sampled cell stream when the decode failed after grid sampling — fusion input.</summary>
     public byte[]? Cells { get; set; }
+
+    /// <summary>Per-cell classification margin (squared palette distance of the winning sample),
+    /// captured even when the decode fails — drives the capture-quality heatmap.</summary>
+    public int[]? CellMargins { get; set; }
 }

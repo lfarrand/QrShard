@@ -307,26 +307,54 @@ internal sealed class Cli(AppSettings? settings = null)
                 bool json = iflags.Contains("--json");
                 DecodedShard shard;
                 string? heatmapPath = Get(named, "--heatmap");
+                string? qualityPath = Get(named, "--quality-heatmap");
                 string? renderedHeatmap = null;
                 int correctedCw = 0, failedCw = 0;
-                if (heatmapPath is not null)
+                if (heatmapPath is not null || qualityPath is not null)
                 {
                     var diag = services.Decoder.Diagnose(positional[0]);
-                    if (diag.Layout is not null && diag.Layout.EccParity > 0)
+                    if (diag.Layout is null)
                     {
-                        services.Heatmap.Render(diag.Layout, diag.CodewordErrors, heatmapPath);
+                        err.WriteLine($"error: cannot render heatmap: {diag.Error}");
+                        return 1; // frame never located — nothing to map
+                    }
+
+                    // --heatmap prefers the ECC-correction map; when the decode did not run RS (no
+                    // ECC, or it failed before decoding) it falls back to the capture-quality map so
+                    // a FAILED capture still shows where it went wrong.
+                    if (heatmapPath is not null)
+                    {
+                        if (diag.Layout.EccParity > 0 && diag.CodewordErrors.Length > 0)
+                        {
+                            services.Heatmap.Render(diag.Layout, diag.CodewordErrors, heatmapPath);
+                            correctedCw = diag.CodewordErrors.Count(e => e > 0);
+                            failedCw = diag.CodewordErrors.Count(e => e < 0);
+                            if (!json)
+                                @out.WriteLine($"heatmap   : {heatmapPath} ({correctedCw} codeword(s) needed correction, {failedCw} beyond correction)");
+                        }
+                        else if (diag.CellMargins is not null)
+                        {
+                            services.Heatmap.RenderQuality(diag.Layout, diag.CellMargins, heatmapPath);
+                            if (!json)
+                            {
+                                string why = diag.Layout.EccParity == 0 ? "no ECC in this image" : "the decode did not complete";
+                                @out.WriteLine($"heatmap   : {heatmapPath} (capture-quality map — {why})");
+                            }
+                        }
+                        else
+                        {
+                            err.WriteLine("error: cannot render heatmap for this image.");
+                        }
                         renderedHeatmap = heatmapPath;
-                        correctedCw = diag.CodewordErrors.Count(e => e > 0);
-                        failedCw = diag.CodewordErrors.Count(e => e < 0);
-                        if (!json)
-                            @out.WriteLine($"heatmap   : {heatmapPath} ({correctedCw} codeword(s) needed correction, {failedCw} beyond correction)");
                     }
-                    else
+                    if (qualityPath is not null && diag.CellMargins is not null)
                     {
-                        err.WriteLine(diag.Layout is null
-                            ? $"error: cannot render heatmap: {diag.Error}"
-                            : "error: cannot render heatmap: this image was encoded without ECC.");
+                        services.Heatmap.RenderQuality(diag.Layout, diag.CellMargins, qualityPath);
+                        renderedHeatmap ??= qualityPath;
+                        if (!json)
+                            @out.WriteLine($"quality   : {qualityPath} (green = confident classification, red = ambiguous/likely wrong)");
                     }
+
                     if (diag.Shard is null)
                     {
                         err.WriteLine($"error: {diag.Error}");
@@ -771,7 +799,7 @@ internal sealed class Cli(AppSettings? settings = null)
             ["--camera", "--no-compress", "--interleave2"]),
         ["decode"] = new(["-o", "--out", "-p", "--password", "--session", "--fps"], ["--clipboard", "--watch"]),
         ["verify"] = new(["--session"], ["--json"]),
-        ["info"] = new(["--heatmap"], ["--json"]),
+        ["info"] = new(["--heatmap", "--quality-heatmap"], ["--json"]),
         ["receive"] = new(["-o", "--out", "-p", "--password", "--region", "--device", "--format", "--fps"], ["--screen"]),
         ["calibrate"] = new(["-o", "--out", "-r", "--resolution"], ["--camera"]),
     };
@@ -994,10 +1022,14 @@ internal sealed class Cli(AppSettings? settings = null)
                                          Report per-file completeness (missing images, parity
                                          coverage) without writing output; exit 0 when complete
                                          (--json for machine-readable output, also on info)
-              qrshard info <image> [--heatmap <out.png>]
-                                         Show and validate a single shard image; --heatmap renders
+              qrshard info <image> [--heatmap <out.png>] [--quality-heatmap <out.png>]
+                                         Show and validate a single shard image. --heatmap renders
                                          a per-cell ECC damage map (green=clean, red=corrected,
-                                         dark red=beyond correction) even for failed decodes
+                                         dark red=beyond correction), falling back to the quality
+                                         map when the decode didn't complete. --quality-heatmap
+                                         always renders the capture-QUALITY map (per-cell
+                                         classification confidence) — works even when a capture
+                                         fails to decode, so you can see WHERE glare/blur hit
               qrshard test [<file> [encode opts]]
                                          With no file: built-in round-trip self-test. With a file:
                                          encode YOUR file at YOUR settings (-c/-b/-e/--camera/...),

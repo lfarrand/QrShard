@@ -66,6 +66,35 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
         png.Write(outPath, px, w, h, upFilter: true, System.IO.Compression.CompressionLevel.Fastest);
     }
 
+    /// <summary>
+    /// Capture-QUALITY heatmap from per-cell classification margins (squared palette distance of
+    /// the winning sample). Unlike <see cref="Render"/> — which needs a successful RS decode — this
+    /// renders whenever the frame was merely located, so it shows WHERE a capture is weak (glare,
+    /// defocus, edge) even when the decode never completed. Green = confident, red = ambiguous.
+    /// It is a quality/ambiguity map, NOT a correctness map: a glare-saturated cell can map
+    /// confidently to the wrong color and still read green.
+    /// </summary>
+    public void RenderQuality(Layout layout, int[] cellMargins, string outPath)
+    {
+        int w = layout.GridW * CellPx, h = layout.GridH * CellPx;
+        var px = new Rgb24[w * h];
+        // Mirrors GridSampler's ConfidentDist (200) → green and AbsoluteSuspectDist (4000) → red.
+        const double confident = 200, ambiguous = 4000;
+        long cellIndex = 0;
+        for (int gy = 0; gy < layout.GridH; gy++)
+        {
+            for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
+            {
+                int margin = cellMargins[(int)cellIndex];
+                var color = margin > ambiguous * 4
+                    ? new Rgb24(90, 0, 20) // far past any palette color — likely unreadable
+                    : Gradient(Math.Clamp((margin - confident) / (ambiguous - confident), 0, 1));
+                Fill(px, w, gx * CellPx, gy * CellPx, color);
+            }
+        }
+        png.Write(outPath, px, w, h, upFilter: true, System.IO.Compression.CompressionLevel.Fastest);
+    }
+
     /// <summary>0 → green, 0.5 → yellow, 1 → red.</summary>
     private static Rgb24 Gradient(double t)
     {

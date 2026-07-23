@@ -48,8 +48,8 @@ internal sealed class PayloadPreparer(PayloadCipher cipher) : IPayloadPreparer
             byte[] empty = [];
             if (password is not null)
             {
-                empty = cipher.Encrypt(empty, password);
-                flags |= ShardHeader.FlagEncrypted;
+                empty = cipher.Encrypt(empty, password, PayloadCipher.BuildAad(0, sha, Path.GetFileName(filePath)));
+                flags |= ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta;
             }
             return new PayloadHandle(new BytePayloadSource(empty));
         }
@@ -77,8 +77,8 @@ internal sealed class PayloadPreparer(PayloadCipher cipher) : IPayloadPreparer
                 material = new byte[length];
                 mapped.Read(0, material);
             }
-            material = cipher.Encrypt(material, password);
-            flags |= ShardHeader.FlagEncrypted;
+            material = cipher.Encrypt(material, password, PayloadCipher.BuildAad(length, sha, Path.GetFileName(filePath)));
+            flags |= ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta;
         }
 
         if (material is not null)

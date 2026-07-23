@@ -74,7 +74,12 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
                 throw new ShardDecodeException($"'{first.FileName}' is encrypted; supply the password with -p/--password.");
             var blob = new byte[first.TotalLength];
             source.ReadExactly(blob);
-            source = new MemoryStream(cipher.Decrypt(blob, password, first.FileName));
+            // Newer encrypted shards bind the identity header as AAD; older ones (no FlagAuthMeta)
+            // decrypt with empty AAD, which GCM treats identically to no AAD.
+            ReadOnlySpan<byte> aad = (first.Flags & ShardHeader.FlagAuthMeta) != 0
+                ? PayloadCipher.BuildAad(first.OriginalLength, first.Sha256, first.FileName)
+                : default;
+            source = new MemoryStream(cipher.Decrypt(blob, password, first.FileName, aad));
         }
         if (compressed)
         {
