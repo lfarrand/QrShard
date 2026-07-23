@@ -301,12 +301,19 @@ internal static class GraphReport
             sb.Append($"<text x=\"{L - 8}\" y=\"{F(y + 3.5)}\" {tickAttr} text-anchor=\"end\">{yFormat(Math.Pow(10, e))}</text>");
         }
 
-        // X gridlines + labels at the benchmarked sizes.
+        // X gridlines + labels at the benchmarked sizes. Adjacent sizes only a factor of two apart
+        // (250MB/500MB) land close enough on a log axis for their labels to collide, so a label
+        // that would overlap its predecessor drops to a second row instead of overprinting it.
+        double[] rowRight = [double.NegativeInfinity, double.NegativeInfinity];
         foreach (var (label, bytes) in rows.Select(r => (r.SizeLabel, r.SizeBytes)).Distinct().OrderBy(t => t.SizeBytes))
         {
             double x = X(bytes);
             sb.Append($"<line x1=\"{F(x)}\" y1=\"{T}\" x2=\"{F(x)}\" y2=\"{T + plotH}\" {gridAttr}/>");
-            sb.Append($"<text x=\"{F(x)}\" y=\"{H - B + 18}\" {tickAttr} text-anchor=\"middle\">{label}</text>");
+
+            double half = label.Length * 5.6 / 2;
+            int row = x - half >= rowRight[0] + 3 ? 0 : 1;
+            rowRight[row] = x + half;
+            sb.Append($"<text x=\"{F(x)}\" y=\"{H - B + 18 + row * 12}\" {tickAttr} text-anchor=\"middle\">{label}</text>");
         }
 
         // Baseline.
