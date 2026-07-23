@@ -20,7 +20,8 @@ can be AES-256-GCM encrypted end to end.
 [How to use](#how-to-use-it) · [Options](#commands-and-options) ·
 [Workflow tools](#workflow-tools-sessions-watch-verify-heatmap-calibrate) ·
 [Configuration](#configuration-appsettingsjson) · [Capacity](#capacity-and-throughput) ·
-[Formats](#image-formats) · [Resilience](#resilience) · [Camera capture](#camera-capture) ·
+[Sample output](#sample-output) · [Formats](#image-formats) · [Resilience](#resilience) ·
+[Camera capture](#camera-capture) ·
 [Benchmarks](#benchmark-snapshot) · [Design notes](#how-it-works) ·
 [Building & testing](#building-and-testing)
 
@@ -244,6 +245,46 @@ second for 300 MB) — end-to-end time is dominated by *capture cadence*: at a m
 screenshot, ~72 images ≈ **3-4 minutes** (~1 MB/s effective); an automated capture loop pushes
 that several-fold. Not sure what density your setup survives? `qrshard calibrate`. Hard limits:
 ≤ 1.5 GB per file; display size caps per-image resolution.
+
+## Sample output
+
+Real, unmodified encoder output. Each row is one shard image: the left view is the **whole
+image** scaled down to fit the page, the right view is an exact **150 x 150 pixel region
+magnified 3x** with no resampling, so you can see the individual cells at their true relative
+size. The payload is random bytes sized to fill the grid — that is why the data field looks like
+noise and why there is no blank space.
+
+| Configuration | Whole image (scaled) | Cells at 1:1 (150 px region, 3x) |
+|---|---|---|
+| **Default** — `-c 3 -b 4`<br>2159 x 2159 px · 3 px cells · 16 colours<br>~212 KB per image | <img src="docs/samples/default-full.png" alt="Default preset shard: white quiet zone, black frame, metadata and palette strips top and bottom, dense multicoloured data field" width="380"> | <img src="docs/samples/default-detail.png" alt="Default preset cells magnified: 3-pixel square cells in 16 colours" width="380"> |
+| **Dense** — `-c 2 -b 6`<br>2160 x 2160 px · 2 px cells · 64 colours<br>~716 KB per image | <img src="docs/samples/dense-full.png" alt="Dense preset shard at 2 pixel cells and 64 colours" width="380"> | <img src="docs/samples/dense-detail.png" alt="Dense preset cells magnified: 2-pixel cells in 64 colours" width="380"> |
+| **Max4K** — `-r 3840x2160 -c 1 -b 6`<br>3840 x 2160 px · 1 px cells · 64 colours<br>~4.9 MB per image | <img src="docs/samples/max4k-full.png" alt="Max4K preset shard filling a 4K display at one pixel per cell" width="380"> | <img src="docs/samples/max4k-detail.png" alt="Max4K cells magnified: one pixel per cell in 64 colours" width="380"> |
+| **Camera** — `--camera`<br>3836 x 2160 px · 8 px cells · 4 colours<br>~16 KB per image | <img src="docs/samples/camera-full.png" alt="Camera profile shard with four QR-style finder patterns in bands above and below the data area" width="380"> | <img src="docs/samples/camera-detail.png" alt="Camera profile cells magnified: 8-pixel cells in 4 colours" width="380"> |
+| **Monochrome** — `-c 8 -b 1`<br>2154 x 2158 px · 8 px cells · black/white<br>~7 KB per image | <img src="docs/samples/mono-full.png" alt="Monochrome shard: 8 pixel black and white cells" width="380"> | <img src="docs/samples/mono-detail.png" alt="Monochrome cells magnified: 8-pixel black and white cells, QR-like" width="380"> |
+
+What you are looking at, from the outside in: a white **quiet zone**, the black **frame** the
+decoder traces to find and rectify the image, then the **metadata strip** (the black/white run
+carrying geometry and part numbers) and the **palette calibration strip** (the coloured swatches
+the classifier calibrates against) — both duplicated top *and* bottom so an overlay across either
+edge cannot brick the image — and finally the data field itself.
+
+The `--camera` row is the odd one out: it adds four QR-style **finder patterns** in bands above
+and below the data, plus the small orientation tick beside the top-left finder, which is what
+lets a photo or handheld video be located and de-skewed. It pays for that in density — 4 colours
+at 8 px cells is ~16 KB per image against Max4K's ~4.9 MB, roughly 300x less.
+
+The monochrome row is the opposite extreme and the one that looks most like a conventional QR
+code. It is not a preset, just `-c 8 -b 1`; every setting in between is available.
+
+> The whole-image views are scaled down for the page and **will not decode** — a real capture has
+> to be pixel-accurate. The 1:1 detail crops are true pixels, but only a fragment of a shard.
+
+Regenerate them with [`docs/samples/regenerate.ps1`](docs/samples/regenerate.ps1). Only these
+derived views are committed: a filled Max4K shard is ~25 MB of essentially incompressible pixels
+at full resolution. The payload comes from a fixed seed, so the data field is stable between
+runs — but the images are not byte-identical, because every encode stamps a random 64-bit file
+id (that is what lets shards of *different* files share a folder without being confused), and
+that id lives in the metadata strip.
 
 ## Image formats
 
