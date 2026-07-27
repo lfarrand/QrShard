@@ -45,6 +45,50 @@ jobs:
       - name: Publish (Native AOT)
         run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false
 
+      # `dotnet test` above exercises the JIT build. Native AOT is a different compilation model:
+      # trimming and reflection fail here and nowhere else, so the binary that users actually
+      # download was the least-tested artifact in the release — compiled, zipped and attached
+      # without ever being executed. Run it before it is archived, so a broken one cannot ship.
+      # Every RID is native to its runner (x64 on windows/ubuntu-latest, arm64 on
+      # ubuntu-24.04-arm/macos-latest), so this really runs rather than merely linking.
+      - name: Smoke-test the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="src/QrShard/bin/Release/net10.0/${{ matrix.rid }}/publish/qrshard"
+          [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
+          [ -x "$bin" ] || chmod +x "$bin"
+
+          # 1. It starts at all — the check that a trimming or reflection fault would fail — and
+          #    reports the version it is being released as. The binary embeds the csproj <Version>
+          #    while the NuGet packages take theirs from the tag, so this is also the only thing
+          #    that would notice the two drifting apart.
+          actual="$("$bin" --version)"
+          expected="qrshard ${GITHUB_REF_NAME#v}"
+          echo "version: $actual"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::binary reports '$actual' but the tag expects '$expected'"
+            exit 1
+          fi
+
+          # 2. The built-in self-test: encode, simulated screenshot degradation, ECC, and
+          #    cross-shard parity recovery, all through the AOT-compiled codec.
+          "$bin" test
+
+          # 3. A real file through the real CLI, with a data image deleted so parity has to
+          #    rebuild it, compared byte-for-byte independently of the tool's own SHA check.
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          head -c 300000 /dev/urandom > "$work/payload.bin"
+          "$bin" encode "$work/payload.bin" -o "$work/shards" -r 900 -R 25 > /dev/null
+          rm "$(ls "$work"/shards/*.png | head -1)"
+          "$bin" decode "$work/shards" -o "$work/out.bin" > /dev/null
+          if ! cmp -s "$work/payload.bin" "$work/out.bin"; then
+            echo "::error::round trip through the ${{ matrix.rid }} binary did not reproduce the input"
+            exit 1
+          fi
+          echo "round trip OK (parity rebuilt a deleted image)"
+
       - name: Archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
