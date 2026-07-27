@@ -1,0 +1,38 @@
+# Consumer-contract check: builds the NuGet packages and uses them from outside the repository,
+# the way a stranger would. Kept separate from ci.yml because it is a slower integration check
+# with a different subject — the packaged public surface rather than the code — and it runs in
+# parallel, so it adds no wall-clock time to the PR.
+#
+# It exists because the unit suite references the projects directly and therefore cannot catch a
+# broken package: a QrShard.Core readme sample that did not compile shipped in three releases
+# with all 489 tests green.
+name: Package
+
+on:
+  push:
+    branches: [main]
+  # Deliberately unfiltered by path. A `paths:` filter would skip the job on PRs that do not
+  # touch src/, which sounds right but makes it a required check that never reports — GitHub
+  # then blocks the PR forever waiting for a run that will not happen.
+  pull_request:
+
+jobs:
+  consumer:
+    # Packaging behaviour is platform-independent, so one runner is enough to catch the drift
+    # this guards against; the cross-platform matrix stays in ci.yml.
+    runs-on: ubuntu-latest
+    env:
+      # Needed to BUILD the packages. Deliberately not exported past the pack step — the whole
+      # point is to prove a consumer needs no Six Labors licence of their own.
+      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Verify the packages from a consumer's point of view
+        run: tests/verify-package-consumer.sh
