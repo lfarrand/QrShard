@@ -92,14 +92,22 @@ public class OutputPathSafetyTests
         Assert.NotEmpty(Directory.GetFiles(cwd));
     }
 
+    // Deliberately identical on every OS: '\' is an ordinary filename character on Linux, so
+    // relying on Path.GetFileName would let a Windows-style name through there. Shards cross
+    // platforms by design, so the same input must reduce the same way everywhere.
     [Theory]
     [InlineData("../../x.bin", "x.bin")]
     [InlineData(@"..\..\x.bin", "x.bin")]
     [InlineData("sub/dir/x.bin", "x.bin")]
+    [InlineData(@"C:\Windows\System32\x.bin", "x.bin")]
+    [InlineData("/etc/cron.d/x", "x")]
     [InlineData("plain.bin", "plain.bin")]
     [InlineData("..", "restored.bin")]
     [InlineData(".", "restored.bin")]
     [InlineData("", "restored.bin")]
+    [InlineData("C:x.bin", "restored.bin")]      // Windows drive-relative
+    [InlineData("x.bin:stream", "restored.bin")] // NTFS alternate data stream
+    [InlineData("a\0b", "restored.bin")]
     public void SafeFileName_ReducesToABareName(string input, string expected) =>
         Assert.Equal(expected, ShardAssembler.SafeFileName(input));
 

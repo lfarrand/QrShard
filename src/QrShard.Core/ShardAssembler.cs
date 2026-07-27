@@ -190,13 +190,24 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     /// </summary>
     internal static string SafeFileName(string fileName)
     {
-        string name = Path.GetFileName(fileName);
-        // GetFileName strips directories but leaves "." and ".." intact, and both still traverse.
+        // Split on BOTH separators regardless of host OS. Path.GetFileName alone is
+        // platform-dependent — on Linux '\' is an ordinary filename character, so a
+        // Windows-style "..\..\x" would survive intact — and shards are explicitly
+        // cross-platform, so a name must be neutralised the same way everywhere.
+        int cut = fileName.LastIndexOfAny(['/', '\\']);
+        string name = cut >= 0 ? fileName[(cut + 1)..] : fileName;
+
+        // Stripping directories leaves "." and ".." intact, and both still traverse.
         if (name.Length == 0 || name is "." or "..")
             return FallbackFileName;
-        foreach (char c in Path.GetInvalidFileNameChars())
-            if (name.Contains(c))
+
+        // Invalid-character sets are also platform-dependent, so reject the union: a name is
+        // only accepted if it is a plain file name on every platform. ':' additionally guards
+        // the Windows drive-relative form ("C:x") and NTFS alternate data streams.
+        foreach (char c in name)
+            if (c is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' || c < ' ')
                 return FallbackFileName;
+
         return name;
     }
 
