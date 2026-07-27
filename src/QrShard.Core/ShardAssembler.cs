@@ -180,12 +180,51 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         }
     }
 
+    /// <summary>
+    /// Reduces the header's file name to a bare name for path construction. Shard headers come
+    /// from untrusted images, and this value is attacker-controlled: "../../x" escapes the
+    /// working directory, and an absolute name is worse still, because Path.Combine discards its
+    /// first argument entirely when the second is rooted — so the write lands wherever the header
+    /// says. Only path construction is sanitized; the original value is still what gets logged
+    /// and bound as AES-GCM associated data, so existing shards keep decrypting.
+    /// </summary>
+    internal static string SafeFileName(string fileName)
+    {
+        // Split on BOTH separators regardless of host OS. Path.GetFileName alone is
+        // platform-dependent — on Linux '\' is an ordinary filename character, so a
+        // Windows-style "..\..\x" would survive intact — and shards are explicitly
+        // cross-platform, so a name must be neutralised the same way everywhere.
+        int cut = fileName.LastIndexOfAny(['/', '\\']);
+        string name = cut >= 0 ? fileName[(cut + 1)..] : fileName;
+
+        // Stripping directories leaves "." and ".." intact, and both still traverse.
+        if (name.Length == 0 || name is "." or "..")
+            return FallbackFileName;
+
+        // Invalid-character sets are also platform-dependent, so reject the union: a name is
+        // only accepted if it is a plain file name on every platform. ':' additionally guards
+        // the Windows drive-relative form ("C:x") and NTFS alternate data streams.
+        foreach (char c in name)
+            if (c is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' || c < ' ')
+                return FallbackFileName;
+
+        return name;
+    }
+
+    private const string FallbackFileName = "restored.bin";
+
     private static string ResolveOutputPath(ShardHeader first, string? outputPath)
     {
-        string outPath = outputPath ?? Path.Combine(Environment.CurrentDirectory, first.FileName);
-        if (outputPath is null && File.Exists(outPath))
+        // An explicit -o is the user's own instruction and is used as given; only the name
+        // carried inside the image is untrusted.
+        if (outputPath is not null)
+            return outputPath;
+
+        string safe = SafeFileName(first.FileName);
+        string outPath = Path.Combine(Environment.CurrentDirectory, safe);
+        if (File.Exists(outPath))
             outPath = Path.Combine(Environment.CurrentDirectory,
-                $"{Path.GetFileNameWithoutExtension(first.FileName)}.restored{Path.GetExtension(first.FileName)}");
+                $"{Path.GetFileNameWithoutExtension(safe)}.restored{Path.GetExtension(safe)}");
         return outPath;
     }
 

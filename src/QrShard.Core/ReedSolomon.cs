@@ -226,6 +226,13 @@ internal sealed class ReedSolomon
     /// Implemented as Berlekamp-Massey seeded with the erasure locator Γ(x) = Π(1 - X_k x)
     /// (Blahut), after which Chien/Forney/verify run exactly as in <see cref="TryDecode"/>.
     /// </summary>
+    /// <summary>
+    /// Syndromes never spent on erasure correction, reserved for verifying the result. Reed-Solomon
+    /// cannot detect every miscorrection beyond its bound, but decoding with the entire budget
+    /// consumed makes a wrong answer *certain* to pass rather than merely possible.
+    /// </summary>
+    internal const int VerificationMargin = 2;
+
     public bool TryDecodeWithErasures(Span<byte> codeword, int nsym, ReadOnlySpan<int> erasures, out int correctedErrors)
     {
         correctedErrors = 0;
@@ -233,7 +240,14 @@ internal sealed class ReedSolomon
             return true;
         if (erasures.Length == 0)
             return TryDecode(codeword, nsym, out correctedErrors);
-        if (erasures.Length > nsym)
+        // Hold back a couple of syndromes so the final check can actually verify. With f erasures
+        // the decoder consumes f of the nsym syndromes (plus 2 per extra error it finds); what is
+        // left over is the only thing able to detect a wrong answer. At f == nsym nothing is left:
+        // an assignment to the erased positions making EVERY syndrome vanish always exists and is
+        // unique, so the verify below passes on a valid-but-not-transmitted codeword every single
+        // time — a silent miscorrection, measured at 200/200 for nsym 8, 16 and 32. Two spare
+        // symbols also preserve the documented ~14-erasure capability at the default parity of 16.
+        if (erasures.Length > nsym - VerificationMargin)
             return false;
         int n = codeword.Length;
 
