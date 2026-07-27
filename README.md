@@ -133,6 +133,8 @@ transfer completes.
 | `qrshard info <image> [--heatmap out.png] [--quality-heatmap out.png] [--json]` | Inspect/validate one shard; render an ECC damage map or a capture-quality map (works even on a *failed* capture) |
 | `qrshard calibrate [-o dir] [--camera] / calibrate <folder>` | Probe → capture → recommended density settings |
 | `qrshard test [<file> [encode opts]]` | Built-in self-test, or round-trip *your* file at *your* settings through simulated screenshots and report the ECC headroom it used |
+| `qrshard --version` | Print the version (also `-v` / `version`) — the same version the package and release binaries carry |
+| `qrshard --help` | Show usage (also `-h` / `help`) |
 
 ### `encode` options
 
