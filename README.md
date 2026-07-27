@@ -252,6 +252,37 @@ screenshot, ~72 images ≈ **3-4 minutes** (~1 MB/s effective); an automated cap
 that several-fold. Not sure what density your setup survives? `qrshard calibrate`. Hard limits:
 ≤ 1.5 GB per file; display size caps per-image resolution.
 
+### Decode frame rate
+
+How fast the *receiver* turns captured images back into data — the number that decides whether
+the decoder can keep up with a slideshow or a video. Two figures per density: **one core** (the
+portable per-frame cost) and **parallel** (the default decoder, up to 16 image workers — the
+ceiling on the reference machine). Payload rate is the parallel frame rate times the payload each
+frame carries; the 250 MB column is decode time alone at that rate.
+
+| Resolution / density | Payload / image | Frames/s, 1 core | Frames/s, parallel* | Payload rate* | 250 MB, decode only* |
+|---|---:|---:|---:|---:|---:|
+| 2160² · 3 px · 4-bit *(Default)* | ~212 KB | ~53 (19 ms) | ~250 | ~53 MB/s | ~4.7 s |
+| 2160² · 2 px · 6-bit *(Dense)* | ~716 KB | ~36 (28 ms) | ~170 | ~122 MB/s | ~2.0 s |
+| 3840×2160 · 1 px · 6-bit *(Max4K)* | ~4.9 MB | ~14 (74 ms) | ~70 | ~340 MB/s | ~0.7 s |
+| 3840×2160 · 1 px · 8-bit | ~6.5 MB | ~13 (78 ms) | ~65 | ~425 MB/s | ~0.6 s |
+
+\*Parallel figures are on the [benchmark machine](#benchmark-snapshot) (32 logical cores). Past
+the 16-worker cap the decode is memory-bandwidth-bound, so these vary ~15% run to run and scale
+down on fewer cores; the one-core column does not. Reproduce with `dotnet run -c Release --
+--fps-probe` in `tests/QrShard.Benchmarks`.
+
+Notice the frame rate *falls* with density while the payload rate *rises*: a 4K frame decodes
+about 4x slower than a 2160² one but carries ~23x more data, so denser images move more bytes
+per second and a fixed transfer needs fewer of them — the same reason Max4K wins the
+[transfer charts](#charts). It also means **decode is never the limit in practice**: the default
+slideshow runs at 2 frames/second (500 ms/image), and even the slowest one-core rate here (~13
+fps at 4K) clears that ~6x over, while every parallel rate clears a 60 Hz display. The parallel
+250 MB decode times — well under a second at 4K — sit far below the capture-bound reality of the
+same transfer: the benchmark table puts 250 MB at Max4K around **28 s** even with a scripted
+0.5 s/image loop, and minutes by hand. The decoder spends almost all of a real transfer waiting
+for the next frame.
+
 ## Sample output
 
 Real, unmodified encoder output. Each row is one shard image: the left view is the **whole
@@ -516,6 +547,7 @@ dotnet run -c Release                      # full matrix — ~14 min on the mach
 QRSHARD_BENCH_SIZES=1KB,1MB,100MB QRSHARD_BENCH_PRESETS=Default,Max4K dotnet run -c Release
 dotnet run -c Release -- --graphs-only     # regenerate graphs from persisted results
 dotnet run -c Release -- --readme-assets   # refresh this README's charts + table
+dotnet run -c Release -- --fps-probe       # decode frame rate / throughput (Decode frame rate table)
 ```
 
 Results persist and **merge across runs**; output includes the machine-spec header and a
