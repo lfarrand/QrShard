@@ -1,3 +1,4 @@
+using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace QrShard;
@@ -57,6 +58,12 @@ internal sealed class Cli(AppSettings? settings = null)
     {
         if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
             return Help(@out, err);
+
+        // Mirrors the help triple so the two behave alike. Intercepted before the per-command
+        // ArgSpec check, which is keyed on a command name and would otherwise reject "--version"
+        // as an unknown command.
+        if (args[0] is "-v" or "--version" or "version")
+            return Version(@out);
 
         string command = args[0].ToLowerInvariant();
         // Reject unknown/misspelled options up front. Without this, ParseArgs accepts any
@@ -932,6 +939,24 @@ internal sealed class Cli(AppSettings? settings = null)
         return 0;
     }
 
+    /// <summary>
+    /// Prints the tool version. Read from the assembly's informational version, which is what the
+    /// csproj &lt;Version&gt; flows into — so it cannot drift from the released package the way a
+    /// hand-maintained constant would. Deterministic builds append "+&lt;commit&gt;" to that
+    /// attribute; that is noise here, so only the part before '+' is printed.
+    /// </summary>
+    private static int Version(TextWriter @out)
+    {
+        var assembly = typeof(Cli).Assembly;
+        string? informational = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        string version = !string.IsNullOrWhiteSpace(informational)
+            ? informational.Split('+')[0]
+            : assembly.GetName().Version?.ToString(3) ?? "unknown";
+        @out.WriteLine($"qrshard {version}");
+        return 0;
+    }
+
     private static int Help(TextWriter @out, TextWriter err, string? error = null)
     {
         if (error is not null)
@@ -1035,6 +1060,9 @@ internal sealed class Cli(AppSettings? settings = null)
                                          encode YOUR file at YOUR settings (-c/-b/-e/--camera/...),
                                          run it through simulated screenshots, and report whether
                                          it survives and how much ECC headroom it used.
+
+              qrshard --version          Print the version (also -v, or "version").
+              qrshard --help             Show this help (also -h, or "help").
 
             Density guide (per image, after default ECC): bytes ≈ cells x bits/cell / 8 x 0.94.
               Robust default (2160px, cell 3, 4 bits) ≈ 216 KB/image.

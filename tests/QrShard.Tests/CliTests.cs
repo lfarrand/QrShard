@@ -33,6 +33,46 @@ public class CliTests
         Assert.Contains("usage:", output);
     }
 
+    [Theory]
+    [InlineData("-v")]
+    [InlineData("--version")]
+    [InlineData("version")]
+    public void VersionFlags_PrintVersion(string flag)
+    {
+        var (code, output, err) = Run(flag);
+        Assert.Equal(0, code);
+        Assert.Equal("", err);
+        // "qrshard <version>" on one line, and a real version — not the "unknown" fallback,
+        // which is what a build that lost the informational-version attribute would print.
+        string text = output.Trim();
+        Assert.StartsWith("qrshard ", text);
+        Assert.DoesNotContain("\n", text);
+        string version = text["qrshard ".Length..];
+        Assert.Matches(@"^\d+\.\d+\.\d+", version);
+    }
+
+    [Fact]
+    public void Version_MatchesTheAssemblyVersion()
+    {
+        // Guards the drift a hand-maintained version string would invite: the printed value must
+        // track the csproj <Version> that ships in the package.
+        var (_, output, _) = Run("--version");
+        var assemblyVersion = typeof(Cli).Assembly.GetName().Version;
+        Assert.NotNull(assemblyVersion);
+        string printed = output.Trim()["qrshard ".Length..];
+        Assert.StartsWith($"{assemblyVersion!.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}", printed);
+    }
+
+    [Fact]
+    public void Version_IsNotTreatedAsAnUnknownCommand()
+    {
+        // The per-command ArgSpec check runs on args[0]; if --version were not intercepted first
+        // it would fall through to the command switch and fail as an unknown command.
+        var (code, _, err) = Run("--version");
+        Assert.Equal(0, code);
+        Assert.DoesNotContain("unknown", err);
+    }
+
     [Fact]
     public void UnknownCommand_ReturnsUsageError()
     {
