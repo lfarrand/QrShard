@@ -1,0 +1,4 @@
+# Shell scripts must keep LF line endings. Committed with CRLF (which is what happens by default
+# when they are authored on Windows with core.autocrlf=true), they fail the moment Linux runs
+# them — "bad interpreter: /usr/bin/env bash^M" — including in CI.
+*.sh text eol=lf
