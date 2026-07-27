@@ -180,12 +180,40 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         }
     }
 
+    /// <summary>
+    /// Reduces the header's file name to a bare name for path construction. Shard headers come
+    /// from untrusted images, and this value is attacker-controlled: "../../x" escapes the
+    /// working directory, and an absolute name is worse still, because Path.Combine discards its
+    /// first argument entirely when the second is rooted — so the write lands wherever the header
+    /// says. Only path construction is sanitized; the original value is still what gets logged
+    /// and bound as AES-GCM associated data, so existing shards keep decrypting.
+    /// </summary>
+    internal static string SafeFileName(string fileName)
+    {
+        string name = Path.GetFileName(fileName);
+        // GetFileName strips directories but leaves "." and ".." intact, and both still traverse.
+        if (name.Length == 0 || name is "." or "..")
+            return FallbackFileName;
+        foreach (char c in Path.GetInvalidFileNameChars())
+            if (name.Contains(c))
+                return FallbackFileName;
+        return name;
+    }
+
+    private const string FallbackFileName = "restored.bin";
+
     private static string ResolveOutputPath(ShardHeader first, string? outputPath)
     {
-        string outPath = outputPath ?? Path.Combine(Environment.CurrentDirectory, first.FileName);
-        if (outputPath is null && File.Exists(outPath))
+        // An explicit -o is the user's own instruction and is used as given; only the name
+        // carried inside the image is untrusted.
+        if (outputPath is not null)
+            return outputPath;
+
+        string safe = SafeFileName(first.FileName);
+        string outPath = Path.Combine(Environment.CurrentDirectory, safe);
+        if (File.Exists(outPath))
             outPath = Path.Combine(Environment.CurrentDirectory,
-                $"{Path.GetFileNameWithoutExtension(first.FileName)}.restored{Path.GetExtension(first.FileName)}");
+                $"{Path.GetFileNameWithoutExtension(safe)}.restored{Path.GetExtension(safe)}");
         return outPath;
     }
 
