@@ -21,14 +21,20 @@ for public repositories.
 ## Use
 
 ```csharp
-using QrShard.Core;
+using QrShard;
+
+var codec = new QrShardCodec();
 
 // Encode a file into shard images.
-var result = QrShardCodec.EncodeFile("holiday-photos.zip", "out-dir");
+var report = codec.EncodeFile("holiday-photos.zip", "out-dir");
+Console.WriteLine($"{report.ImageCount} image(s)");
 
 // Decode captures back into the original file.
-QrShardCodec.DecodeImages(Directory.GetFiles("captures"), "holiday-photos.zip");
+codec.DecodeImages(Directory.GetFiles("captures"), "holiday-photos.zip");
 ```
+
+The namespace is `QrShard` (the package *id* is `QrShard.Core`), and `QrShardCodec` has instance
+methods — construct it once and reuse it.
 
 For capture that arrives over time, `QrShardDecodeSession` decodes incrementally: feed images
 (paths or in-memory bytes) as they land, ask which are still missing, and assemble the moment the
