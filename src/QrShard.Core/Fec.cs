@@ -504,7 +504,9 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
         // fails — the same outcome as not trying.
         Span<int> erasures = stackalloc int[MaxParity];
         int f = 0;
-        int limit = parity;
+        // Matches the decoder's own ceiling: erasure correction that spends every syndrome leaves
+        // nothing to verify with, so an over-flagged codeword is handed to Chase instead.
+        int limit = parity - ReedSolomon.VerificationMargin;
         for (int i = 0; i < CodewordLength; i++)
         {
             int idx = i * cwCount + j;
