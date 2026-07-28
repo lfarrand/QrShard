@@ -41,6 +41,28 @@ if (args.Contains("--fps-probe"))
     return;
 }
 
+// `--par-sweep` measures decode throughput against DecodeMaxParallelism (round-robin sampling,
+// medians) to test the automatic worker cap. `--par-mem` reports the peak working set one worker
+// count costs; run it once per count, in its own process, for an uncontaminated figure.
+if (args.Contains("--par-sweep") || args.Contains("--par-mem"))
+{
+    string Arg(string name, string fallback)
+    {
+        int i = Array.IndexOf(args, name);
+        return i >= 0 && i + 1 < args.Length ? args[i + 1] : fallback;
+    }
+    string preset = Arg("--preset", "Max4K");
+    // 96 images is the default because every default worker count divides it exactly; see
+    // ParallelismSweep for why a ragged split invents a curve that is not there.
+    if (args.Contains("--par-mem"))
+        ParallelismSweep.Memory(Console.Out, preset, int.Parse(Arg("--workers", "16")),
+            int.Parse(Arg("--images", "96")));
+    else
+        ParallelismSweep.Run(Console.Out, preset, ParallelismSweep.ParseCounts(Arg("--workers", "8,12,16,24,32")),
+            int.Parse(Arg("--samples", "15")), int.Parse(Arg("--images", "96")));
+    return;
+}
+
 // Run everything by default (no interactive prompt); any BenchmarkDotNet switcher
 // arguments (--filter, --list, --job, ...) pass straight through.
 string[] effectiveArgs = args.Length == 0 ? ["--filter", "*"] : args;

@@ -29,7 +29,7 @@ internal static class FpsProbe
             new Config("Max4K-8  3840x2160 1px 8bit", new EncodeOptions { Width = 3840, Height = 2160, CellPx = 1, BitsPerCell = 8 }),
         };
 
-        int workers = Math.Min(Environment.ProcessorCount, 16);
+        int workers = ShardDecoder.AutoParallelism;
         output.WriteLine($"decode workers (auto cap): {workers} of {Environment.ProcessorCount} logical cores");
         output.WriteLine("single = one image at a time on one core; parallel = the default multi-worker decode");
         output.WriteLine();

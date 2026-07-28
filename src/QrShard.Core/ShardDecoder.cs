@@ -22,6 +22,10 @@ internal sealed class ShardDecoder(
     {
     }
 
+    /// <summary>Worker count used when DecodeMaxParallelism is 0 (automatic); see CollectShards
+    /// for what the ceiling is measured against.</summary>
+    public static int AutoParallelism => Math.Min(Environment.ProcessorCount, 24);
+
     public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log,
         string? password = null)
     {
@@ -38,12 +42,33 @@ internal sealed class ShardDecoder(
         var results = new (DecodedShard? Shard, string? Error)[ordered.Count];
 
         // One reusable scratch (pixel + visited buffers, the two large per-image allocations)
-        // per worker: decoding N images then costs ~2 buffers per worker instead of 2N GC'd
-        // arrays. PNG decode goes memory-bandwidth-bound past ~16 workers, hence the automatic
-        // cap (overridable via appsettings.json DecodeMaxParallelism).
+        // per worker, so decoding N images costs far fewer than 2N GC'd arrays.
+        //
+        // The cap is a memory ceiling, not a bandwidth one. The old cap of 16 was justified by
+        // "PNG decode goes memory-bandwidth-bound past ~16 workers"; that is measurably false —
+        // PNG read is 6.5% of a 4K image's decode (~25% at the default density), far too small
+        // to explain a ceiling. Throughput keeps climbing well past 16.
+        //
+        // Measured on an idle 16-core/32-thread part, Max4K, 96 images, 15 round-robin samples
+        // (median fps, and peak working set from a separate one-count-per-process run):
+        //
+        //     workers   16      24      32
+        //     med fps   84.5   101.3   109.8
+        //     peak WS   5.2 GB  6.7 GB  7.1 GB
+        //
+        // So 16 -> 24 buys +19.9% for +1.5 GB, and 24 -> 32 buys a further +8.4% for +0.45 GB.
+        // Note that 24 is NOT a plateau: on this part 32 workers is genuinely faster, and the
+        // gain only looks negligible (+2.4%) if you read the best sample instead of the median.
+        // 24 is a deliberate compromise rather than a free optimum — it keeps peak working set
+        // under ~7 GB and leaves cores for the rest of the system, and a decode that pages is
+        // far slower than one that gives up 8%. Machines with memory to spare should raise it;
+        // that is what the setting is for.
+        //
+        // Re-measure with `dotnet run -c Release -- --par-sweep` (and `--par-mem`, one worker
+        // count per process). Override via appsettings.json DecodeMaxParallelism.
         int parallelism = settings.DecodeMaxParallelism;
         if (parallelism <= 0)
-            parallelism = Math.Min(Environment.ProcessorCount, 16);
+            parallelism = AutoParallelism;
         var failures = new FailedCapture?[ordered.Count];
         Parallel.For(0, ordered.Count,
             new ParallelOptions { MaxDegreeOfParallelism = parallelism },
