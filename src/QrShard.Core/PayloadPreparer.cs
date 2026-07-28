@@ -28,7 +28,8 @@ internal interface IPayloadPreparer
 ///  - everything else → a memory-mapped source, so large incompressible files (zips, media)
 ///    are streamed per-chunk and never materialized as a managed array;
 ///  - a password additionally AES-256-GCM encrypts the (possibly compressed) payload — this
-///    path materializes the payload in memory, because GCM authenticates the whole message.
+///    path has to materialize the payload in memory, because GCM authenticates the whole
+///    message, but it is read into the cipher blob and sealed there, so it materializes once.
 /// The header SHA-256 is always the hash of the ORIGINAL file, so verification happens after
 /// decrypt + decompress on the receiving side.
 /// </summary>
@@ -72,12 +73,21 @@ internal sealed class PayloadPreparer(PayloadCipher cipher) : IPayloadPreparer
 
         if (password is not null)
         {
+            var aad = PayloadCipher.BuildAad(length, sha, Path.GetFileName(filePath));
             if (material is null)
             {
-                material = new byte[length];
-                mapped.Read(0, material);
+                // Read the file straight into the blob's body and seal it there: the plaintext and
+                // the ciphertext are the same bytes, so an incompressible input is materialized
+                // once rather than twice.
+                byte[] blob = PayloadCipher.AllocateBlob(length);
+                mapped.Read(0, PayloadCipher.Body(blob));
+                cipher.SealInPlace(blob, password, aad);
+                material = blob;
             }
-            material = cipher.Encrypt(material, password, PayloadCipher.BuildAad(length, sha, Path.GetFileName(filePath)));
+            else
+            {
+                material = cipher.Encrypt(material, password, aad);
+            }
             flags |= ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta;
         }
 

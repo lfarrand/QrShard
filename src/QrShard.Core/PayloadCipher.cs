@@ -26,43 +26,74 @@ internal sealed class PayloadCipher
 
     public const int Overhead = SaltSize + NonceSize + TagSize;
 
-    public byte[] Encrypt(byte[] plaintext, string password, ReadOnlySpan<byte> aad = default)
+    /// <summary>
+    /// Allocates a blob for <see cref="SealInPlace"/>. The caller fills <see cref="Body"/> with the
+    /// plaintext — reading it straight from its source, so the payload only ever exists once —
+    /// and then seals it where it lies.
+    /// </summary>
+    public static byte[] AllocateBlob(long bodyLength) => new byte[Overhead + bodyLength];
+
+    /// <summary>The payload region of a blob: plaintext before sealing, ciphertext after.</summary>
+    public static Span<byte> Body(byte[] blob) => blob.AsSpan(Overhead);
+
+    /// <summary>
+    /// Encrypts a blob whose body already holds the plaintext, in place. GCM is CTR underneath, so
+    /// each ciphertext byte replaces the plaintext byte at the same offset and no second full-size
+    /// buffer is needed; the salt/nonce/tag prefix is a disjoint region. Exactly-coincident source
+    /// and destination spans are the one overlap form <see cref="AesGcm"/> supports on every
+    /// platform backend — the tests pin it, and CI runs them on the whole release matrix.
+    /// </summary>
+    public void SealInPlace(byte[] blob, string password, ReadOnlySpan<byte> aad = default)
     {
-        var blob = new byte[Overhead + plaintext.Length];
         Span<byte> salt = blob.AsSpan(0, SaltSize);
         Span<byte> nonce = blob.AsSpan(SaltSize, NonceSize);
         Span<byte> tag = blob.AsSpan(SaltSize + NonceSize, TagSize);
-        Span<byte> ciphertext = blob.AsSpan(Overhead);
+        Span<byte> body = blob.AsSpan(Overhead);
 
         RandomNumberGenerator.Fill(salt);
         RandomNumberGenerator.Fill(nonce);
         using var aes = new AesGcm(DeriveKey(password, salt), TagSize);
-        aes.Encrypt(nonce, plaintext, ciphertext, tag, aad);
+        aes.Encrypt(nonce, body, body, tag, aad);
+    }
+
+    public byte[] Encrypt(byte[] plaintext, string password, ReadOnlySpan<byte> aad = default)
+    {
+        byte[] blob = AllocateBlob(plaintext.Length);
+        plaintext.CopyTo(Body(blob));
+        SealInPlace(blob, password, aad);
         return blob;
     }
 
-    /// <summary>Throws <see cref="ShardDecodeException"/> on a wrong password, tampered data, or
-    /// tampered associated data (the bound identity header).</summary>
-    public byte[] Decrypt(byte[] blob, string password, string fileName, ReadOnlySpan<byte> aad = default)
+    /// <summary>
+    /// Decrypts <paramref name="blob"/> in place and returns the plaintext as a slice of it, so a
+    /// large decode never holds the payload twice. The authentication guarantee is unchanged: GCM
+    /// still verifies the tag over the whole message before this returns, and on failure .NET
+    /// zeroes the destination and throws — so the caller is handed either fully authenticated
+    /// plaintext or an exception, never unverified bytes. The blob is already a private copy of
+    /// the shard payloads, which stay intact for a retry with a different password.
+    ///
+    /// Throws <see cref="ShardDecodeException"/> on a wrong password, tampered data, or tampered
+    /// associated data (the bound identity header).
+    /// </summary>
+    public ArraySegment<byte> DecryptInPlace(byte[] blob, string password, string fileName, ReadOnlySpan<byte> aad = default)
     {
         if (blob.Length < Overhead)
             throw new ShardDecodeException($"'{fileName}': encrypted payload is truncated.");
         ReadOnlySpan<byte> salt = blob.AsSpan(0, SaltSize);
         ReadOnlySpan<byte> nonce = blob.AsSpan(SaltSize, NonceSize);
         ReadOnlySpan<byte> tag = blob.AsSpan(SaltSize + NonceSize, TagSize);
-        ReadOnlySpan<byte> ciphertext = blob.AsSpan(Overhead);
+        Span<byte> body = blob.AsSpan(Overhead);
 
-        var plaintext = new byte[ciphertext.Length];
         using var aes = new AesGcm(DeriveKey(password, salt), TagSize);
         try
         {
-            aes.Decrypt(nonce, ciphertext, tag, plaintext, aad);
+            aes.Decrypt(nonce, body, tag, body, aad);
         }
         catch (AuthenticationTagMismatchException)
         {
             throw new ShardDecodeException($"'{fileName}': wrong password, corrupted payload, or a tampered shard header.");
         }
-        return plaintext;
+        return new ArraySegment<byte>(blob, Overhead, blob.Length - Overhead);
     }
 
     /// <summary>

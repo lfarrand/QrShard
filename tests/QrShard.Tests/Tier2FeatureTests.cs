@@ -20,11 +20,43 @@ public class Tier2FeatureTests
         var aad = PayloadCipher.BuildAad(plain.Length, sha, "real.bin");
         byte[] blob = cipher.Encrypt(plain, "pw", aad);
 
-        Assert.Equal(plain, cipher.Decrypt(blob, "pw", "real.bin", aad));            // correct AAD → ok
+        // DecryptInPlace consumes the blob it is handed, so each attempt gets its own copy.
+        Assert.Equal(plain, cipher.DecryptInPlace(Copy(blob), "pw", "real.bin", aad).ToArray()); // correct AAD → ok
         var tamperedName = PayloadCipher.BuildAad(plain.Length, sha, "evil.bin");    // filename changed
-        Assert.Throws<ShardDecodeException>(() => cipher.Decrypt(blob, "pw", "evil.bin", tamperedName));
+        Assert.Throws<ShardDecodeException>(() => cipher.DecryptInPlace(Copy(blob), "pw", "evil.bin", tamperedName));
         var tamperedLen = PayloadCipher.BuildAad(plain.Length + 1, sha, "real.bin"); // length changed
-        Assert.Throws<ShardDecodeException>(() => cipher.Decrypt(blob, "pw", "real.bin", tamperedLen));
+        Assert.Throws<ShardDecodeException>(() => cipher.DecryptInPlace(Copy(blob), "pw", "real.bin", tamperedLen));
+    }
+
+    [Fact]
+    public void Cipher_DecryptInPlace_ReturnsASliceOfTheBlob()
+    {
+        // The whole point of the in-place form: no second full-size buffer is allocated, so the
+        // returned plaintext must alias the blob rather than be a copy of it.
+        var cipher = new PayloadCipher();
+        byte[] plain = TestData.Random(4096);
+        byte[] blob = cipher.Encrypt(plain, "pw");
+
+        var result = cipher.DecryptInPlace(blob, "pw", "real.bin");
+        Assert.Same(blob, result.Array);
+        Assert.Equal(PayloadCipher.Overhead, result.Offset);
+        Assert.Equal(plain, result.ToArray());
+        Assert.Equal(plain, blob[PayloadCipher.Overhead..]);
+    }
+
+    [Fact]
+    public void Cipher_DecryptInPlace_FailedAuth_LeavesNoPlaintextBehind()
+    {
+        // GCM must not release plaintext it has not authenticated. Decrypting in place means the
+        // failure path is writing into the buffer the caller still holds, so pin the guarantee:
+        // a rejected blob must contain none of the original bytes afterwards.
+        var cipher = new PayloadCipher();
+        byte[] plain = TestData.Random(4096);
+        byte[] blob = cipher.Encrypt(plain, "right");
+
+        Assert.Throws<ShardDecodeException>(() => cipher.DecryptInPlace(blob, "wrong", "real.bin"));
+        Assert.NotEqual(plain, blob[PayloadCipher.Overhead..]);              // the guarantee that matters
+        Assert.All(blob[PayloadCipher.Overhead..], b => Assert.Equal(0, b)); // .NET zeroes, leaving no debris
     }
 
     [Fact]
@@ -157,6 +189,9 @@ public class Tier2FeatureTests
     // ---- helpers ----
 
     private static byte Jitter(byte v, Random rng) => (byte)Math.Clamp(v + rng.Next(-15, 16), 0, 255);
+
+    /// <summary>A private blob per decrypt attempt, since DecryptInPlace consumes the one it is given.</summary>
+    private static byte[] Copy(byte[] blob) => (byte[])blob.Clone();
 
     private static byte[] AssembleToBytes(List<DecodedShard> shards, TempDir tmp, string password)
     {
