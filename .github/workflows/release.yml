@@ -75,8 +75,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bin="src/QrShard/bin/Release/net10.0/${{ matrix.rid }}/publish/qrshard"
+          pub="src/QrShard/bin/Release/net10.0/${{ matrix.rid }}/publish"
+          # The AOT output is named after the ASSEMBLY (QrShard), not the tool command (qrshard).
+          # Windows and macOS have case-insensitive filesystems, so the lowercase form resolved
+          # there and only Linux failed — which is exactly how this shipped green on two platforms.
+          bin="$pub/QrShard"
           [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
+          if [ ! -f "$bin" ]; then
+            echo "::error::no binary at $bin — publish layout changed?"
+            ls -la "$pub" || true
+            exit 1
+          fi
           [ -x "$bin" ] || chmod +x "$bin"
 
           # 1. It starts at all — the check that a trimming or reflection fault would fail — and
