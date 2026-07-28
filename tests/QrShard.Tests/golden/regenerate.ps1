@@ -15,17 +15,22 @@
   Run from the repo root:  pwsh tests/QrShard.Tests/golden/regenerate.ps1
   Requires sixlabors.lic at the repo root (as for any build).
 #>
+param([switch] $Force)
+
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path "$PSScriptRoot/../../..").Path
 $goldenRoot = $PSScriptRoot
 $license = Join-Path $repo 'sixlabors.lic'
 if (-not (Test-Path $license)) { throw "sixlabors.lic not found at repo root — required to build old tags." }
 
-# tag -> which config keys it supports (interleave2 arrived in v1.1.0).
-$versions = @(
-    @{ Tag = 'v1.0.0'; Interleave2 = $false },
-    @{ Tag = 'v1.1.0'; Interleave2 = $true  }
-)
+# The versions to cover come from versions.json, which GoldenInteropTests enforces against —
+# one source of truth, so the fixtures on disk and the set the tests demand cannot drift.
+# interleave2 arrived in v1.1.0, so older tags get the smaller config matrix.
+$versionsFile = Join-Path $goldenRoot 'versions.json'
+$versions = (Get-Content $versionsFile -Raw | ConvertFrom-Json).versions | ForEach-Object {
+    $parsed = [version]($_ -replace '^v', '')
+    @{ Tag = $_; Interleave2 = ($parsed -ge [version]'1.1.0') }
+}
 
 # Deterministic payloads (fixed bytes) so a regenerate only changes shards if the format did.
 function New-Payload([int]$len, [int]$seed, [bool]$compressible) {
@@ -42,6 +47,14 @@ function New-Payload([int]$len, [int]$seed, [bool]$compressible) {
 
 foreach ($v in $versions) {
     $tag = $v.Tag
+    # Fixtures are frozen once committed. Encrypted and fountain configs bake a random salt and
+    # fileId into the shards, so regenerating an existing version rewrites bytes that are meant
+    # never to change — and a diff there would look like format drift when it is only noise.
+    # Only missing versions are generated unless -Force is passed.
+    if ((Test-Path (Join-Path $goldenRoot $tag)) -and -not $Force) {
+        Write-Host "  ${tag}: already present, skipping (use -Force to regenerate)"
+        continue
+    }
     $work = Join-Path $env:TEMP "qr-golden-$tag"
     if (Test-Path $work) { git -C $repo worktree remove --force $work 2>$null; Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
     git -C $repo worktree add $work $tag | Out-Null

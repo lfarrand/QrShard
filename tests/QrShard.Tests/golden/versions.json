@@ -1,0 +1,11 @@
+{
+  "//": "Versions that MUST have complete golden fixtures. Read by regenerate.ps1 (what to build) and by GoldenInteropTests (what to enforce), so the two cannot drift apart.",
+  "//policy": "One entry per released MINOR line, because the wire format is versioned by a metadata nibble that patch releases do not touch, plus the newest release so the current format is pinned too. After tagging a new minor — or a release that changes the format — run regenerate.ps1 and commit the fixtures it produces.",
+  "versions": [
+    "v1.0.0",
+    "v1.1.0",
+    "v1.2.0",
+    "v1.3.0",
+    "v1.3.9"
+  ]
+}
