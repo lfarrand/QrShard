@@ -120,6 +120,43 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
             }
         }
 
+        // No GFNI, but AVX2: the same LFSR over 32 codewords per block (mirrors the decode-side
+        // AVX2 syndrome scan).
+        if (Avx2.IsSupported && parity > 0 && cwCount - j >= 32)
+        {
+            byte[] genTail = reedSolomon.GeneratorTail(parity);
+            var tableLo = new Vector256<byte>[parity];
+            var tableHi = new Vector256<byte>[parity];
+            for (int i = 0; i < parity; i++)
+                (tableLo[i], tableHi[i]) = gf.MulTables256(genTail[i]);
+            var register = new Vector256<byte>[parity];
+            Span<byte> lanes = stackalloc byte[32];
+
+            for (; j + 32 <= cwCount; j += 32)
+            {
+                Array.Clear(register);
+                for (int i = 0; i < dataLen; i++)
+                {
+                    for (int lane = 0; lane < 32; lane++)
+                    {
+                        int src = (j + lane) * dataLen + i;
+                        lanes[lane] = src < streamLength ? stream[src] : (byte)0;
+                    }
+                    var d = Vector256.Create<byte>(lanes);
+                    d.CopyTo(dest.AsSpan(i * cwCount + j, 32));
+
+                    var coef = d ^ register[0];
+                    for (int k = 0; k < parity - 1; k++)
+                        register[k] = register[k + 1];
+                    register[parity - 1] = Vector256<byte>.Zero;
+                    for (int k = 0; k < parity; k++)
+                        register[k] ^= gf.MulVec256(coef, tableLo[k], tableHi[k]);
+                }
+                for (int i = 0; i < parity; i++)
+                    register[i].CopyTo(dest.AsSpan((dataLen + i) * cwCount + j, 32));
+            }
+        }
+
         // SIMD fast path, mirroring the decode-side syndrome scan: encode 16 codewords at
         // once, one Vector128 lane per codeword. The LFSR step multiplies every lane's
         // feedback coefficient by the FIXED generator coefficient gen[k+1], which is exactly
@@ -255,6 +292,42 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     var c = Vector256.Create<byte>(buffer.AsSpan(k * cwCount + j, 32));
                     for (int i = 0; i < parity; i++)
                         synd[i] = Gfni.V256.GaloisFieldAffineTransform(synd[i], matrices[i], 0) ^ c;
+                }
+
+                var dirty = Vector256<byte>.Zero;
+                for (int i = 0; i < parity; i++)
+                    dirty |= synd[i];
+
+                for (int lane = 0; lane < 32; lane++)
+                {
+                    if (dirty.GetElement(lane) == 0)
+                        CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
+                    else
+                        DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
+                }
+            }
+        }
+
+        // No GFNI, but AVX2: same syndrome scan over 32 codewords per block via the nibble
+        // shuffle. Worth its own tier because this loop is the decode side's compute floor —
+        // parity accumulators live in registers, so ~parity*7 ALU ops ride on every 32-byte
+        // load and doubling the lane count converts almost 1:1 into throughput.
+        if (Avx2.IsSupported && parity > 0 && cwCount - j >= 32)
+        {
+            var tableLo = new Vector256<byte>[parity];
+            var tableHi = new Vector256<byte>[parity];
+            for (int i = 0; i < parity; i++)
+                (tableLo[i], tableHi[i]) = gf.MulTables256(gf.AlphaPower(i));
+            var synd = new Vector256<byte>[parity];
+
+            for (; j + 32 <= cwCount; j += 32)
+            {
+                Array.Clear(synd);
+                for (int k = 0; k < CodewordLength; k++)
+                {
+                    var c = Vector256.Create<byte>(buffer.AsSpan(k * cwCount + j, 32));
+                    for (int i = 0; i < parity; i++)
+                        synd[i] = gf.MulVec256(synd[i], tableLo[i], tableHi[i]) ^ c;
                 }
 
                 var dirty = Vector256<byte>.Zero;

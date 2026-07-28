@@ -17,6 +17,7 @@ internal static class GfProbe
         string tier = Gfni.V512.IsSupported ? "GFNI-V512"
             : Gfni.V256.IsSupported ? "GFNI-V256"
             : Gfni.IsSupported ? "GFNI-V128"
+            : Avx2.IsSupported ? "shuffle-V256"
             : System.Runtime.Intrinsics.Vector128.IsHardwareAccelerated ? "shuffle-V128"
             : "scalar";
         output.WriteLine($"acceleration tier: {tier}");
