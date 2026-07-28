@@ -40,7 +40,7 @@ internal sealed class AppSettings
     /// <summary>Memory budget (MB) for the encoder's per-worker pixel canvases.</summary>
     public int EncodeMemoryBudgetMB { get; private set; } = 2000;
 
-    /// <summary>Max parallel image decodes; 0 = automatic (cores, capped at 16).</summary>
+    /// <summary>Max parallel image decodes; 0 = automatic (cores, capped at 24).</summary>
     public int DecodeMaxParallelism { get; private set; }
 
     /// <summary>Default frame rate for the live receiver (`qrshard receive`).</summary>
