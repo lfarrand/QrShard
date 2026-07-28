@@ -16,7 +16,7 @@ _qrshard() {
             COMPREPLY=( $(compgen -W "-o --out -r --resolution -c --cell -b --bits -e --ecc -R --recovery -F --fountain -p --password -f --format -i --interval --slideshow --profile --camera --video --open --no-compress --interleave2 --json --dry-run" -- "${cur}") )
             ;;
         decode)
-            COMPREPLY=( $(compgen -W "-o --out -p --password --session --watch --clipboard --fps" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "-o --out -p --password --session --watch --clipboard --fps --json" -- "${cur}") )
             ;;
         receive)
             COMPREPLY=( $(compgen -W "--device --format --screen --region --fps -o --out -p --password" -- "${cur}") )

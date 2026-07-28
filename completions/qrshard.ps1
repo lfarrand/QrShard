@@ -9,7 +9,7 @@ Register-ArgumentCompleter -Native -CommandName qrshard -ScriptBlock {
                     '-i', '--interval', '--slideshow', '--profile', '--camera', '--video', '--open',
                     '--no-compress', '--interleave2', '--json', '--dry-run'
         send      = $null # same as encode
-        decode    = '-o', '--out', '-p', '--password', '--session', '--watch', '--clipboard', '--fps'
+        decode    = '-o', '--out', '-p', '--password', '--session', '--watch', '--clipboard', '--fps', '--json'
         receive   = '--device', '--format', '--screen', '--region', '--fps', '-o', '--out', '-p', '--password'
         verify    = '--session', '--json'
         info      = '--heatmap', '--quality-heatmap', '--json'

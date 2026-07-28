@@ -185,8 +185,10 @@ internal sealed class Cli(AppSettings? settings = null)
             {
                 var (positional, named, dflags) = ParseArgs(args[1..]);
                 string? password = Get(named, "-p", "--password");
+                bool djson = dflags.Contains("--json");
+                Action<string> decLog = djson ? _ => { } : @out.WriteLine; // keep stdout clean for --json
                 if (dflags.Contains("--clipboard"))
-                    return DecodeClipboard(services, Get(named, "--session"), Get(named, "-o", "--out"), password, @out, err);
+                    return DecodeClipboard(services, Get(named, "--session"), Get(named, "-o", "--out"), password, @out, err, djson);
                 if (positional.Count == 0)
                     return Help(@out, err, "decode requires a folder, image files, a video recording, or --clipboard.");
 
@@ -195,7 +197,7 @@ internal sealed class Cli(AppSettings? settings = null)
                     if (positional.Count != 1 || !Directory.Exists(positional[0]))
                         return Help(@out, err, "--watch requires exactly one folder to watch.");
                     return DecodeWatch(services, positional[0], Get(named, "--session"),
-                        Get(named, "-o", "--out"), password, @out, settings.WatchPollMs);
+                        Get(named, "-o", "--out"), password, @out, djson, settings.WatchPollMs);
                 }
 
                 // A single video file (or animated image) is a recording of the slideshow.
@@ -204,13 +206,12 @@ internal sealed class Cli(AppSettings? settings = null)
                      (IsImageFile(positional[0]) && VideoDecoder.IsAnimatedImage(positional[0]))))
                 {
                     double fps = GetDouble(named, "--fps", 8.0);
-                    @out.WriteLine($"Decoding video '{positional[0]}' (extracting at {fps} fps)...");
+                    decLog($"Decoding video '{positional[0]}' (extracting at {fps} fps)...");
                     // Escalate fps automatically for file recordings unless the user pinned --fps.
                     bool userSetFps = Get(named, "--fps") is not null;
                     var fromVideo = services.VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps,
-                        @out.WriteLine, out _, password, decodeWorkers: 1, escalateFps: !userSetFps);
-                    @out.WriteLine($"Restored {fromVideo.Count} file(s).");
-                    return 0;
+                        decLog, out _, password, decodeWorkers: 1, escalateFps: !userSetFps);
+                    return ReportRestored(@out, fromVideo, djson);
                 }
 
                 var images = new List<string>();
@@ -228,10 +229,10 @@ internal sealed class Cli(AppSettings? settings = null)
 
                 string? sessionPath = Get(named, "--session");
                 if (sessionPath is not null)
-                    return DecodeWithSession(services, images, sessionPath, Get(named, "-o", "--out"), password, @out);
+                    return DecodeWithSession(services, images, sessionPath, Get(named, "-o", "--out"), password, @out, djson);
 
-                @out.WriteLine($"Decoding {images.Count} image(s)...");
-                var shards = services.Decoder.CollectShards(images, @out.WriteLine);
+                decLog($"Decoding {images.Count} image(s)...");
+                var shards = services.Decoder.CollectShards(images, decLog);
                 if (shards.Count == 0)
                 {
                     err.WriteLine("error: no decodable shard images were found.");
@@ -242,9 +243,8 @@ internal sealed class Cli(AppSettings? settings = null)
                     // Assemble restores each complete file (writing them out as it goes) and throws
                     // on the first that can't be reassembled — so a folder mixing a complete file
                     // with an incomplete one still yields the complete one on disk.
-                    var restored = services.Assembler.Assemble(shards, Get(named, "-o", "--out"), @out.WriteLine, password);
-                    @out.WriteLine($"Restored {restored.Count} file(s).");
-                    return 0;
+                    var restored = services.Assembler.Assemble(shards, Get(named, "-o", "--out"), decLog, password);
+                    return ReportRestored(@out, restored, djson);
                 }
                 catch (ShardDecodeException ex)
                 {
@@ -256,7 +256,12 @@ internal sealed class Cli(AppSettings? settings = null)
                         err.WriteLine($"error: {ex.Message}");
                         return 1;
                     }
-                    PrintSetStatus(@out, shards, services.Parity);
+                    if (djson)
+                    {
+                        @out.WriteLine(new JsonReports().DecodeIncompleteReport(shards, services.Parity));
+                        return 3;
+                    }
+                    PrintSetStatus(@out.WriteLine, shards, services.Parity);
                     @out.WriteLine("Incomplete — some images are missing or unreadable. Capture them and decode again, or:");
                     @out.WriteLine("  • add --session <file> to accumulate captures across sittings (resumes from what you have),");
                     @out.WriteLine("  • or --watch to decode images as they land and finish automatically.");
@@ -293,17 +298,21 @@ internal sealed class Cli(AppSettings? settings = null)
                     return 1;
                 }
 
+                // An incomplete set is not an error — it is the answer verify exists to give, and it
+                // is fixed by capturing more, so it gets decode's incomplete code rather than 1.
+                // Exit 1 stays reserved for "these images are unusable" (no decodable shards above),
+                // which is the one outcome a script must not retry by capturing more.
                 bool complete = services.Parity.IsSetComplete(shards);
                 if (json)
                 {
                     @out.WriteLine(new JsonReports().VerifyReport(shards, services.Parity));
-                    return complete ? 0 : 1;
+                    return complete ? 0 : 3;
                 }
-                PrintSetStatus(@out, shards, services.Parity);
+                PrintSetStatus(@out.WriteLine, shards, services.Parity);
                 @out.WriteLine(complete
                     ? "Complete: every file can be fully reassembled."
                     : "Incomplete: capture the missing images and verify again.");
-                return complete ? 0 : 1;
+                return complete ? 0 : 3;
             }
 
             case "info":
@@ -473,28 +482,33 @@ internal sealed class Cli(AppSettings? settings = null)
     /// still missing. Exit code 3 = valid but incomplete.
     /// </summary>
     private static int DecodeWithSession(CliServices services, List<string> images, string sessionPath,
-        string? outputPath, string? password, TextWriter @out)
+        string? outputPath, string? password, TextWriter @out, bool json)
     {
+        Action<string> log = json ? _ => { } : @out.WriteLine;
         var known = services.Sessions.Load(sessionPath);
         if (known.Count > 0)
-            @out.WriteLine($"  session: resuming with {known.Count} previously collected shard(s)");
+            log($"  session: resuming with {known.Count} previously collected shard(s)");
 
-        @out.WriteLine($"Decoding {images.Count} image(s)...");
-        var merged = MergeShards(known, services.Decoder.CollectShards(images, @out.WriteLine));
+        log($"Decoding {images.Count} image(s)...");
+        var merged = MergeShards(known, services.Decoder.CollectShards(images, log));
         if (merged.Count == 0)
             throw new ShardDecodeException("No decodable shard images were found.");
 
         if (services.Parity.IsSetComplete(merged))
         {
-            var restored = services.Assembler.Assemble(merged, outputPath, @out.WriteLine, password);
-            @out.WriteLine($"Restored {restored.Count} file(s).");
+            var restored = services.Assembler.Assemble(merged, outputPath, log, password);
             if (File.Exists(sessionPath))
                 File.Delete(sessionPath);
-            return 0;
+            return ReportRestored(@out, restored, json);
         }
 
         services.Sessions.Save(sessionPath, merged);
-        PrintSetStatus(@out, merged, services.Parity);
+        if (json)
+        {
+            @out.WriteLine(new JsonReports().DecodeIncompleteReport(merged, services.Parity));
+            return 3;
+        }
+        PrintSetStatus(@out.WriteLine, merged, services.Parity);
         @out.WriteLine($"Set incomplete — {merged.Count} shard(s) saved to {sessionPath}; capture the missing images and decode again with --session.");
         return 3;
     }
@@ -504,8 +518,9 @@ internal sealed class Cli(AppSettings? settings = null)
     /// shard, no file saving — merge it with the session, assemble when complete.
     /// </summary>
     private static int DecodeClipboard(CliServices services, string? sessionPath, string? outputPath,
-        string? password, TextWriter @out, TextWriter err)
+        string? password, TextWriter @out, TextWriter err, bool json)
     {
+        Action<string> log = json ? _ => { } : @out.WriteLine;
         if (!OperatingSystem.IsWindows())
         {
             err.WriteLine("error: --clipboard is only supported on Windows.");
@@ -522,25 +537,30 @@ internal sealed class Cli(AppSettings? settings = null)
         string which = shard.Header.IsParity
             ? $"parity #{shard.Header.Index + 1}"
             : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
-        @out.WriteLine($"  ok      clipboard  ({which}, {shard.Payload.Length:N0} bytes)");
+        log($"  ok      clipboard  ({which}, {shard.Payload.Length:N0} bytes)");
 
         var known = sessionPath is not null ? services.Sessions.Load(sessionPath) : [];
         var merged = MergeShards(known, [shard]);
         if (services.Parity.IsSetComplete(merged))
         {
-            var restored = services.Assembler.Assemble(merged, outputPath, @out.WriteLine, password);
-            @out.WriteLine($"Restored {restored.Count} file(s).");
+            var restored = services.Assembler.Assemble(merged, outputPath, log, password);
             if (sessionPath is not null && File.Exists(sessionPath))
                 File.Delete(sessionPath);
-            return 0;
+            return ReportRestored(@out, restored, json);
+        }
+        if (sessionPath is not null)
+            services.Sessions.Save(sessionPath, merged);
+        if (json)
+        {
+            @out.WriteLine(new JsonReports().DecodeIncompleteReport(merged, services.Parity));
+            return 3;
         }
         if (sessionPath is null)
         {
             @out.WriteLine("Set incomplete — use --session <file> to accumulate clipboard captures across screenshots.");
             return 3;
         }
-        services.Sessions.Save(sessionPath, merged);
-        PrintSetStatus(@out, merged, services.Parity);
+        PrintSetStatus(@out.WriteLine, merged, services.Parity);
         @out.WriteLine($"Set incomplete — {merged.Count} shard(s) saved to {sessionPath}; screenshot the next image and run again.");
         return 3;
     }
@@ -618,15 +638,16 @@ internal sealed class Cli(AppSettings? settings = null)
     /// the set completes. Ctrl+C stops the watch, persisting progress when a session is given.
     /// </summary>
     private static int DecodeWatch(CliServices services, string folder, string? sessionPath,
-        string? outputPath, string? password, TextWriter @out, int pollMs = 250)
+        string? outputPath, string? password, TextWriter @out, bool json, int pollMs = 250)
     {
+        Action<string> log = json ? _ => { } : @out.WriteLine;
         var shards = sessionPath is not null ? services.Sessions.Load(sessionPath) : [];
         if (shards.Count > 0)
-            @out.WriteLine($"  session: resuming with {shards.Count} previously collected shard(s)");
+            log($"  session: resuming with {shards.Count} previously collected shard(s)");
         var seen = shards.Select(s => (s.Header.FileId, s.Header.Index, s.Header.IsParity)).ToHashSet();
         var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        @out.WriteLine($"Watching {folder} — drop captures in; Ctrl+C stops" +
-                       (sessionPath is not null ? " (progress persists to the session)." : "."));
+        log($"Watching {folder} — drop captures in; Ctrl+C stops" +
+            (sessionPath is not null ? " (progress persists to the session)." : "."));
 
         bool cancelled = false;
         ConsoleCancelEventHandler onCancel = (_, e) =>
@@ -649,7 +670,7 @@ internal sealed class Cli(AppSettings? settings = null)
                 {
                     processed.UnionWith(fresh);
                     bool added = false;
-                    foreach (var s in services.Decoder.CollectShards(fresh, @out.WriteLine))
+                    foreach (var s in services.Decoder.CollectShards(fresh, log))
                         if (seen.Add((s.Header.FileId, s.Header.Index, s.Header.IsParity)))
                         {
                             shards.Add(s);
@@ -659,14 +680,13 @@ internal sealed class Cli(AppSettings? settings = null)
                     {
                         if (sessionPath is not null)
                             services.Sessions.Save(sessionPath, shards);
-                        PrintSetStatus(@out, shards, services.Parity);
+                        PrintSetStatus(log, shards, services.Parity);
                         if (services.Parity.IsSetComplete(shards))
                         {
-                            var restored = services.Assembler.Assemble(shards, outputPath, @out.WriteLine, password);
-                            @out.WriteLine($"Restored {restored.Count} file(s).");
+                            var restored = services.Assembler.Assemble(shards, outputPath, log, password);
                             if (sessionPath is not null && File.Exists(sessionPath))
                                 File.Delete(sessionPath);
-                            return 0;
+                            return ReportRestored(@out, restored, json);
                         }
                     }
                 }
@@ -681,9 +701,25 @@ internal sealed class Cli(AppSettings? settings = null)
         if (sessionPath is not null && shards.Count > 0)
         {
             services.Sessions.Save(sessionPath, shards);
-            @out.WriteLine($"Stopped — {shards.Count} shard(s) saved to {sessionPath}.");
+            log($"Stopped — {shards.Count} shard(s) saved to {sessionPath}.");
         }
+        if (json)
+            @out.WriteLine(new JsonReports().DecodeIncompleteReport(shards, services.Parity));
         return 3;
+    }
+
+    /// <summary>
+    /// Closing report of a decode that produced files. Every decode path ends here so the JSON
+    /// shape cannot vary by how the shards were captured (folder, session, clipboard, watch,
+    /// recording) — the paths are the part a script cannot otherwise learn, since without -o the
+    /// destination is derived from the shard header and may take the ".restored" fallback.
+    /// </summary>
+    private static int ReportRestored(TextWriter @out, List<RestoredFile> restored, bool json)
+    {
+        @out.WriteLine(json
+            ? new JsonReports().DecodeReport(restored)
+            : $"Restored {restored.Count} file(s).");
+        return 0;
     }
 
     /// <summary>Union of two shard lists, first occurrence of each (file, index, parity) winning.</summary>
@@ -697,7 +733,7 @@ internal sealed class Cli(AppSettings? settings = null)
         return merged;
     }
 
-    private static void PrintSetStatus(TextWriter @out, List<DecodedShard> shards, IParityReassembler parity)
+    private static void PrintSetStatus(Action<string> write, List<DecodedShard> shards, IParityReassembler parity)
     {
         foreach (var group in shards.GroupBy(s => s.Header.FileId))
         {
@@ -709,8 +745,8 @@ internal sealed class Cli(AppSettings? settings = null)
             string detail = missing.Count == 0
                 ? "all data present"
                 : $"missing image(s) {string.Join(", ", missing.Take(20).Select(i => i + 1))}{(missing.Count > 20 ? ", ..." : "")}";
-            @out.WriteLine($"  '{first.FileName}': {have.Count}/{first.Count} data + {parityCount} parity — " +
-                           $"{(complete ? "recoverable ✓" : detail)}");
+            write($"  '{first.FileName}': {have.Count}/{first.Count} data + {parityCount} parity — " +
+                  $"{(complete ? "recoverable ✓" : detail)}");
         }
     }
 
@@ -788,10 +824,12 @@ internal sealed class Cli(AppSettings? settings = null)
     }
 
     /// <summary>Recognized options (take a value) and flags (boolean) per subcommand. The single
-    /// source of truth for option validation; keep in sync with each handler's Get/flags calls.</summary>
-    private sealed record ArgSpec(string[] Options, string[] Flags);
+    /// source of truth for option validation; keep in sync with each handler's Get/flags calls.
+    /// Internal so the shell completions in completions/ can be checked against it by a test —
+    /// they are a hand-maintained copy of this table and would otherwise drift unnoticed.</summary>
+    internal sealed record ArgSpec(string[] Options, string[] Flags);
 
-    private static readonly Dictionary<string, ArgSpec> ArgSpecs = new()
+    internal static readonly Dictionary<string, ArgSpec> ArgSpecs = new()
     {
         ["encode"] = new(
             ["-o", "--out", "-r", "--resolution", "-c", "--cell", "-b", "--bits", "-e", "--ecc",
@@ -804,7 +842,7 @@ internal sealed class Cli(AppSettings? settings = null)
             ["-r", "--resolution", "-c", "--cell", "-b", "--bits", "-e", "--ecc", "-R", "--recovery",
              "-F", "--fountain", "-p", "--password", "-f", "--format", "--profile"],
             ["--camera", "--no-compress", "--interleave2"]),
-        ["decode"] = new(["-o", "--out", "-p", "--password", "--session", "--fps"], ["--clipboard", "--watch"]),
+        ["decode"] = new(["-o", "--out", "-p", "--password", "--session", "--fps"], ["--clipboard", "--watch", "--json"]),
         ["verify"] = new(["--session"], ["--json"]),
         ["info"] = new(["--heatmap", "--quality-heatmap"], ["--json"]),
         ["receive"] = new(["-o", "--out", "-p", "--password", "--region", "--device", "--format", "--fps"], ["--screen"]),
@@ -1030,6 +1068,10 @@ internal sealed class Cli(AppSettings? settings = null)
                 --clipboard              (Windows) decode the bitmap on the clipboard —
                                          Win+Shift+S a displayed shard, no file saving;
                                          accumulates with --session
+                --json                   Emit the result as JSON on stdout: the restored file(s)
+                                         with their resolved paths and lengths, or — when the set
+                                         is incomplete (exit 3) — the same per-file status verify
+                                         reports
               qrshard receive [--device d] [--screen] [--region x,y,w,h] [--fps n] [-o f] [-p pw]
                                          LIVE receiver: decode a webcam pointed at the sender's
                                          slideshow — or, with --screen, THIS machine's own
@@ -1045,7 +1087,8 @@ internal sealed class Cli(AppSettings? settings = null)
                                          recommended -c/-b settings for YOUR setup
               qrshard verify <folder|images...> [--session f] [--json]
                                          Report per-file completeness (missing images, parity
-                                         coverage) without writing output; exit 0 when complete
+                                         coverage) without writing output; exit 0 when complete,
+                                         3 when images are still missing
                                          (--json for machine-readable output, also on info)
               qrshard info <image> [--heatmap <out.png>] [--quality-heatmap <out.png>]
                                          Show and validate a single shard image. --heatmap renders
@@ -1063,6 +1106,9 @@ internal sealed class Cli(AppSettings? settings = null)
 
               qrshard --version          Print the version (also -v, or "version").
               qrshard --help             Show this help (also -h, or "help").
+
+            Exit codes: 0 success; 2 usage error; 3 valid but incomplete — capture the missing
+            images and run again; 1 anything else (unusable images, corruption, I/O).
 
             Density guide (per image, after default ECC): bytes ≈ cells x bits/cell / 8 x 0.94.
               Robust default (2160px, cell 3, 4 bits) ≈ 216 KB/image.
