@@ -70,10 +70,51 @@ internal sealed class ShardDecoder(
         if (parallelism <= 0)
             parallelism = AutoParallelism;
         var failures = new FailedCapture?[ordered.Count];
-        Parallel.For(0, ordered.Count,
-            new ParallelOptions { MaxDegreeOfParallelism = parallelism },
-            () => new DecodeScratch(),
-            (i, _, scratch) =>
+
+        // Each worker takes the next image off a shared cursor rather than owning a pre-assigned
+        // range. Per-image decode cost varies several-fold (the camera-rectification fallback, ECC
+        // depth, damage), so any up-front split strands the workers that drew the cheap images.
+        // The cursor is touched once per image against ~70 ms of 4K decode, so its contention does
+        // not show up.
+        //
+        // This is a trade, not a free win, and which way it goes depends on whether the image
+        // count divides evenly by the worker count. Median fps, idle 16-core/32-thread part,
+        // Max4K, 11 round-robin samples; compare only DOWN a column, since a larger image count
+        // is ~6% slower per image even single-threaded:
+        //
+        //                      24 workers                 120 images
+        //                  120 imgs   100 imgs        16 wkrs   32 wkrs
+        //                  (= 24x5)   (ragged)       (ragged)  (ragged)
+        //     Parallel.For    108.9       93.6           76.6     107.2
+        //     cursor           98.3      114.2           89.2     109.3
+        //                    -9.7%     +22.0%         +16.4%     +2.0%
+        //
+        // So chunking is optimal exactly when the count divides evenly and penalised otherwise;
+        // the cursor wins every ragged case and loses the even one. Exact divisibility is
+        // coincidental — roughly 1 in 24 counts at the default worker count — so the common case
+        // is the one this improves. The ~10% loss when it does divide is real and unexplained;
+        // the plausible mechanism is cache locality, since Parallel.For hands each worker a
+        // contiguous range while the cursor interleaves, but that has not been tested.
+        //
+        // Memory moves both ways too (24 workers, 120 images, --par-mem):
+        //   allocation per pass  5736 -> 5119 MB  (-10.8%, one scratch per worker, exactly:
+        //                                          Parallel.For builds thread-locals well past
+        //                                          MaxDegreeOfParallelism, recycling ranges
+        //                                          across more threads than it runs at once)
+        //   peak working set     6386 -> 7104 MB  (+11.2%, because keeping every worker busy
+        //                                          keeps every scratch live at once, where
+        //                                          stranded workers released theirs early)
+        //
+        // That +11.2% eats into the headroom the worker cap above was set to protect, so the two
+        // want re-measuring together if either changes.
+        int workers = Math.Min(parallelism, ordered.Count);
+        int next = -1;
+
+        void Worker()
+        {
+            var scratch = new DecodeScratch();
+            int i;
+            while ((i = Interlocked.Increment(ref next)) < ordered.Count)
             {
                 var diagnostics = new DecodeDiagnostics();
                 try
@@ -86,9 +127,29 @@ internal sealed class ShardDecoder(
                     if (diagnostics is { Layout: not null, Cells: not null })
                         failures[i] = new FailedCapture(diagnostics.Layout, diagnostics.Cells, ordered[i]);
                 }
-                return scratch;
-            },
-            _ => { });
+            }
+        }
+
+        if (workers > 0)
+        {
+            var helpers = new Task[workers - 1];
+            for (int w = 0; w < helpers.Length; w++)
+                helpers[w] = Task.Run(Worker);
+            try
+            {
+                // The caller decodes too. That saves a thread, and — like the Parallel.For this
+                // replaces, which inlined iterations on the calling thread — it keeps the decode
+                // making progress when the pool has no thread to spare, which it may not when the
+                // caller is itself pool work running alongside other decodes.
+                Worker();
+            }
+            finally
+            {
+                // Nothing may still be writing into results/failures once this returns, including
+                // when the caller's own share threw.
+                Task.WaitAll(helpers);
+            }
+        }
 
         var shards = new List<DecodedShard>();
         for (int i = 0; i < ordered.Count; i++)
