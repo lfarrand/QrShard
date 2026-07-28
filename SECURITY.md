@@ -46,14 +46,36 @@ and nonce.
 
 ## Known advisories
 
-| Advisory | Affects | Fixed in |
-|---|---|---|
-| Path traversal via the shard header's file name — a crafted image could steer the decode write outside the output directory, or to an absolute path, truncating the target before verification ran | v1.0.0 – v1.3.8 (NuGet packages 1.3.5 – 1.3.8) | **1.3.9** |
+Path traversal via the shard header's file name: a crafted image could steer the decode write
+outside the output directory, or to an absolute path, truncating the target before verification
+ran. Reachable from `qrshard decode <folder>` with no `-o`, and from `DecodeImages` with no
+`outputPath`.
 
-Upgrade with `dotnet tool update -g QrShard.Tool`, `dotnet add package QrShard.Core --version
-1.3.9`, or by taking the v1.3.9 binaries. If you cannot upgrade, always pass an explicit output
-path — `-o` on the command line, or `outputPath` to `DecodeImages` — which is used exactly as
-given and is not influenced by the header.
+It was fixed in two parts, because the first fix missed one of them.
+
+| Payload | Affects | Fixed in |
+|---|---|---|
+| Single file | v1.0.0 – v1.3.8 (packages 1.3.5 – 1.3.8) | 1.3.9 |
+| Archive — a folder, carried as a tar | v1.0.0 – v1.3.9 (packages 1.3.5 – 1.3.9) | **1.3.10** |
+
+1.3.9 sanitized the single-file destination only. The archive branch still derived its directory
+from the header via `Path.GetFileNameWithoutExtension`, which is not a sanitizer — a name of
+`...` becomes `..`, the parent directory — and the tar extractor's own containment check was then
+anchored to that already-escaped root.
+
+**Take 1.3.10.** It is the first release in which both are fixed:
+
+```
+dotnet tool update -g QrShard.Tool
+dotnet add package QrShard.Core --version 1.3.10
+```
+
+or the v1.3.10 binaries. If you cannot upgrade, always pass an explicit output path — `-o` on the
+command line, or `outputPath` to `DecodeImages` — which is used exactly as given and is not
+influenced by the header.
+
+Packages 1.3.5 – 1.3.9 are unlisted and deprecated on nuget.org. They still resolve for anyone
+who references them explicitly, so existing builds do not break.
 
 ## Supported versions
 
