@@ -30,6 +30,30 @@ public class CompletionTests
         AssertMatchesArgSpecs(parsed, "qrshard.ps1");
     }
 
+    /// <summary>
+    /// The bash completion is sourced, not executed, so a stray CR is not the usual cosmetic
+    /// diff: bash reads the CR as part of the token and dies on the function definition with
+    /// "syntax error near unexpected token `$'{\r''". Sourcing it from ~/.bashrc then registers
+    /// no completions at all and prints that error in every new shell.
+    ///
+    /// The bytes committed to the index were always LF; what produced CRLF was checkout on
+    /// Windows under core.autocrlf=true, which is the default there. So this asserts the property
+    /// a user actually gets — the file as checked out — rather than the file as stored, and it is
+    /// the Windows leg of the CI matrix that gives it teeth. `.gitattributes` pins it with
+    /// `*.bash text eol=lf`; deleting that line, or adding a shell file the pattern misses, fails
+    /// here instead of silently shipping a completion that no shell can load.
+    /// </summary>
+    [Fact]
+    public void BashCompletion_IsCheckedOutWithUnixLineEndings()
+    {
+        string path = Path.Combine(SolutionRoot(), "completions", "qrshard.bash");
+        byte[] bytes = File.ReadAllBytes(path);
+        int cr = Array.IndexOf(bytes, (byte)'\r');
+        Assert.True(cr < 0,
+            $"qrshard.bash contains a CR at byte {cr}; bash cannot source a CRLF completion. " +
+            "Check that .gitattributes still carries `*.bash text eol=lf`.");
+    }
+
     private static void AssertMatchesArgSpecs(Dictionary<string, HashSet<string>> parsed, string file)
     {
         Assert.NotEmpty(parsed); // a parser that silently matched nothing would pass everything
