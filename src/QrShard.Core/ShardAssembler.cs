@@ -129,7 +129,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
 
         if (archive)
         {
-            string destDir = outputPath ?? Path.Combine(Environment.CurrentDirectory, Path.GetFileNameWithoutExtension(first.FileName));
+            string destDir = outputPath ?? Path.Combine(Environment.CurrentDirectory, SafeDirectoryName(first.FileName));
             try
             {
                 ExtractTar(outPath, destDir);
@@ -212,6 +212,24 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     }
 
     private const string FallbackFileName = "restored.bin";
+    private const string FallbackDirectoryName = "restored";
+
+    /// <summary>
+    /// The archive counterpart of <see cref="SafeFileName"/>: a directory name for a tar payload,
+    /// derived from the same untrusted header field.
+    ///
+    /// Stripping the extension is what makes this its own function rather than a call to
+    /// SafeFileName. "..." is not "." or ".." so it survives that check intact, but
+    /// Path.GetFileNameWithoutExtension("...") is "..", which resolves to the PARENT of the
+    /// working directory — and the tar extractor then anchors its own containment check to that
+    /// already-escaped root and writes with overwrite enabled. So the extension is stripped first
+    /// and anything left that is only dots is rejected.
+    /// </summary>
+    internal static string SafeDirectoryName(string fileName)
+    {
+        string stem = Path.GetFileNameWithoutExtension(SafeFileName(fileName));
+        return stem.Length == 0 || stem.Trim('.').Length == 0 ? FallbackDirectoryName : stem;
+    }
 
     private static string ResolveOutputPath(ShardHeader first, string? outputPath)
     {

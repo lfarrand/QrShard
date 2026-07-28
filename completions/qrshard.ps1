@@ -2,17 +2,21 @@
 Register-ArgumentCompleter -Native -CommandName qrshard -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
 
-    $commands = 'encode', 'decode', 'send', 'receive', 'verify', 'info', 'calibrate', 'test', 'help'
+    $commands = 'encode', 'decode', 'send', 'receive', 'verify', 'info', 'calibrate', 'test', 'version', 'help'
     $options = @{
         encode    = '-o', '--out', '-r', '--resolution', '-c', '--cell', '-b', '--bits', '-e', '--ecc',
                     '-R', '--recovery', '-F', '--fountain', '-p', '--password', '-f', '--format',
-                    '-i', '--interval', '--camera', '--video', '--open', '--no-compress', '--interleave2'
+                    '-i', '--interval', '--slideshow', '--profile', '--camera', '--video', '--open',
+                    '--no-compress', '--interleave2', '--json', '--dry-run'
         send      = $null # same as encode
         decode    = '-o', '--out', '-p', '--password', '--session', '--watch', '--clipboard', '--fps'
         receive   = '--device', '--format', '--screen', '--region', '--fps', '-o', '--out', '-p', '--password'
         verify    = '--session', '--json'
-        info      = '--heatmap', '--json'
+        info      = '--heatmap', '--quality-heatmap', '--json'
         calibrate = '-o', '--out', '-r', '--resolution', '--camera'
+        test      = '-r', '--resolution', '-c', '--cell', '-b', '--bits', '-e', '--ecc',
+                    '-R', '--recovery', '-F', '--fountain', '-p', '--password', '-f', '--format',
+                    '--profile', '--camera', '--no-compress', '--interleave2'
     }
     $options['send'] = $options['encode']
 
