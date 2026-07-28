@@ -31,9 +31,29 @@ jobs:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
     steps:
-      - uses: actions/checkout@v5
+      # Actions are pinned to commit SHAs rather than tags throughout. A tag is mutable: whoever
+      # controls the action's repository can repoint it at new code, which then runs here with
+      # whatever the job holds — in the nuget job below, that is the OIDC token that publishes to
+      # nuget.org. The trailing comment records the version each SHA corresponds to.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0 # need main's history to check what the tag points at
 
-      - uses: actions/setup-dotnet@v5
+      # A tag can be pushed onto ANY commit, and this workflow publishes to nuget.org, which is
+      # irreversible. Requiring the tagged commit to be contained in main means a release can only
+      # ship code that went through review and CI, rather than whatever someone tagged.
+      - name: Tag must point at a commit on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main — refusing to release"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME is on main"
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
 
@@ -129,9 +149,9 @@ jobs:
       NUGET_USER: ${{ secrets.NUGET_USER }}
       DOTNET_NOLOGO: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
 
@@ -145,7 +165,7 @@ jobs:
       - name: NuGet login (OIDC)
         if: env.NUGET_USER != ''
         id: login
-        uses: NuGet/login@v1
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
         with:
           user: ${{ secrets.NUGET_USER }}
 

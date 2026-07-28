@@ -4,7 +4,7 @@ _qrshard() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="encode decode send receive verify info calibrate test help"
+    commands="encode decode send receive verify info calibrate test version help"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "${commands}" -- "${cur}") )
@@ -13,7 +13,7 @@ _qrshard() {
 
     case "${COMP_WORDS[1]}" in
         encode|send)
-            COMPREPLY=( $(compgen -W "-o --out -r --resolution -c --cell -b --bits -e --ecc -R --recovery -F --fountain -p --password -f --format -i --interval --camera --video --open --no-compress --interleave2" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "-o --out -r --resolution -c --cell -b --bits -e --ecc -R --recovery -F --fountain -p --password -f --format -i --interval --slideshow --profile --camera --video --open --no-compress --interleave2 --json --dry-run" -- "${cur}") )
             ;;
         decode)
             COMPREPLY=( $(compgen -W "-o --out -p --password --session --watch --clipboard --fps" -- "${cur}") )
@@ -25,10 +25,13 @@ _qrshard() {
             COMPREPLY=( $(compgen -W "--session --json" -- "${cur}") )
             ;;
         info)
-            COMPREPLY=( $(compgen -W "--heatmap --json" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "--heatmap --quality-heatmap --json" -- "${cur}") )
             ;;
         calibrate)
             COMPREPLY=( $(compgen -W "-o --out -r --resolution --camera" -- "${cur}") )
+            ;;
+        test)
+            COMPREPLY=( $(compgen -W "-r --resolution -c --cell -b --bits -e --ecc -R --recovery -F --fountain -p --password -f --format --profile --camera --no-compress --interleave2" -- "${cur}") )
             ;;
     esac
 

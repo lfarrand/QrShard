@@ -65,8 +65,11 @@ internal sealed class FastPngReader
                     return false;
                 // Bound EACH dimension, not just the product: an extreme aspect ratio (e.g.
                 // 500,000,000 x 1) passes a product cap yet makes the per-row buffer
-                // (rowBytes = width * bytesPerPixel) balloon to multiple GB. 100k on a side is far
-                // beyond any real capture while keeping legitimate square/near-square images.
+                // (rowBytes = width * bytesPerPixel) balloon to multiple GB.
+                //
+                // 100k on a side is far beyond any real capture while keeping legitimate
+                // square/near-square images; the product cap sits just under what a 16384²
+                // shard captured at the documented 1.5x rescale would need.
                 if (width is < 1 or > 100_000 || height is < 1 or > 100_000 || (long)width * height > 500_000_000)
                     return false;
                 bytesPerPixel = colorType == 2 ? 3 : 4;
@@ -88,6 +91,20 @@ internal sealed class FastPngReader
             }
         }
         if (!haveHeader || idatRanges.Count == 0)
+            return false;
+
+        // The pixel buffer is sized from the DECLARED dimensions, before a single pixel is read,
+        // so a few hundred bytes of crafted IHDR would otherwise buy a multi-hundred-megabyte
+        // allocation. The dimension caps above bound that, but only at the largest image this
+        // codec could legitimately produce. This bounds it by the file actually in hand: DEFLATE
+        // cannot expand by more than 1032:1, so an IDAT too small to reach the declared raw size
+        // is describing an image that cannot exist. Rejecting returns false, which simply hands
+        // the file to ImageSharp — no legitimate capture is affected, since a real one carries
+        // the data it claims.
+        long compressed = idatRanges.Sum(r => (long)r.Length);
+        long declaredRaw = ((long)width * bytesPerPixel + 1) * height; // +1 filter byte per row
+        const long MaxDeflateRatio = 1032;
+        if (compressed * MaxDeflateRatio < declaredRaw)
             return false;
 
         var px = scratch.Pixels(width * height);

@@ -23,7 +23,7 @@ can be AES-256-GCM encrypted end to end.
 [Sample output](#sample-output) · [Formats](#image-formats) · [Resilience](#resilience) ·
 [Camera capture](#camera-capture) ·
 [Benchmarks](#benchmark-snapshot) · [Design notes](#how-it-works) ·
-[Building & testing](#building-and-testing)
+[Building & testing](#building-and-testing) · [Security](SECURITY.md)
 
 ## Supported platforms
 
@@ -121,6 +121,11 @@ qrshard receive --device "Integrated Camera"
 frames stream through ffmpeg and decode in real time; the capture stops itself the moment the
 transfer completes.
 
+`--screen` reads *this* machine's display instead of a camera, which is how you get a file **out**
+of a locked-down remote: run the slideshow inside the RDP or VM window and decode the host's own
+screen. Narrow it to just that window with `--region x,y,w,h` (e.g. `--region 100,80,1920,1080`)
+so the rest of the desktop is never captured or scanned.
+
 ## Commands and options
 
 | Command | Description |
@@ -152,6 +157,7 @@ transfer completes.
 | `--camera` | flag | off | Camera profile: finder patterns so shards decode from **photos/handheld video** of the screen; shifts defaults to cell 8 / 2 bits / ECC 32 |
 | `--video` | flag | off | Also write a slideshow (see `--slideshow`) for recording-based capture |
 | `--slideshow <kind>` | `html`, `apng` | `html` | With `--video`: a self-contained `slideshow.html` page, or a single animated PNG (`slideshow.apng`) cycling the shards — useful where one media file is easier to display/record than a browser page |
+| `--open` | flag | off | With `--video`: open the slideshow in the default browser once encoding finishes. `qrshard send` is exactly `encode --video --open` |
 | `-i, --interval <ms>` | ≥ 100 | 500 | Slideshow interval per image (both slideshow kinds) |
 | `--interleave2` | flag | off | v2 permuted interleave: spreads **vertical** damage (a horizontal banner/overlay) across codewords as well as horizontal. Needs ECC; rides a metadata-version nibble so older decoders reject it rather than misread |
 | `--profile <name>` | a name in `appsettings.json` `EncodeProfiles` | — | Apply a named encode preset (see [Configuration](#configuration-appsettingsjson)); explicit flags still override it |
@@ -356,7 +362,14 @@ Six independent layers, from within-cell to whole-transfer:
    ambiguous (far from every palette color, or nearly a tie), and codewords that fail
    errors-only decoding retry with those flags as *erasures* — RS corrects twice as many known
    positions as unknown ones (`2·errors + erasures ≤ parity`), so borderline captures gain up
-   to ~75% more correctable damage per codeword. Wrong flags cost nothing on healthy codewords.
+   to ~75% more correctable damage per codeword.
+
+   Two syndromes are always held back from that budget, so at the default parity of 16 up to 14
+   flagged bytes per block are usable. That reserve is what makes the result *checkable*: an
+   erasure decode that spends every syndrome is exactly determined, so it always yields some
+   valid codeword and the verification step passes even when the answer is wrong. A codeword
+   flagged beyond the budget is handed to Chase decoding instead of being answered on a guess.
+   Wrong flags on a healthy codeword still cost nothing.
 3. **Multi-capture fusion**: several photos of the same shard that each fail on their own are
    combined — per-codeword selection with a majority vote from three captures up; with exactly
    two, the spatial clusters where the captures disagree are hypothesis-tested (glare moves
@@ -628,8 +641,22 @@ through ImageSharp with lossless speed-tuned settings.
 ## Building and testing
 
 Requires the .NET 10 SDK. `dotnet build -c Release` at the solution root; `./publish.ps1` for
-standalone binaries. CI builds and tests every push on Windows and Linux; tagged releases
-publish Native-AOT binaries and the NuGet tool automatically.
+standalone binaries.
+
+Every push and pull request runs five workflows:
+
+| Workflow | What it guards |
+|---|---|
+| **CI** | Build + the full suite on windows-latest, ubuntu-latest, ubuntu-24.04-arm and macos-latest — every platform a release binary is published for |
+| **Interop** | Four encoders x four decoders: shards encoded on each OS/arch must decode on every other, forcing parity reconstruction (where the x64 and arm64 GF(2⁸) paths could disagree) and covering the encrypted path |
+| **Package** | Packs both NuGet packages and consumes them from *outside* the repo — compiles the readme's own code sample against the packed package, round-trips through the public API, and installs the dotnet tool |
+| **Perf gate** | Base and head builds race the same 30 MB round trip; a >30% median regression fails |
+| **Fuzz** | Weekly, 20 000 iterations of structure-aware fuzzing over every parser that consumes untrusted bytes |
+
+Tagged releases additionally build the Native-AOT binaries, **run** each one (version, self-test
+and a real round trip with a deleted image rebuilt from parity) before attaching it, and only
+publish to nuget.org once all four have passed — publication is the one irreversible step, so it
+waits on everything else.
 
 ImageSharp 4.x validates a license at build time. License keys are personal and **not
 committed**: obtain your own (free community licenses for qualifying open-source use at
@@ -645,9 +672,14 @@ and end users need nothing.
   early stop, camera video with pose drift), encryption, archives, sessions, watch mode,
   fusion, calibration, randomized robustness fuzzing of every untrusted-input parser, and the
   CLI.
-- **Cross-version interop**: `tests/QrShard.Tests/golden/` holds frozen shard fixtures encoded
-  by each released tag (v1.0.0, v1.1.0, …); the suite asserts the current decoder still
-  reconstructs every one byte-for-byte, so a shard you encoded with an old release always
-  decodes. Regenerate/extend with `golden/regenerate.ps1` when tagging a new version.
+- **Cross-version interop**: `tests/QrShard.Tests/golden/` holds frozen shard fixtures encoded by
+  the tagged binaries themselves; the suite asserts the current decoder still reconstructs every
+  one byte-for-byte, so a shard encoded with an old release always decodes.
+  `golden/versions.json` lists which versions must be covered — one per released minor line,
+  since the wire format is versioned by a metadata nibble that patch releases don't touch, plus
+  the newest release. It is read by both the tests and `golden/regenerate.ps1`, so the fixtures on
+  disk and the set the tests demand cannot drift apart; a listed version with no fixtures fails
+  the suite. After tagging a new minor, run `regenerate.ps1` and commit what it produces (it skips
+  versions already present, because the fixtures are frozen).
 - `qrshard test` — end-to-end self-test at real resolutions, including simulated screenshots
   with cursor damage and a cross-shard recovery scenario.
