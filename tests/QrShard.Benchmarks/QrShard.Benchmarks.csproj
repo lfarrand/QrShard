@@ -18,6 +18,13 @@
     <!-- Match the CLI's GC mode so benchmark numbers reflect production behavior. -->
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <!-- The line above has said "match the CLI's GC mode" since it was written, but the CLI also
+         disables DATAS and this project did not — so the published numbers measured a
+         configuration that does not ship. Whether DATAS costs anything here is a separate
+         question and is deliberately NOT asserted: the CLI's own comment cites 3-9% from an A/B
+         on a 100 MB round trip, and that figure has not been re-measured. This change is about
+         measuring what ships, not about a claimed win. -->
+    <GarbageCollectionAdaptationMode>0</GarbageCollectionAdaptationMode>
   </PropertyGroup>
 
 </Project>
