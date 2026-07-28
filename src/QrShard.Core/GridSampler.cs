@@ -185,7 +185,10 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// <summary>
     /// Gradient path: the reference palette is re-interpolated per grid row between the top and
     /// bottom calibration strips, so a vertical illumination ramp (screen falloff, room light in
-    /// a photo) moves the classification targets with it. No LUT — the palette changes per row.
+    /// a photo) moves the classification targets with it. The quantized LUT of the uniform path
+    /// cannot be reused — it would have to be rebuilt every row — so classification instead goes
+    /// through the exact per-channel tables of <see cref="SeparablePalette"/>, which cost one
+    /// rebuild per row and are valid whenever the row palette kept its product structure.
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits,
@@ -194,6 +197,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         double yTopStrip = layout.Gutter + layout.MetaH * 1.5;
         double yBottomStrip = layout.InnerH - layout.Gutter - layout.MetaH * 1.5;
         var rowPalette = new Rgb24[palettes.Best.Length];
+        var rowIndex = new SeparablePalette();
         int width = bmp.Width, height = bmp.Height;
         var px = bmp.Px;
         int[] cols = ColumnPixels(inner, layout, sx, width);
@@ -205,6 +209,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
             double t = Math.Clamp((yEnc - yTopStrip) / (yBottomStrip - yTopStrip), 0, 1);
             for (int c = 0; c < rowPalette.Length; c++)
                 rowPalette[c] = Lerp(palettes.Top[c], palettes.Bottom[c], t);
+            bool separable = rowIndex.TryRebuild(rowPalette);
 
             int rowY = RowPixel(inner, layout, sy, height, gy);
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
@@ -218,7 +223,9 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     int xi = Math.Clamp(colX + dx, 0, width - 1);
                     int yi = Math.Clamp(rowY + dy, 0, height - 1);
                     var c = px[yi * width + xi];
-                    int v = paletteMath.Nearest(rowPalette, c.R, c.G, c.B);
+                    int v = separable
+                        ? rowIndex.Nearest(c.R, c.G, c.B)
+                        : paletteMath.Nearest(rowPalette, c.R, c.G, c.B);
                     long dr = c.R - rowPalette[v].R, dg = c.G - rowPalette[v].G, db = c.B - rowPalette[v].B;
                     long dist = dr * dr + dg * dg + db * db;
                     if (dist < bestDist)

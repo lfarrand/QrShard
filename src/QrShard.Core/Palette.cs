@@ -19,11 +19,7 @@ internal sealed class Palette
         if (bitsPerCell == 1)
             return [new Rgb24(0, 0, 0), new Rgb24(255, 255, 255)];
 
-        // Distribute bits across channels: R gets the most, then G, then B.
-        int bitsR = (bitsPerCell + 2) / 3;
-        int bitsG = (bitsPerCell + 1) / 3;
-        int bitsB = bitsPerCell / 3;
-        int nR = 1 << bitsR, nG = 1 << bitsG, nB = 1 << bitsB;
+        var (nR, nG, nB) = ChannelCounts(bitsPerCell);
 
         var colors = new Rgb24[1 << bitsPerCell];
         for (int i = 0; i < colors.Length; i++)
@@ -38,6 +34,14 @@ internal sealed class Palette
 
     private static byte Level(int index, int count) =>
         count == 1 ? (byte)0 : (byte)(index * 255 / (count - 1));
+
+    /// <summary>
+    /// How many levels each channel carries: bits are distributed R first, then G, then B. The
+    /// palette index is the mixed-radix digit string (iR, iG, iB) in that order — the layout
+    /// <see cref="SeparablePalette"/> relies on, so both must read it from here.
+    /// </summary>
+    public static (int R, int G, int B) ChannelCounts(int bitsPerCell) =>
+        (1 << ((bitsPerCell + 2) / 3), 1 << ((bitsPerCell + 1) / 3), 1 << (bitsPerCell / 3));
 
     /// <summary>
     /// The nearest palette color EXCLUDING one index, with its squared distance — the
