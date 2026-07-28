@@ -1,0 +1,143 @@
+# Cross-platform wire-format check: shards encoded on one OS/architecture must decode on every
+# other. This is the tool's whole purpose — moving a file from machine A to machine B, which are
+# very often different systems — and the README states it as verified, but nothing tested it:
+# ci.yml runs the same suite on four runners and each round-trips in isolation, so a
+# platform-dependent encoder bug passes everywhere while real transfers break.
+#
+# Four encoders x four decoders covers all sixteen pairs in eight jobs. The riskiest surface is
+# GF(2^8) arithmetic, where x64 takes a GFNI/AVX path and arm64 does not, so the decode step
+# deletes a data image and forces parity reconstruction rather than settling for a plain read.
+name: Interop
+
+on:
+  push:
+    branches: [main]
+  # Unfiltered by path, deliberately: a required check that never reports blocks the PR forever.
+  pull_request:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  # A test fixture, not a secret — it only has to match between the encode and decode jobs.
+  QRSHARD_INTEROP_PASSWORD: interop-fixture-password
+
+jobs:
+  encode:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest,   id: win-x64 }
+          - { os: ubuntu-latest,    id: linux-x64 }
+          - { os: ubuntu-24.04-arm, id: linux-arm64 }
+          - { os: macos-latest,     id: osx-arm64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build
+        run: dotnet build src/QrShard/QrShard.csproj -c Release
+
+      - name: Encode on ${{ matrix.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # Binary content on purpose: git converts line endings in text files per platform, so a
+          # text payload would differ between checkouts and the comparison would fail for a reason
+          # that has nothing to do with the wire format. PNGs are left byte-identical everywhere.
+          cat docs/samples/*.png > out/payload.bin
+          echo "payload: $(wc -c < out/payload.bin) bytes"
+
+          # The expected bytes travel WITH the shards, so each decoder compares against exactly
+          # what this platform encoded rather than against its own checkout.
+          dotnet run --project src/QrShard -c Release --no-build -- \
+            encode out/payload.bin -o out/recover -r 900 -R 25
+          dotnet run --project src/QrShard -c Release --no-build -- \
+            encode out/payload.bin -o out/crypt -r 900 -p "$QRSHARD_INTEROP_PASSWORD"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shards-${{ matrix.id }}
+          path: out/
+          retention-days: 1
+
+  decode:
+    needs: encode
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest,   id: win-x64 }
+          - { os: ubuntu-latest,    id: linux-x64 }
+          - { os: ubuntu-24.04-arm, id: linux-arm64 }
+          - { os: macos-latest,     id: osx-arm64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build
+        run: dotnet build src/QrShard/QrShard.csproj -c Release
+
+      # Every encoder's output, so this one runner covers its whole row of the matrix.
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+
+      - name: Decode every platform's shards on ${{ matrix.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          qrshard() { dotnet run --project src/QrShard -c Release --no-build -- "$@"; }
+          failures=0
+
+          for dir in incoming/shards-*; do
+            origin="${dir#incoming/shards-}"
+            echo "::group::${origin} -> ${{ matrix.id }}"
+
+            # 1. Parity path. Deleting a DATA image forces Cauchy reconstruction, which is the
+            #    part most likely to diverge between architectures: the GF(2^8) kernels take a
+            #    GFNI/AVX route on x64 and a different one on arm64, and a disagreement there
+            #    would silently produce the wrong bytes rather than fail loudly.
+            # Match the parity marker in the FILE name; the folder is deliberately not called
+            # "parity", because a plain `grep -v parity` on the full path would then match every
+            # line and select nothing.
+            victim="$(ls "$dir"/recover/*.png | grep -v 'qrs-parity' | head -1)"
+            rm "$victim"
+            echo "removed $(basename "$victim") to force parity reconstruction"
+            if qrshard decode "$dir/recover" -o "restored-$origin.bin" && \
+               cmp -s "$dir/payload.bin" "restored-$origin.bin"; then
+              echo "  OK   parity + reconstruction"
+            else
+              echo "::error::${origin} shards failed to decode on ${{ matrix.id }} (parity path)"
+              failures=$((failures + 1))
+            fi
+
+            # 2. Encrypted path: AES-256-GCM with the cleartext identity fields bound as
+            #    associated data, so this also pins that the AAD is assembled identically on
+            #    both sides of a cross-platform transfer.
+            if qrshard decode "$dir/crypt" -o "restored-crypt-$origin.bin" -p "$QRSHARD_INTEROP_PASSWORD" && \
+               cmp -s "$dir/payload.bin" "restored-crypt-$origin.bin"; then
+              echo "  OK   encrypted"
+            else
+              echo "::error::${origin} encrypted shards failed to decode on ${{ matrix.id }}"
+              failures=$((failures + 1))
+            fi
+            echo "::endgroup::"
+          done
+
+          if [ "$failures" -ne 0 ]; then
+            echo "$failures cross-platform decode(s) failed on ${{ matrix.id }}"
+            exit 1
+          fi
+          echo "all encoders decoded cleanly on ${{ matrix.id }}"
