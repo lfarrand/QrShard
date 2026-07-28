@@ -24,7 +24,7 @@ public class JsonAndGuardTests
         File.Delete(result.Files[1]);
 
         var (code, output) = Run("verify", tmp.File("shards"), "--json");
-        Assert.Equal(1, code);
+        Assert.Equal(3, code); // incomplete, not a hard error
         using var doc = JsonDocument.Parse(output);
         Assert.False(doc.RootElement.GetProperty("complete").GetBoolean());
         var file = doc.RootElement.GetProperty("files")[0];

@@ -91,8 +91,25 @@ public class SessionAndDiagnosticsTests
 
         File.Delete(result.Files[1]);
         var (codeIncomplete, outIncomplete) = Run("verify", tmp.File("shards"));
-        Assert.Equal(1, codeIncomplete);
+        Assert.Equal(3, codeIncomplete);
         Assert.Contains("missing image(s) 2", outIncomplete);
+    }
+
+    [Fact]
+    public void Verify_SeparatesIncompleteFromUnusable()
+    {
+        // The two outcomes need different codes because they need different reactions: capturing
+        // more images fixes the first and can never fix the second. Collapsing both into 1 (as
+        // this did) left a script no way to tell "keep going" from "give up".
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("input.bin", TestData.Random(150_000));
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), Fast);
+        File.Delete(result.Files[1]);
+        Assert.Equal(3, Run("verify", tmp.File("shards")).Code);
+
+        string junk = tmp.Sub("junk");
+        File.WriteAllBytes(Path.Combine(junk, "noise.png"), TestData.Random(2_000));
+        Assert.Equal(1, Run("verify", junk).Code);
     }
 
     [Fact]

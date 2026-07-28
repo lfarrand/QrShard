@@ -132,7 +132,7 @@ so the rest of the desktop is never captured or scanned.
 |---|---|
 | `qrshard encode <file\|folder> [options]` | Split a file (or tar-ed folder) into shard images |
 | `qrshard send <file\|folder> [options]` | Encode + open the slideshow in the default browser |
-| `qrshard decode <folder\|images...\|recording> [options]` | Reconstitute the original from captures or a recording (`--watch` to keep decoding as captures land; `--clipboard` on Windows) |
+| `qrshard decode <folder\|images...\|recording> [options]` | Reconstitute the original from captures or a recording (`--watch` to keep decoding as captures land; `--clipboard` on Windows; `--json` for scripts) |
 | `qrshard receive [--device d \| --screen] [options]` | Live decode from a webcam — or from THIS machine's screen (`--screen`): put the slideshow in an RDP/VM window and transfer out of locked-down remotes |
 | `qrshard verify <folder\|images...> [--session f] [--json]` | Report set completeness without writing output |
 | `qrshard info <image> [--heatmap out.png] [--quality-heatmap out.png] [--json]` | Inspect/validate one shard; render an ECC damage map or a capture-quality map (works even on a *failed* capture) |
@@ -181,10 +181,54 @@ with a "did you mean" hint rather than silently encoding **unencrypted**.
 | `--watch` | flag | off | Keep watching the folder: decode captures as they land, assemble the moment the set completes; Ctrl+C persists to the session |
 | `--clipboard` | flag | off | (Windows) decode the bitmap on the clipboard — snip a displayed shard with Win+Shift+S, no file saving; accumulates with `--session` |
 | `--fps <n>` | > 0 | 8 | Frame extraction rate when decoding a video recording. If not pinned, an incomplete file recording is automatically re-extracted at 2× then 4× until the set completes |
+| `--json` | flag | off | Emit the result as JSON on stdout instead of the human log — the restored files with their **resolved output paths** and lengths, or the per-file completeness status when the set is incomplete |
 
 A plain `decode` of an incomplete folder prints the same per-file status `verify` shows, names
 the missing images, points you at `--session`/`--watch`, and exits **3** (distinct from a hard
 error) — nothing already collected is lost.
+
+### Scripting: exit codes and `--json`
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Success |
+| `2` | Usage error (unknown command, missing argument, misspelled option) — usage goes to stdout, the reason to stderr |
+| `3` | Valid but **incomplete**: images are missing. Capture more and run again; nothing collected is lost |
+| `1` | Anything else — unusable images, corruption, a wrong password, I/O |
+
+`encode`, `decode`, `verify` and `info` take `--json`; every human progress line is suppressed so
+stdout is nothing but the JSON document (errors still go to stderr). A complete `decode` reports
+what it wrote — the path matters because without `-o` the destination comes from the shard header
+and takes a `.restored` fallback if the name is already taken:
+
+```console
+$ qrshard decode captures/ --json
+{
+  "complete": true,
+  "restored": [
+    { "fileName": "report.pdf", "outputPath": "/home/me/report.restored.pdf", "length": 3145728 }
+  ]
+}
+```
+
+An incomplete `decode` (exit 3) and `verify` share one shape, so a script reads either the same
+way — `.complete`, then `.files[].missing`:
+
+```console
+$ qrshard decode captures/ --json; echo "exit $?"
+{
+  "complete": false,
+  "files": [
+    { "fileName": "report.pdf", "fileId": "aca8f0d2a53524aa", "dataPresent": 24,
+      "dataTotal": 26, "parityPresent": 0, "recoverable": false, "missing": [3, 11] }
+  ]
+}
+exit 3
+```
+
+There is deliberately no `restored` key on that shape: a folder mixing one complete file with one
+incomplete file writes the complete one before stopping, and which files landed is not tracked on
+that path — so listing them would be a guess.
 
 ## Workflow tools: sessions, watch, verify, heatmap, calibrate
 
@@ -193,7 +237,9 @@ error) — nothing already collected is lost.
 - **Watch mode** (`decode incoming/ --watch --session s`): leave the receiver running and just
   keep dropping captures in — it decodes each as it lands and assembles automatically.
 - **`verify`**: is this set complete/recoverable? Per-file data/parity counts, missing indices,
-  parity-coverage status; exit 0 only when fully reassemblable. `--json` for scripts.
+  parity-coverage status; exit 0 only when fully reassemblable, 3 when images are still missing
+  (1 is reserved for images that are unusable — the one answer capturing more cannot fix).
+  `--json` for scripts.
 - **`info --heatmap out.png`**: a per-cell ECC damage map — green (clean) through red (heavily
   corrected) to dark red (beyond correction) — showing exactly where the glare blob or cursor
   landed. When a capture fails so badly there is no correction data to map, it falls back to the
