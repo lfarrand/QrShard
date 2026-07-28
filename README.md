@@ -655,7 +655,12 @@ charts are emitted with every presentation attribute inlined — GitHub's SVG sa
   emits, ~2x faster than a general decoder, falling back to ImageSharp for anything else.
 - **Streaming both ways**: incompressible inputs are memory-mapped and read per-chunk by the
   encode workers; reassembly streams chunks → decrypt/decompress → disk with an incremental
-  SHA-256, so neither side materializes the file twice.
+  SHA-256, so neither side materializes the file twice. Encryption is the one exception, because
+  AES-GCM authenticates the whole message before releasing any of it and therefore needs the
+  payload contiguous: the encoder reads the file straight into the cipher blob, and the decoder
+  gathers the shard chunks into one. Both then **encrypt/decrypt that blob in place** rather than
+  pairing it with a second full-size buffer — so encoding an encrypted payload peaks at one copy
+  of it, and decoding at the shard chunks plus one.
 - **Table-driven Reed-Solomon with SIMD on both paths**: 16 codewords per `Vector128` lane for
   the decode-side syndrome scan *and* the encode-side LFSR (nibble-shuffle product tables);
   clean codewords skip the scalar decoder entirely. Cross-shard parity and fountain coding use

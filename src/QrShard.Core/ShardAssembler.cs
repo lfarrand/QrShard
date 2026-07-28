@@ -6,9 +6,11 @@ namespace QrShard;
 
 /// <summary>
 /// Reassembles decoded shards into output files. The chunk sequence is streamed through
-/// decrypt/decompress straight to disk with an incremental SHA-256, so peak memory is one
-/// buffer — not two copies of the whole file (encrypted payloads are the exception: GCM
-/// authenticates the whole message, so those materialize once).
+/// decrypt/decompress straight to disk with an incremental SHA-256, so peak memory is the chunk
+/// buffers themselves and nothing else. Encrypted payloads are the one exception: GCM
+/// authenticates the whole message, so the ciphertext has to be gathered into one contiguous
+/// buffer before the tag can be checked. That buffer is decrypted in place, which costs one
+/// extra copy of the payload rather than two.
 /// </summary>
 internal sealed class ShardAssembler(IParityReassembler parityReassembler, PayloadCipher cipher) : IShardAssembler
 {
@@ -79,7 +81,10 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             ReadOnlySpan<byte> aad = (first.Flags & ShardHeader.FlagAuthMeta) != 0
                 ? PayloadCipher.BuildAad(first.OriginalLength, first.Sha256, first.FileName)
                 : default;
-            source = new MemoryStream(cipher.Decrypt(blob, password, first.FileName, aad));
+            // Decrypting in place keeps the encrypted path to two live buffers (chunks + blob)
+            // rather than three; the tag is still verified over the whole message first.
+            var plain = cipher.DecryptInPlace(blob, password, first.FileName, aad);
+            source = new MemoryStream(plain.Array!, plain.Offset, plain.Count, writable: false);
         }
         if (compressed)
         {

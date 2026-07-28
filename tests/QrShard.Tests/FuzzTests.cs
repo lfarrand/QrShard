@@ -200,10 +200,10 @@ public class FuzzTests
         var cipher = new PayloadCipher();
         byte[] valid = cipher.Encrypt(TestData.Random(200), "pw");
 
-        Run("PayloadCipher.Decrypt", (rng, _) =>
+        Run("PayloadCipher.DecryptInPlace", (rng, _) =>
         {
             byte[] data = rng.Next(2) == 0 ? Mutate(valid, rng) : new byte[rng.Next(200)];
-            cipher.Decrypt(data, "pw", "fuzz");
+            cipher.DecryptInPlace(data, "pw", "fuzz");
         });
     }
 
