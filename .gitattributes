@@ -1,4 +1,8 @@
 # Shell scripts must keep LF line endings. Committed with CRLF (which is what happens by default
 # when they are authored on Windows with core.autocrlf=true), they fail the moment Linux runs
-# them — "bad interpreter: /usr/bin/env bash^M" — including in CI.
+# them — "bad interpreter: /usr/bin/env bash^M" — including in CI. The same goes for scripts that
+# are sourced rather than executed: with CRLF, completions/qrshard.bash dies on the function
+# definition — "syntax error near unexpected token `$'{\r''" — so sourcing it from ~/.bashrc
+# registers no completions at all and prints that error in every new shell.
 *.sh text eol=lf
+*.bash text eol=lf
