@@ -30,29 +30,66 @@ public class GoldenInteropTests
     private static readonly string[] CoreConfigs =
         ["compressed", "raw", "parity", "fountain", "encrypted", "highecc", "camera"];
 
+    private sealed record VersionManifest(string[] Versions);
+
+    /// <summary>The versions that must have fixtures, shared with regenerate.ps1 so the set on
+    /// disk and the set demanded here cannot drift apart.</summary>
+    private static string[] RequiredVersions =>
+        JsonSerializer.Deserialize<VersionManifest>(
+            File.ReadAllText(Path.Combine(GoldenRoot, "versions.json")),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!.Versions;
+
     [Fact]
-    public void GoldenFixtures_ArePresent_AndEachVersionIsComplete()
+    public void EveryRequiredVersion_HasACompleteFixtureSet()
     {
-        // Guards against the Content-copy silently dropping fixtures (which would make the theory
-        // below vacuously pass). Rather than a hardcoded floor, this scales with the matrix: it
-        // discovers every version directory actually present and asserts each carries the full
-        // core config set — so a partially-dropped copy, or a newly added version missing configs,
-        // fails here.
+        // The previous form of this asserted only `count >= 2`, which the two fixture directories
+        // that happened to exist satisfied permanently — so the guard against wire-format drift
+        // sat green while ten further versions shipped with no fixtures at all. The required set
+        // now comes from versions.json, so a release that should be covered and is not fails here
+        // instead of passing silently.
         Assert.True(Directory.Exists(GoldenRoot), "golden fixtures were not copied to the test output");
-        var byVersion = Fixtures()
+
+        var present = Fixtures()
             .Select(f => (string)f[0])
             .Select(rel => (Version: rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0],
                             Config: Path.GetFileName(rel)))
             .GroupBy(x => x.Version)
-            .ToList();
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Config).ToHashSet());
 
-        Assert.True(byVersion.Count >= 2, $"expected fixtures from multiple released versions, found {byVersion.Count}");
-        foreach (var version in byVersion)
+        var absent = RequiredVersions.Where(v => !present.ContainsKey(v)).ToList();
+        Assert.True(absent.Count == 0,
+            $"versions.json requires golden fixtures for {string.Join(", ", absent)}, but none are present. " +
+            "Run tests/QrShard.Tests/golden/regenerate.ps1 and commit the result.");
+
+        foreach (string version in RequiredVersions)
         {
-            var configs = version.Select(x => x.Config).ToHashSet();
-            var missing = CoreConfigs.Where(c => !configs.Contains(c)).ToList();
-            Assert.True(missing.Count == 0, $"golden version '{version.Key}' is missing config(s): {string.Join(", ", missing)}");
+            var missing = CoreConfigs.Where(c => !present[version].Contains(c)).ToList();
+            Assert.True(missing.Count == 0,
+                $"golden version '{version}' is missing config(s): {string.Join(", ", missing)}");
         }
+
+        // A fixture directory nobody requires is either a leftover or an unrecorded addition;
+        // either way versions.json is the thing that should have been updated.
+        var unlisted = present.Keys.Except(RequiredVersions).ToList();
+        Assert.True(unlisted.Count == 0,
+            $"golden fixtures exist for {string.Join(", ", unlisted)} but versions.json does not list them.");
+    }
+
+    [Fact]
+    public void RequiredVersions_SpanEveryReleasedMinorLine()
+    {
+        // The policy versions.json encodes: one entry per minor line, because the wire format is
+        // versioned by a metadata nibble that patch releases do not touch. This asserts the list
+        // actually satisfies that rather than trusting the comment above it.
+        var minors = RequiredVersions
+            .Select(v => Version.Parse(v.TrimStart('v')))
+            .Select(v => (v.Major, v.Minor))
+            .ToHashSet();
+
+        Assert.Contains((1, 0), minors);
+        Assert.Contains((1, 1), minors);
+        Assert.Contains((1, 2), minors);
+        Assert.Contains((1, 3), minors);
     }
 
     [Theory]

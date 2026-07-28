@@ -26,7 +26,7 @@
   <!-- Frozen cross-version interop fixtures (shards from released tags); copied so the tests
        find them at runtime. The regenerate.ps1 script is excluded from the copy. -->
   <ItemGroup>
-    <Content Include="golden\**\*.png;golden\**\manifest.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="golden\**\*.png;golden\**\manifest.json;golden\versions.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
