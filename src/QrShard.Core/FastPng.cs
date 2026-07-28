@@ -150,10 +150,89 @@ internal sealed class FastPng
         output.Write(adler);
     }
 
-    private static void UpdateAdler(ref uint s1, ref uint s2, ReadOnlySpan<byte> data)
+    /// <summary>
+    /// Groups per SIMD fold. The vs2 lane accumulator is 16-bit and reaches 255*m*(m-1)/2 over a
+    /// group of m blocks, so 23 is the largest group that cannot overflow it (23 → 64,515;
+    /// 24 → 70,380 > ushort.MaxValue).
+    /// </summary>
+    private const int AdlerGroupBlocks = 23;
+
+    /// <summary>
+    /// Positional weight (V - k) for byte k of a block, pre-split across the four Vector&lt;uint&gt;
+    /// halves that Widen produces from one Vector&lt;byte&gt;. Widen's element order is defined
+    /// (low half first), so lane p of quarter q always carries byte q*Count + p.
+    /// </summary>
+    private static readonly Vector<uint>[] AdlerWeights = BuildAdlerWeights();
+
+    private static Vector<uint>[] BuildAdlerWeights()
     {
-        const int NMax = 5552; // max bytes before the sums can overflow uint
+        int v = Vector<byte>.Count;
+        var weights = new uint[v];
+        for (int k = 0; k < v; k++)
+            weights[k] = (uint)(v - k);
+        int quarter = Vector<uint>.Count; // == v / 4
+        var result = new Vector<uint>[4];
+        for (int q = 0; q < 4; q++)
+            result[q] = new Vector<uint>(weights, q * quarter);
+        return result;
+    }
+
+    /// <summary>
+    /// Folds <paramref name="data"/> into the running Adler-32 state.
+    /// </summary>
+    /// <remarks>
+    /// Written byte at a time this is a serial dependency chain (s2 += s1 += b), which is why the
+    /// scalar form runs at a fraction of the memory bandwidth a hardware CRC-32 achieves over the
+    /// same bytes. The chain breaks if the positional weight each byte carries into s2 is applied
+    /// once per group rather than once per byte: for a group of m blocks of V bytes, with
+    /// vs1[k] = sum_t b[t][k] and vs2[k] = sum_t (m-1-t)*b[t][k] (vs2 accumulating vs1 as of the
+    /// PREVIOUS block), the byte i = t*V + k contributes (m*V - i) = (m-1-t)*V + (V-k) to s2, so
+    ///     s2 += m*V*s1 + V*sum(vs2) + sum_k (V-k)*vs1[k]
+    ///     s1 += sum(vs1)
+    /// is the same recurrence, regrouped. Every lane then accumulates independently.
+    /// </remarks>
+    internal static void UpdateAdler(ref uint s1, ref uint s2, ReadOnlySpan<byte> data)
+    {
         int i = 0;
+        if (Vector.IsHardwareAccelerated)
+        {
+            int v = Vector<byte>.Count;
+            int groupBytes = AdlerGroupBlocks * v;
+            var weights = AdlerWeights;
+            while (data.Length - i >= groupBytes)
+            {
+                Vector<ushort> vs1Lo = default, vs1Hi = default, vs2Lo = default, vs2Hi = default;
+                for (int t = 0; t < AdlerGroupBlocks; t++, i += v)
+                {
+                    // vs2 must see vs1 as of the previous block — that lag IS the (m-1-t) weight.
+                    vs2Lo += vs1Lo;
+                    vs2Hi += vs1Hi;
+                    Vector.Widen(new Vector<byte>(data.Slice(i, v)), out var lo, out var hi);
+                    vs1Lo += lo;
+                    vs1Hi += hi;
+                }
+
+                // 32-bit lanes for the reductions: the totals exceed 16 bits even though no
+                // individual lane accumulator did.
+                Vector.Widen(vs1Lo, out var a0, out var a1);
+                Vector.Widen(vs1Hi, out var a2, out var a3);
+                Vector.Widen(vs2Lo, out var c0, out var c1);
+                Vector.Widen(vs2Hi, out var c2, out var c3);
+
+                uint sum1 = Vector.Sum(a0 + a1 + a2 + a3);
+                uint weighted = Vector.Sum(a0 * weights[0] + a1 * weights[1] + a2 * weights[2] + a3 * weights[3]);
+                uint sum2 = Vector.Sum(c0 + c1 + c2 + c3);
+
+                // Bounded by 65520 + 1472*65520 + 64*4.13e6 + 2.4e7 < 2^32 at the widest V (64).
+                s2 += (uint)groupBytes * s1 + (uint)v * sum2 + weighted;
+                s1 += sum1;
+                s1 %= 65521;
+                s2 %= 65521;
+            }
+        }
+
+        // Scalar remainder — and the whole input where SIMD is unavailable.
+        const int NMax = 5552; // max bytes before the sums can overflow uint
         while (i < data.Length)
         {
             int end = Math.Min(i + NMax, data.Length);
