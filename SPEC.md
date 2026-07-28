@@ -123,8 +123,14 @@ Carried at the front of every image's data stream (before ECC). Little-endian:
 | 0x08 | Encrypted | payload stream is AES-256-GCM encrypted (§9.2) |
 | 0x10 | Archive | payload is a POSIX tar of a directory; extract after verification |
 | 0x20 | Fountain | the parity images are random-linear fountain frames (§8) |
+| 0x40 | AuthMeta | with 0x08: the identity fields are bound as AES-GCM associated data (§9.3) |
 
-A decoder MUST refuse flag bits it does not know.
+Bit 0x80 is unassigned. A decoder MUST refuse flag bits it does not know — i.e. any bit outside
+`0x7F`.
+
+0x40 is only meaningful together with 0x08; on an unencrypted shard it has no meaning and a
+decoder MUST refuse it. Encoders from v1.3.4 onward set it on every encrypted shard, so a decoder
+that rejects it cannot read any current encrypted set.
 
 ## 5. Cell stream, packing, and ECC
 
@@ -208,13 +214,44 @@ Applied to the whole file before splitting, in this order; reversed after reasse
    kept when it shrinks the payload.
 2. **Encryption** (flag 0x08): AES-256-GCM. The stream is
    `salt(16) ‖ nonce(12) ‖ tag(16) ‖ ciphertext`; key = PBKDF2-HMAC-SHA256(password, salt,
-   600 000 iterations, 32 bytes).
+   600 000 iterations, 32 bytes). Salt and nonce are freshly random per encode. When flag 0x40 is
+   also set, the GCM associated data is as in §9.3; when it is not, the associated data is empty.
 3. **Archive** (flag 0x10): the "file" is a POSIX tar (regular files and directories) of a
    folder; extract after SHA verification. Decoders MUST guard entry paths against escaping
    the destination.
 
 `totalLength` is the transformed stream's length; `originalLength` and `sha256` describe the
 original file (so verification happens after decrypt + decompress).
+
+### 9.3 Authenticated metadata (flag 0x40)
+
+The header is protected by a CRC-32, which is an error check and not a MAC: anyone who alters a
+header can recompute it. The identity fields are therefore bound into the encryption itself, so
+that a shard whose header has been rewritten fails to decrypt rather than decoding to the right
+bytes under the wrong name or length.
+
+When flags 0x08 and 0x40 are both set, the AES-GCM **associated data** is the concatenation
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | `originalLength`, little-endian signed 64-bit |
+| 8 | 32 | `sha256` of the original file |
+| 40 | *n* | `fileName`, UTF-8, exactly the header's bytes, no terminator |
+
+giving `40 + n` bytes total. The values are those in this shard's header (§4); the encoder writes
+the same bytes it puts there. Nothing else is bound — not `fileId`, `index`, `count`,
+`totalLength`, `payloadLength` or the flags themselves.
+
+For an empty original file the encoder encrypts an empty plaintext with `originalLength = 0` and
+the SHA-256 of zero bytes, so the construction is unchanged.
+
+**Backward compatibility.** Shards written before v1.3.4 set 0x08 without 0x40. A decoder MUST
+decide from the flag, not from the presence of a password: with 0x40, use the associated data
+above; without it, use empty associated data. GCM treats empty and absent associated data
+identically, so an implementation may simply pass a zero-length buffer.
+
+A decoder MUST NOT fall back to empty associated data when authenticated decryption fails with
+0x40 set — a tampered header is exactly what that failure means.
 
 ## 10. Reassembly and verification
 
