@@ -10,6 +10,7 @@ namespace QrShard.Tests;
 /// ever crafts shards with Flags = 0, so it does not reach here — which is how this path kept a
 /// traversal after the single-file one was fixed.
 /// </summary>
+[Collection(CurrentDirectoryCollection.Name)]
 public class ArchiveOutputPathSafetyTests
 {
     private static byte[] BuildTar(string entryName, byte[] content)

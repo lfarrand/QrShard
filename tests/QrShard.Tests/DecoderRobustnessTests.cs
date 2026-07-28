@@ -9,6 +9,7 @@ namespace QrShard.Tests;
 /// Decoder behavior under imperfect captures: padding, rescaling, cropping, dark surroundings,
 /// corruption, and incomplete or mixed shard sets.
 /// </summary>
+[Collection(CurrentDirectoryCollection.Name)]
 public class DecoderRobustnessTests
 {
     private static readonly EncodeOptions Fast = new() { Width = 900, Height = 900, CellPx = 3, BitsPerCell = 4 };

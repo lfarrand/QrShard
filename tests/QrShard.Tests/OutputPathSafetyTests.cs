@@ -8,6 +8,7 @@ namespace QrShard.Tests;
 /// nothing stops a hand-crafted shard from carrying "../../x" or an absolute path. These pin the
 /// invariant that such a name can never steer the write outside the directory the caller chose.
 /// </summary>
+[Collection(CurrentDirectoryCollection.Name)]
 public class OutputPathSafetyTests
 {
     private static DecodedShard CraftShard(string fileName, byte[] content)
