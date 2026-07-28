@@ -105,6 +105,33 @@ internal sealed class Gf256
     }
 
     /// <summary>
+    /// The <see cref="MulTables"/> nibble tables duplicated into both 128-bit halves, because
+    /// vpshufb resolves indices within each half independently.
+    /// </summary>
+    public (Vector256<byte> Lo, Vector256<byte> Hi) MulTables256(byte coef)
+    {
+        var (lo, hi) = MulTables(coef);
+        return (Vector256.Create(lo, lo), Vector256.Create(hi, hi));
+    }
+
+    /// <summary>
+    /// Multiplies all 32 lanes by the fixed coefficient encoded in the nibble tables.
+    ///
+    /// Uses <see cref="Avx2.Shuffle"/> and not Vector256.ShuffleNative, which looks like the
+    /// portable equivalent but is not: for byte lanes ShuffleNative keeps Shuffle's CROSS-lane
+    /// semantics, and x86 has no single instruction for that, so the JIT expands every call into
+    /// vpshufb + vperm2i128 + vpshufb + blend. Measured on an AVX2 machine that costs almost
+    /// exactly what two Vector128 steps cost, erasing the reason to widen at all (1.1x vs the
+    /// 1.9x below). vpshufb's per-half behaviour is what the duplicated tables are built for.
+    /// </summary>
+    public Vector256<byte> MulVec256(Vector256<byte> v, Vector256<byte> tableLo, Vector256<byte> tableHi)
+    {
+        var nibble = Vector256.Create((byte)0x0F);
+        return Avx2.Shuffle(tableLo, v & nibble)
+             ^ Avx2.Shuffle(tableHi, Vector256.ShiftRightLogical(v.AsUInt16(), 4).AsByte() & nibble);
+    }
+
+    /// <summary>
     /// Multiply-accumulate a whole shard: dst[i] ^= coef * src[i] over GF(2^8).
     /// This is the inner loop of both encoding and reconstruction.
     ///
@@ -153,6 +180,20 @@ internal sealed class Gf256
         }
         else if (Vector128.IsHardwareAccelerated && src.Length >= 16)
         {
+            // No GFNI (every ARM64 machine, and every x64 before Ice Lake / Zen 4). AVX2 still
+            // doubles the shuffle tier's stride; the Vector128 loop below then mops up the
+            // 16-byte remainder.
+            if (Avx2.IsSupported && src.Length >= 32)
+            {
+                var (wideLo, wideHi) = MulTables256(coef);
+                for (; i <= src.Length - 32; i += 32)
+                {
+                    var v = Vector256.Create<byte>(src.Slice(i, 32));
+                    var product = MulVec256(v, wideLo, wideHi);
+                    (Vector256.Create<byte>(dst.Slice(i, 32)) ^ product).CopyTo(dst.Slice(i, 32));
+                }
+            }
+
             var (tableLo, tableHi) = MulTables(coef);
             for (; i <= src.Length - 16; i += 16)
             {
