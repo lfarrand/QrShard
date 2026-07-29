@@ -70,11 +70,20 @@ internal sealed class FrameEdgeTracer(CameraMath math) : IFrameEdgeTracer
         thickness = 0;
         double search = Math.Max(12, module * 3);
         const double step = 0.5;
-        int samples = (int)(2 * search / step) + 1;
 
         Span<double> lum = stackalloc double[512];
-        if (samples > lum.Length)
-            samples = lum.Length;
+        // Clamp SEARCH, not just the sample count. Truncating samples alone left t running down
+        // from the full +search, so the window became [search - 255.5, search] and its inward reach
+        // stopped at a fixed 255.5 px however large the module was — while the frame's inner edge
+        // sits at t = -thickness. Past roughly 6.4x photo scale at finderModule 8 (and 1.6x at 48)
+        // every sample fell outside the window, `valid` stayed 0, TraceSide returned null, and
+        // phase-2 refinement silently switched off on exactly the close-up captures it helps most.
+        // Rescaling the window keeps it centred on the edge; the cost is coarser resolution on a
+        // very large module rather than no result at all.
+        int maxSamples = lum.Length;
+        if ((int)(2 * search / step) + 1 > maxSamples)
+            search = (maxSamples - 1) * step / 2;
+        int samples = Math.Min((int)(2 * search / step) + 1, maxSamples);
         double min = double.MaxValue, max = double.MinValue;
         for (int i = 0; i < samples; i++)
         {

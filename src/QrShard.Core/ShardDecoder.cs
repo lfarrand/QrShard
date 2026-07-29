@@ -207,7 +207,7 @@ internal sealed class ShardDecoder(
     public DecodeDiagnostics Diagnose(string path)
     {
         var scratch = new DecodeScratch();
-        var diagnostics = new DecodeDiagnostics();
+        var diagnostics = new DecodeDiagnostics { WantDetail = true };
         try
         {
             Bitmap bmp = LoadBitmap(path, scratch);
@@ -380,7 +380,7 @@ internal sealed class ShardDecoder(
         var (layout, inner) = frameLocator.Locate(bmp, scratch);
         // Capture per-cell classification margins for diagnostics only — the frame located, so a
         // quality heatmap can show WHERE a capture is weak even if the grid decode later fails.
-        int[]? cellMargins = diagnostics is not null ? new int[(long)layout.GridW * layout.GridH] : null;
+        int[]? cellMargins = diagnostics is { WantDetail: true } ? new int[(long)layout.GridW * layout.GridH] : null;
         if (diagnostics is not null)
         {
             diagnostics.Layout = layout;
@@ -431,10 +431,10 @@ internal sealed class ShardDecoder(
         if (layout.EccParity > 0)
         {
             stream = scratch.Recovered(layout.CodewordCount * Fec.DataLength(layout.EccParity));
-            int[]? codewordErrors = diagnostics is not null ? new int[layout.CodewordCount] : null;
+            int[]? codewordErrors = diagnostics is { WantDetail: true } ? new int[layout.CodewordCount] : null;
             bool recovered = fec.TryRecoverInto(work, layout.EccParity, layout.CodewordCount, stream, out correctedBytes, codewordErrors, workSuspects, workSecond);
-            if (diagnostics is not null)
-                diagnostics.CodewordErrors = codewordErrors!;
+            if (diagnostics is not null && codewordErrors is not null)
+                diagnostics.CodewordErrors = codewordErrors;
             if (!recovered)
             {
                 Salvage();
