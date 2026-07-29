@@ -22,9 +22,27 @@ internal sealed class AdaptiveBinarizer : IAdaptiveBinarizer
     private const double SauvolaK = 0.2;   // contrast sensitivity; flat regions → mean·(1−k)
     private const double SauvolaR = 128.0; // dynamic range of the local std for an 8-bit image
 
+    /// <summary>
+    /// The two summed-area tables are long[] over (w+1)*(h+1), so this path costs ~16 bytes per
+    /// pixel on top of the image itself — an order more than the decode buffers it runs alongside.
+    /// At the 500M-pixel per-image ceiling that is about 8 GB from ONE image, and it arrives as an
+    /// uncaught OutOfMemoryException, which is deliberately fatal in CollectShards (it is a
+    /// condition of the run, not of one image) and so takes the whole batch down.
+    ///
+    /// Bounded here instead, as a ShardDecodeException: too big for the camera path is a property
+    /// of that image, and the axis-aligned path — which does not need these tables — has already
+    /// been tried by the time this is reached. 80M pixels is comfortably past any real photo (a
+    /// 48-megapixel phone sensor is 48M) while holding the tables to ~1.3 GB.
+    /// </summary>
+    private const long MaxBinarizablePixels = 80_000_000;
+
     public bool[] Threshold(Bitmap photo)
     {
         int w = photo.Width, h = photo.Height;
+        if ((long)w * h > MaxBinarizablePixels)
+            throw new ShardDecodeException(
+                $"Image is {w}x{h}; too large for camera-capture binarization (limit " +
+                $"{MaxBinarizablePixels:N0} pixels). Crop closer to the shard, or capture at a lower resolution.");
         var lum = new byte[w * h];
         for (int i = 0; i < lum.Length; i++)
         {
