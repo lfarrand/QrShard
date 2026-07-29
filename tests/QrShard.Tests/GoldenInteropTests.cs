@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using QrShard;
@@ -75,21 +76,71 @@ public class GoldenInteropTests
             $"golden fixtures exist for {string.Join(", ", unlisted)} but versions.json does not list them.");
     }
 
+    /// <summary>Minor lines covered by versions.json, deduplicated and ordered.</summary>
+    private static List<(int Major, int Minor)> CoveredMinorLines =>
+        RequiredVersions
+            .Select(v => Version.Parse(v.TrimStart('v')))
+            .Select(v => (v.Major, v.Minor))
+            .Distinct()
+            .OrderBy(v => v.Major).ThenBy(v => v.Minor)
+            .ToList();
+
+    /// <summary>The shipping version, from the assembly under test — the same
+    /// AssemblyInformationalVersion the CLI's `--version` prints.</summary>
+    private static Version CurrentVersion =>
+        Version.Parse(typeof(QrShardCodec).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!
+            .InformationalVersion.Split('+')[0]);
+
     [Fact]
     public void RequiredVersions_SpanEveryReleasedMinorLine()
     {
-        // The policy versions.json encodes: one entry per minor line, because the wire format is
-        // versioned by a metadata nibble that patch releases do not touch. This asserts the list
-        // actually satisfies that rather than trusting the comment above it.
-        var minors = RequiredVersions
-            .Select(v => Version.Parse(v.TrimStart('v')))
-            .Select(v => (v.Major, v.Minor))
-            .ToHashSet();
+        // This previously asserted (1,0) (1,1) (1,2) (1,3) as literals, which meant the guard
+        // needed hand-editing on exactly the occasion it was supposed to fire: v1.4.0 shipped and
+        // nothing failed. Both halves are derived now, so neither needs maintaining.
+        var lines = CoveredMinorLines;
+        Assert.NotEmpty(lines);
 
-        Assert.Contains((1, 0), minors);
-        Assert.Contains((1, 1), minors);
-        Assert.Contains((1, 2), minors);
-        Assert.Contains((1, 3), minors);
+        // 1. No gaps. A missing line between two present ones is an unpinned wire format, and it
+        //    cannot be explained away as "not released yet" — something later than it is listed.
+        for (int i = 1; i < lines.Count; i++)
+        {
+            var (prevMajor, prevMinor) = lines[i - 1];
+            var (major, minor) = lines[i];
+            bool contiguous = (major == prevMajor && minor == prevMinor + 1) ||
+                              (major == prevMajor + 1 && minor == 0);
+            Assert.True(contiguous,
+                $"versions.json jumps from {prevMajor}.{prevMinor} to {major}.{minor}; the line(s) " +
+                "between have no golden fixtures. Run golden/regenerate.ps1 for the missing tag(s).");
+        }
+    }
+
+    [Fact]
+    public void MinorLinesBelowCurrent_AllHaveFixtures()
+    {
+        // The drift this catches: a minor ships, nobody regenerates fixtures, and the wire format
+        // it introduced is pinned by nothing. That went unnoticed through 1.3.10, 1.3.11 and
+        // 1.3.12 because the only thing asking for it was a comment.
+        //
+        // It cannot simply demand coverage of the CURRENT version: a version-bump PR sets the
+        // csproj to X.Y.0 before the tag exists, and regenerate.ps1 builds from a worktree of the
+        // tag, so that PR structurally cannot carry its own fixtures. The floor below exempts
+        // exactly that case and nothing else — once the version moves past X.Y.0, or on to the
+        // next minor, the previous line must be covered.
+        var current = CurrentVersion;
+        (int Major, int Minor) floor =
+            current.Build > 0 ? (current.Major, current.Minor)          // a patch: this line has shipped
+            : current.Minor > 0 ? (current.Major, current.Minor - 1)    // X.Y.0: the line before it has
+            : (current.Major - 1, 0);                                  // X.0.0: some earlier major has
+
+        var highest = CoveredMinorLines[^1];
+        bool covered = highest.Major > floor.Major ||
+                       (highest.Major == floor.Major && highest.Minor >= floor.Minor);
+
+        Assert.True(covered,
+            $"the build is {current}, so golden fixtures should reach at least {floor.Major}.{floor.Minor}, " +
+            $"but versions.json stops at {highest.Major}.{highest.Minor}. Tag the release, then run " +
+            "golden/regenerate.ps1 and commit the fixtures.");
     }
 
     [Theory]
