@@ -40,6 +40,7 @@ qrshard decode recording.mp4 -o report.pdf # decode straight from a screen recor
 qrshard receive --device "Integrated Camera"   # live decode from a webcam
 qrshard receive --screen                   # decode this machine's own screen, e.g. an RDP window
 qrshard calibrate                          # find the densest settings your capture chain survives
+qrshard decode captures/ --json            # machine-readable result, for scripting
 ```
 
 Density ranges from ~212 KB per image at the robust default to ~4.9 MB filling a 4K display, so a
