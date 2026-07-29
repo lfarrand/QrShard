@@ -44,7 +44,21 @@ if (args.Contains("--fps-probe"))
 // `--par-sweep` measures decode throughput against DecodeMaxParallelism (round-robin sampling,
 // medians) to test the automatic worker cap. `--par-mem` reports the peak working set one worker
 // count costs; run it once per count, in its own process, for an uncontaminated figure.
-if (args.Contains("--par-sweep") || args.Contains("--par-mem"))
+//
+// `--par-compare` reports throughput, memory AND CPU for a single (workers, images) pair from one
+// run, which is what you want when comparing two implementations rather than exploring a curve:
+// stitching a figure together from separate runs describes no single configuration. Prefer it to
+// --par-sweep for A/B work — par-sweep builds a decoder for every worker count up front and keeps
+// them all alive, and that retained memory is not neutral between schemes. It measured a ~10%
+// regression that way which one-pair-per-process showed did not exist.
+//
+//   for n in 50 100 120 200 240; do
+//     dotnet run -c Release -- --par-compare --workers 24 --images $n
+//   done
+//
+// Run one pair per process, and pair the two builds back-to-back per configuration so drift hits
+// both sides of the comparison equally.
+if (args.Contains("--par-sweep") || args.Contains("--par-mem") || args.Contains("--par-compare"))
 {
     string Arg(string name, string fallback)
     {
@@ -54,7 +68,10 @@ if (args.Contains("--par-sweep") || args.Contains("--par-mem"))
     string preset = Arg("--preset", "Max4K");
     // 96 images is the default because every default worker count divides it exactly; see
     // ParallelismSweep for why a ragged split invents a curve that is not there.
-    if (args.Contains("--par-mem"))
+    if (args.Contains("--par-compare"))
+        ParallelismSweep.Compare(Console.Out, preset, int.Parse(Arg("--workers", "24")),
+            int.Parse(Arg("--images", "120")), int.Parse(Arg("--samples", "9")));
+    else if (args.Contains("--par-mem"))
         ParallelismSweep.Memory(Console.Out, preset, int.Parse(Arg("--workers", "16")),
             int.Parse(Arg("--images", "96")));
     else
