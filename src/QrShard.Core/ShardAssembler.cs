@@ -94,8 +94,17 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         }
 
         // Archives restore into a directory; the tar itself is a transient temp file.
+        // The intermediate tar for an archive payload is DECRYPTED PLAINTEXT. Naming it from the
+        // FileId put it at a fully predictable path in the shared temp root: FileId is a cleartext
+        // header field carried in every shard image, so anyone who has seen the images — the whole
+        // distribution model of this tool — knows the filename before the victim decodes. On Unix
+        // that root is typically /tmp, mode 1777, and FileStream creates with 0666 & ~umask and no
+        // O_EXCL, so a pre-planted file or symlink of that exact name is opened rather than
+        // refused. A private directory removes both the predictability and the shared-root
+        // exposure: CreateTempSubdirectory makes it 0700 on Unix and its name is random.
+        string tempDir = archive ? Directory.CreateTempSubdirectory("qrshard-").FullName : "";
         string outPath = archive
-            ? Path.Combine(Path.GetTempPath(), $"qrshard-{first.FileId:x16}.tar")
+            ? Path.Combine(tempDir, "payload.tar")
             : ResolveOutputPath(first, outputPath);
 
         long written = 0;
@@ -119,6 +128,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         catch (InvalidDataException)
         {
             TryDelete(outPath);
+            TryDeleteDirectory(tempDir);
             throw new ShardDecodeException($"'{first.FileName}': the reassembled stream failed to decompress. A shard is corrupt beyond recovery.");
         }
         finally
@@ -129,6 +139,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         if (written != first.OriginalLength || !sha.AsSpan().SequenceEqual(first.Sha256))
         {
             TryDelete(outPath);
+            TryDeleteDirectory(tempDir);
             throw new ShardDecodeException($"'{first.FileName}': SHA-256 of the reassembled file does not match the original. A shard was corrupted.");
         }
 
@@ -142,6 +153,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             finally
             {
                 TryDelete(outPath);
+                TryDeleteDirectory(tempDir);
             }
             log($"  SHA-256 verified ✓  '{first.FileName}' → extracted to {destDir}");
             return new RestoredFile(first.FileName, destDir, written);
@@ -162,12 +174,20 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     {
         Directory.CreateDirectory(destDir);
         string destRoot = Path.GetFullPath(destDir);
+        // GetFullPath PRESERVES a trailing separator, so `-o out/` yields "…/out/" and the old
+        // `destRoot + separator` prefix became "…/out//" — a doubled separator no normalised
+        // target can ever start with, so every entry failed the guard and a perfectly ordinary
+        // command looked like a corrupt archive. Filesystem roots ("E:\", "/") carry the
+        // separator inherently and failed the same way. Build the prefix so it ends with exactly
+        // one separator whichever form arrived, and compare the bare form for the root itself.
+        string destBare = Path.TrimEndingDirectorySeparator(destRoot);
+        string destPrefix = destBare + Path.DirectorySeparatorChar;
         using var fs = new FileStream(tarPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
         using var reader = new TarReader(fs);
         while (reader.GetNextEntry() is { } entry)
         {
-            string target = Path.GetFullPath(Path.Combine(destRoot, entry.Name));
-            if (!target.StartsWith(destRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal) && target != destRoot)
+            string target = Path.GetFullPath(Path.Combine(destBare, entry.Name));
+            if (!target.StartsWith(destPrefix, StringComparison.Ordinal) && target != destBare)
                 throw new ShardDecodeException($"Archive entry '{entry.Name}' escapes the destination directory.");
 
             switch (entry.EntryType)
@@ -213,7 +233,43 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             if (c is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' || c < ' ')
                 return FallbackFileName;
 
+        // Win32 DOS device names are not files. Opening "<dir>\NUL" with FileMode.Create SUCCEEDS,
+        // every byte written is discarded, and no file appears — while File.Exists is false, so
+        // the collision check below never diverts, and the SHA-256 still matches because it is
+        // computed over the source stream rather than read back. A crafted header naming NUL
+        // therefore makes the decode report "SHA-256 verified" over a file that does not exist:
+        // silent, total data loss dressed as success, which is exactly the outcome the whole
+        // verify-don't-assume design exists to prevent. The check is unconditional rather than
+        // OS-gated so a name is only accepted if it is a plain file on every platform, matching
+        // the character rule above.
+        if (IsDosDeviceName(name))
+            return FallbackFileName;
+
+        // Windows silently strips trailing dots and spaces, so "evil. " and "evil" name the same
+        // file. Left through, two distinct headers collide and the collision check cannot see it.
+        if (name[^1] is '.' or ' ')
+            return FallbackFileName;
+
         return name;
+    }
+
+    private static readonly string[] DosDevices =
+        ["CON", "PRN", "AUX", "NUL", "CLOCK$",
+         "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+         "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+
+    /// <summary>
+    /// Windows resolves a device name with OR without an extension — "NUL", "NUL.txt" and
+    /// "NUL.tar.gz" all reach the null device — so the test is on the stem before the first dot.
+    /// </summary>
+    private static bool IsDosDeviceName(string name)
+    {
+        int dot = name.IndexOf('.');
+        ReadOnlySpan<char> stem = dot < 0 ? name : name.AsSpan(0, dot);
+        foreach (string device in DosDevices)
+            if (stem.Equals(device, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
     }
 
     private const string FallbackFileName = "restored.bin";
@@ -245,10 +301,41 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
 
         string safe = SafeFileName(first.FileName);
         string outPath = Path.Combine(Environment.CurrentDirectory, safe);
-        if (File.Exists(outPath))
-            outPath = Path.Combine(Environment.CurrentDirectory,
-                $"{Path.GetFileNameWithoutExtension(safe)}.restored{Path.GetExtension(safe)}");
-        return outPath;
+        if (!File.Exists(outPath))
+            return outPath;
+
+        // The fallback used to be returned without a check of its own, so it protected the
+        // ORIGINAL file and then clobbered anything already sitting on the fallback name — a
+        // previous decode's output, most obviously. Worse, Assemble resolves one group at a time,
+        // so three groups sharing a header FileName sent groups 2 and 3 to the same fallback and
+        // FileMode.Create truncated group 2's output mid-run: the tool silently losing a file it
+        // had just successfully restored. Keep counting until a name is actually free.
+        string stem = Path.GetFileNameWithoutExtension(safe);
+        string ext = Path.GetExtension(safe);
+        for (int n = 1; n < 10_000; n++)
+        {
+            string candidate = Path.Combine(Environment.CurrentDirectory,
+                n == 1 ? $"{stem}.restored{ext}" : $"{stem}.restored-{n}{ext}");
+            if (!File.Exists(candidate))
+                return candidate;
+        }
+        throw new ShardDecodeException(
+            $"Cannot find a free output name for '{safe}' — 10,000 variants already exist. Pass -o explicitly.");
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return;
+        try
+        {
+            Directory.Delete(path, recursive: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            // Best effort: a leftover temp directory is untidy, not incorrect, and must never
+            // mask the decode result that the caller is actually waiting on.
+        }
     }
 
     private static void TryDelete(string path)

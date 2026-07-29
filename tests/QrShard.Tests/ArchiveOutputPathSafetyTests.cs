@@ -87,6 +87,30 @@ public class ArchiveOutputPathSafetyTests
             $"header name '{headerName}' extracted outside the working directory: {string.Join(", ", escaped)}");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ExplicitDestination_ExtractsWithOrWithoutATrailingSeparator(bool trailingSeparator)
+    {
+        // Path.GetFullPath PRESERVES a trailing separator, so `-o out/` produced a destRoot of
+        // "…/out/" and the containment prefix became "…/out//" — a doubled separator that no
+        // normalised target can start with, so EVERY entry was rejected as escaping. `-o out/`
+        // is an ordinary thing to type (and shell tab-completion supplies it), and the failure
+        // looked like a corrupt archive rather than a path-formatting quirk. Filesystem roots
+        // carry the separator inherently and failed identically.
+        using var tmp = new TempDir();
+        string dest = Path.Combine(tmp.Path, "out");
+        Directory.CreateDirectory(dest);
+        string destArg = trailingSeparator ? dest + Path.DirectorySeparatorChar : dest;
+
+        var shard = CraftArchiveShard("photos.tar", BuildTar("a/b.txt", "hello"u8.ToArray()));
+        new ShardAssembler().Assemble([shard], destArg, _ => { });
+
+        string extracted = Path.Combine(dest, "a", "b.txt");
+        Assert.True(File.Exists(extracted), $"nothing extracted for destination '{destArg}'");
+        Assert.Equal("hello", File.ReadAllText(extracted));
+    }
+
     [Fact]
     public void AnOrdinaryArchiveName_StillExtractsNormally()
     {

@@ -11,11 +11,11 @@ namespace QrShard.Tests;
 [Collection(CurrentDirectoryCollection.Name)]
 public class OutputPathSafetyTests
 {
-    private static DecodedShard CraftShard(string fileName, byte[] content)
+    private static DecodedShard CraftShard(string fileName, byte[] content, ulong fileId = 0xABCDEF)
     {
         var header = new ShardHeader
         {
-            FileId = 0xABCDEF,
+            FileId = fileId,
             Index = 0,
             Count = 1,
             PayloadLength = content.Length,
@@ -109,8 +109,61 @@ public class OutputPathSafetyTests
     [InlineData("C:x.bin", "restored.bin")]      // Windows drive-relative
     [InlineData("x.bin:stream", "restored.bin")] // NTFS alternate data stream
     [InlineData("a\0b", "restored.bin")]
+    // Win32 DOS devices. "<dir>\NUL" opens with FileMode.Create, discards every byte, creates no
+    // file, and reports no error — and File.Exists on it is false, so the collision check never
+    // diverts. The SHA-256 is computed over the source stream rather than read back, so it still
+    // matches: the decode announces "SHA-256 verified" over a file that does not exist.
+    [InlineData("NUL", "restored.bin")]
+    [InlineData("nul", "restored.bin")]           // resolution is case-insensitive
+    [InlineData("NUL.txt", "restored.bin")]       // an extension does not stop it resolving
+    [InlineData("con.tar.gz", "restored.bin")]    // nor does more than one
+    [InlineData("COM1", "restored.bin")]
+    [InlineData("LPT9.bin", "restored.bin")]
+    [InlineData("AUX", "restored.bin")]
+    // Windows strips trailing dots and spaces, so these name the same file as their bare stem —
+    // two distinct headers colliding on one path, invisibly to the collision check.
+    [InlineData("evil.", "restored.bin")]
+    [InlineData("evil ", "restored.bin")]
+    // Adjacent non-devices must still pass, so this rejects the device set and not the prefix.
+    [InlineData("NULL.bin", "NULL.bin")]
+    [InlineData("console.log", "console.log")]
+    [InlineData("COM10.bin", "COM10.bin")]
     public void SafeFileName_ReducesToABareName(string input, string expected) =>
         Assert.Equal(expected, ShardAssembler.SafeFileName(input));
+
+    [Fact]
+    public void CollisionFallback_KeepsCountingInsteadOfOverwritingItsOwnOutput()
+    {
+        // The fallback protected the ORIGINAL file and then clobbered whatever already held the
+        // fallback name. Assemble resolves one group at a time, so three groups sharing a header
+        // FileName sent groups 2 and 3 to the same path and FileMode.Create truncated group 2's
+        // output — the tool losing a file it had just successfully restored.
+        using var tmp = new TempDir();
+        string cwd = Path.Combine(tmp.Path, "work");
+        Directory.CreateDirectory(cwd);
+
+        var payloads = new[] { TestData.Random(64), TestData.Random(96), TestData.Random(128) };
+        string previous = Environment.CurrentDirectory;
+        try
+        {
+            Environment.CurrentDirectory = cwd;
+            // Distinct FileIds so these are three separate groups, one shared FileName so they
+            // all resolve to the same preferred output path.
+            var shards = payloads.Select((p, i) => CraftShard("same.bin", p, fileId: 0x1000 + (ulong)i)).ToList();
+            new ShardAssembler().Assemble(shards, null, _ => { });
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previous;
+        }
+
+        var written = Directory.GetFiles(cwd).OrderBy(f => f).ToList();
+        Assert.Equal(3, written.Count);
+        // Every payload survived: no output was truncated by a later group.
+        var onDisk = written.Select(File.ReadAllBytes).ToList();
+        foreach (var expected in payloads)
+            Assert.Contains(onDisk, actual => actual.SequenceEqual(expected));
+    }
 
     [Fact]
     public void SafeFileName_LeavesTheHeaderValueItselfUntouched()
