@@ -579,7 +579,12 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
         int f = 0;
         // Matches the decoder's own ceiling: erasure correction that spends every syndrome leaves
         // nothing to verify with, so an over-flagged codeword is handed to Chase instead.
-        int limit = parity - ReedSolomon.VerificationMargin;
+        //
+        // Clamped, not just subtracted. Layout now rejects odd parity on decode as well as encode,
+        // but this is the buffer's own bound and should not depend on a caller two layers away
+        // getting that right: at parity 1 the raw expression is -1, which `f == limit` can never
+        // match, and the loop then walks all 255 symbol positions into a 64-entry span.
+        int limit = Math.Clamp(parity - ReedSolomon.VerificationMargin, 0, MaxParity);
         for (int i = 0; i < CodewordLength; i++)
         {
             int idx = i * cwCount + j;

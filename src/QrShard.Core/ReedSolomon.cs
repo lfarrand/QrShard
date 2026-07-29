@@ -312,8 +312,14 @@ internal sealed class ReedSolomon
                 shift++;
             }
         }
-        if (2 * total - f > nsym)
-            return false; // errors beyond the erasure-adjusted capacity
+        // The margin has to be reserved HERE too, not just against the erasure count above. That
+        // guard caps f at nsym-2; this one independently allowed f + 2e <= nsym, so a single extra
+        // error at f == nsym-2 spends the two syndromes the margin had set aside. The errata
+        // system is then nsym equations in nsym unknowns, a solution always exists, and the verify
+        // loop below vanishes by construction — precisely the silent miscorrection the margin
+        // exists to prevent, reached from the ordinary decode path via Fec.TryErasureRetry.
+        if (2 * total - f > nsym - VerificationMargin)
+            return false; // errors beyond the erasure-adjusted capacity, margin reserved
 
         // Chien search for the combined errata locator's roots.
         Span<int> errPos = stackalloc int[nsym];

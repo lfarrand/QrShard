@@ -123,6 +123,23 @@ internal sealed class ShardDecoder(
                     if (diagnostics is { Layout: not null, Cells: not null })
                         failures[i] = new FailedCapture(diagnostics.Layout, diagnostics.Cells, ordered[i]);
                 }
+                // Everything above runs on attacker-controlled bytes, and only the failures the
+                // pipeline anticipated arrive as ShardDecodeException. Anything else — an index
+                // that escaped a bounds check, a divide by zero in the field math — used to escape
+                // the worker entirely and abort the batch, throwing away every OTHER image that
+                // had already decoded successfully. A folder of 200 good captures could be
+                // destroyed by one crafted file. The blast radius of an unanticipated bug in the
+                // decode path belongs to the image that caused it.
+                //
+                // Not a licence to stop validating: the specific defects that motivated this are
+                // fixed at their source (odd parity and zero-codeword layouts rejected in
+                // Layout.UnpackMetadata, stripe sums in ShardHeader). This is the backstop for the
+                // ones not found yet. OOM and cancellation stay fatal — both are conditions of the
+                // whole run, not of one image, and continuing past them would be dishonest.
+                catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
+                {
+                    results[i] = (null, $"unhandled {ex.GetType().Name} while decoding: {ex.Message}");
+                }
             }
         }
 
