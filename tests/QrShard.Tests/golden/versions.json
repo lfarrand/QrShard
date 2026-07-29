@@ -1,11 +1,13 @@
 {
   "//": "Versions that MUST have complete golden fixtures. Read by regenerate.ps1 (what to build) and by GoldenInteropTests (what to enforce), so the two cannot drift apart.",
-  "//policy": "One entry per released MINOR line, because the wire format is versioned by a metadata nibble that patch releases do not touch, plus the newest release so the current format is pinned too. After tagging a new minor — or a release that changes the format — run regenerate.ps1 and commit the fixtures it produces.",
+  "//policy": "One entry per released MINOR line, because the wire format is versioned by a metadata nibble that patch releases do not touch. After tagging a new minor, run regenerate.ps1 and commit what it produces - the tag must exist first, since regenerate.ps1 builds each version from a worktree of it, which is why a version-bump PR can never carry its own fixtures.",
+  "//v1.3.9": "Retained from when the policy also said 'plus the newest release'. That clause was unenforceable and drifted silently: v1.3.9 stayed listed as the newest while 1.3.10, 1.3.11 and 1.3.12 shipped. It is dropped as a rule, but the entry stays because the fixtures already exist and cover the 1.3 line's late state for free. MinorLinesBelowCurrent_AllHaveFixtures now catches that drift at the next minor bump instead of never.",
   "versions": [
     "v1.0.0",
     "v1.1.0",
     "v1.2.0",
     "v1.3.0",
-    "v1.3.9"
+    "v1.3.9",
+    "v1.4.0"
   ]
 }
