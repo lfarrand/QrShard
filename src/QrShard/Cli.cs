@@ -205,6 +205,18 @@ internal sealed class Cli(AppSettings? settings = null)
                     (VideoDecoder.IsVideoFile(positional[0]) ||
                      (IsImageFile(positional[0]) && VideoDecoder.IsAnimatedImage(positional[0]))))
                 {
+                    // --session is in decode's allowlist and the help presented it as a general
+                    // decode option, but this branch returns before sessionPath is ever read, so
+                    // the option was parsed, validated and thrown away. A user decoding a
+                    // recording of an incomplete transfer got no partial progress and no warning
+                    // that the flag they passed to preserve it did nothing — the one situation the
+                    // flag exists for. Say so instead of pretending.
+                    if (Get(named, "--session") is not null)
+                        return Help(@out, err,
+                            "--session applies to decoding image files, not a recording: a recording is " +
+                            "re-read from the start each time, so there is no partial state to carry. " +
+                            "Extract frames to images first if you need to resume.");
+
                     double fps = GetDouble(named, "--fps", 8.0);
                     decLog($"Decoding video '{positional[0]}' (extracting at {fps} fps)...");
                     // Escalate fps automatically for file recordings unless the user pinned --fps.
@@ -388,7 +400,7 @@ internal sealed class Cli(AppSettings? settings = null)
                     return 0;
                 }
                 var h = shard.Header;
-                @out.WriteLine($"file      : {h.FileName}");
+                @out.WriteLine($"file      : {ShardHeader.Display(h.FileName)}");
                 @out.WriteLine($"file id   : {h.FileId:X16}");
                 @out.WriteLine($"part      : {(h.IsParity ? $"parity #{h.Index + 1}" : $"{h.Index + 1} of {h.Count}")}");
                 @out.WriteLine($"payload   : {h.PayloadLength:N0} bytes (CRC-32 verified)");
@@ -645,7 +657,10 @@ internal sealed class Cli(AppSettings? settings = null)
         if (shards.Count > 0)
             log($"  session: resuming with {shards.Count} previously collected shard(s)");
         var seen = shards.Select(s => (s.Header.FileId, s.Header.Index, s.Header.IsParity)).ToHashSet();
-        var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // path -> the write time we last ATTEMPTED. Keyed on the timestamp rather than the path
+        // alone so a capture that is rewritten gets another go, while one that simply cannot
+        // decode is not re-read on every poll forever.
+        var attempted = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         log($"Watching {folder} — drop captures in; Ctrl+C stops" +
             (sessionPath is not null ? " (progress persists to the session)." : "."));
 
@@ -663,12 +678,23 @@ internal sealed class Cli(AppSettings? settings = null)
                 var settled = DateTime.UtcNow - TimeSpan.FromMilliseconds(500);
                 var fresh = Directory.EnumerateFiles(folder)
                     .Where(IsImageFile)
-                    .Where(f => !processed.Contains(f) && File.GetLastWriteTimeUtc(f) < settled)
+                    .Where(f => File.GetLastWriteTimeUtc(f) < settled
+                                && !(attempted.TryGetValue(f, out var last) && last == File.GetLastWriteTimeUtc(f)))
                     .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
                     .ToList();
                 if (fresh.Count > 0)
                 {
-                    processed.UnionWith(fresh);
+                    // Record the write time we are about to attempt, BEFORE decoding, so a file
+                    // is not re-read on every poll — but keyed on that timestamp rather than on
+                    // the path, which is what the old blacklist got wrong. A capture still being
+                    // written when the 500 ms settle window elapsed, or one the user re-saved with
+                    // a better shot, changes its write time and so gets another attempt; a file
+                    // that simply cannot decode keeps its time and is left alone. In watch mode
+                    // captures keep arriving AND improving, so "attempted at this version" is the
+                    // right memory where "seen this path" was not.
+                    foreach (string f in fresh)
+                        attempted[f] = File.GetLastWriteTimeUtc(f);
+
                     bool added = false;
                     foreach (var s in services.Decoder.CollectShards(fresh, log))
                         if (seen.Add((s.Header.FileId, s.Header.Index, s.Header.IsParity)))
@@ -745,7 +771,7 @@ internal sealed class Cli(AppSettings? settings = null)
             string detail = missing.Count == 0
                 ? "all data present"
                 : $"missing image(s) {string.Join(", ", missing.Take(20).Select(i => i + 1))}{(missing.Count > 20 ? ", ..." : "")}";
-            write($"  '{first.FileName}': {have.Count}/{first.Count} data + {parityCount} parity — " +
+            write($"  '{ShardHeader.Display(first.FileName)}': {have.Count}/{first.Count} data + {parityCount} parity — " +
                   $"{(complete ? "recoverable ✓" : detail)}");
         }
     }
@@ -872,11 +898,21 @@ internal sealed class Cli(AppSettings? settings = null)
                 return UnknownOption(p, known);
 
         // A value that is itself a known option means the option before it lost its value (e.g.
-        // `--recovery --camera` silently drops --recovery). Skip -p/--password: a password may
-        // legitimately start with '-'.
+        // `--recovery --camera` silently drops --recovery).
+        //
+        // -p/--password used to be exempt on the grounds that a password may legitimately start
+        // with '-'. True, but far broader than the justification needs: this fires only when the
+        // value is EXACTLY one of this command's own options, which no real password is. The
+        // exemption's cost is severe and silent — `qrshard encode secrets.db -p --json` encrypted
+        // with the literal password "--json", exit 0, while the user believed they had used
+        // theirs. They cannot ever decrypt it, and nothing in the output says why.
         foreach (var (key, val) in named)
-            if (key is not ("-p" or "--password") && val.Length > 1 && val[0] == '-' && known.Contains(val))
-                return $"option '{key}' is missing a value ('{val}' is another option).";
+            if (val.Length > 1 && val[0] == '-' && known.Contains(val))
+                return key is "-p" or "--password"
+                    ? $"option '{key}' looks like it lost its value: '{val}' is another option, so the " +
+                      $"payload would be encrypted with '{val}' as the password. Passwords may start " +
+                      "with '-', but cannot be exactly one of this command's option names."
+                    : $"option '{key}' is missing a value ('{val}' is another option).";
 
         return null;
     }
@@ -1061,7 +1097,8 @@ internal sealed class Cli(AppSettings? settings = null)
                 -p, --password <pw>      Password for encrypted payloads
                 --session <file>         Accumulate shards across capture sittings: incomplete
                                          sets persist to the session file (exit code 3) and the
-                                         next run resumes from the union; deleted on success
+                                         next run resumes from the union; deleted on success.
+                                         Images only — a recording is re-read from the start
                 --watch                  Keep watching the folder: decode captures as they land
                                          and assemble the moment the set completes (Ctrl+C
                                          stops; progress persists when --session is given)

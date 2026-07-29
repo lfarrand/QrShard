@@ -179,9 +179,9 @@ with a "did you mean" hint rather than silently encoding **unencrypted**.
 
 | Option | Supported values | Default | Description |
 |---|---|---|---|
-| `-o, --out <path>` | any path | original filename in the current directory (never overwrites — falls back to `<name>.restored<ext>`) | Where to write the file (a directory for archive payloads) |
+| `-o, --out <path>` | any path | original filename in the current directory (never overwrites — falls back to `<name>.restored<ext>`, then `.restored-2`, `.restored-3`, …) | Where to write the file (a directory for archive payloads) |
 | `-p, --password <pw>` | any string | — | Password for encrypted payloads (clear error if missing or wrong) |
-| `--session <file>` | any path | off | Accumulate shards across sittings: incomplete sets persist (exit 3) with a missing-image report; the next run resumes from the union; deleted on success |
+| `--session <file>` | any path | off | Accumulate shards across sittings: incomplete sets persist (exit 3) with a missing-image report; the next run resumes from the union; deleted on success. Applies to decoding **images**; a recording is re-read from the start each time, so passing it there is rejected rather than silently ignored |
 | `--watch` | flag | off | Keep watching the folder: decode captures as they land, assemble the moment the set completes; Ctrl+C persists to the session |
 | `--clipboard` | flag | off | (Windows) decode the bitmap on the clipboard — snip a displayed shard with Win+Shift+S, no file saving; accumulates with `--session` |
 | `--fps <n>` | > 0 | 8 | Frame extraction rate when decoding a video recording. If not pinned, an incomplete file recording is automatically re-extracted at 2× then 4× until the set completes |
