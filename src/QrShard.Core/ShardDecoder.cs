@@ -77,36 +77,32 @@ internal sealed class ShardDecoder(
         // The cursor is touched once per image against ~70 ms of 4K decode, so its contention does
         // not show up.
         //
-        // This is a trade, not a free win, and which way it goes depends on whether the image
-        // count divides evenly by the worker count. Median fps, idle 16-core/32-thread part,
-        // Max4K, 11 round-robin samples; compare only DOWN a column, since a larger image count
-        // is ~6% slower per image even single-threaded:
+        // How much this is worth depends on whether the image count divides evenly by the worker
+        // count. Median fps, idle 16-core/32-thread part, Max4K, 24 workers, 9 samples, ONE
+        // configuration per process (`--par-compare`); * marks counts divisible by 24:
         //
-        //                      24 workers                 120 images
-        //                  120 imgs   100 imgs        16 wkrs   32 wkrs
-        //                  (= 24x5)   (ragged)       (ragged)  (ragged)
-        //     Parallel.For    108.9       93.6           76.6     107.2
-        //     cursor           98.3      114.2           89.2     109.3
-        //                    -9.7%     +22.0%         +16.4%     +2.0%
+        //     images            50      100     120*     200     240*
+        //     Parallel.For    83.2     95.4    119.9    96.2    121.1
+        //     cursor         100.1    116.8    118.2   122.7    123.7
+        //                   +20.3%   +22.4%    -1.4%  +27.5%    +2.1%
         //
-        // So chunking is optimal exactly when the count divides evenly and penalised otherwise;
-        // the cursor wins every ragged case and loses the even one. Exact divisibility is
-        // coincidental — roughly 1 in 24 counts at the default worker count — so the common case
-        // is the one this improves. The ~10% loss when it does divide is real and unexplained;
-        // the plausible mechanism is cache locality, since Parallel.For hands each worker a
-        // contiguous range while the cursor interleaves, but that has not been tested.
+        // The mechanism is visible directly in how much of the machine each keeps busy — CPU
+        // time over wall time, as a fraction of the 24 workers asked for:
         //
-        // Memory moves both ways too (24 workers, 120 images, --par-mem):
-        //   allocation per pass  5736 -> 5119 MB  (-10.8%, one scratch per worker, exactly:
-        //                                          Parallel.For builds thread-locals well past
-        //                                          MaxDegreeOfParallelism, recycling ranges
-        //                                          across more threads than it runs at once)
-        //   peak working set     6386 -> 7104 MB  (+11.2%, because keeping every worker busy
-        //                                          keeps every scratch live at once, where
-        //                                          stranded workers released theirs early)
+        //     Parallel.For     73%      74%      93%     73%      93%
+        //     cursor           83%      90%      93%     94%      96%
         //
-        // That +11.2% eats into the headroom the worker cap above was set to protect, so the two
-        // want re-measuring together if either changes.
+        // Chunking strands roughly a quarter of its workers whenever the count does not divide
+        // evenly, and that stranding is the whole effect: where it divides evenly (120, 240) the
+        // two are level, and everywhere else the cursor wins by keeping the workers fed. Exact
+        // divisibility is coincidental — about 1 in 24 counts here — so the ragged case is the
+        // normal one.
+        //
+        // Allocation per pass falls consistently, by 4% (50 images) to 16% (200), because "one
+        // scratch per worker" becomes exact: Parallel.For builds thread-locals well past
+        // MaxDegreeOfParallelism, recycling ranges across more threads than it runs at once.
+        // Peak working set is a wash — it ranged from -22% to +8% across these counts with no
+        // trend, which is GC timing rather than a property of either scheme.
         int workers = Math.Min(parallelism, ordered.Count);
         int next = -1;
 
