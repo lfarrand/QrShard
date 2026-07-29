@@ -63,14 +63,15 @@ from the header via `Path.GetFileNameWithoutExtension`, which is not a sanitizer
 `...` becomes `..`, the parent directory — and the tar extractor's own containment check was then
 anchored to that already-escaped root.
 
-**Take 1.3.10.** It is the first release in which both are fixed:
+**1.3.10 is the first release in which both are fixed**, and it is the floor rather than the
+recommendation — fixes go to the latest release only, so take the current one (1.4.0):
 
 ```
 dotnet tool update -g QrShard.Tool
-dotnet add package QrShard.Core --version 1.3.10
+dotnet add package QrShard.Core
 ```
 
-or the v1.3.10 binaries. If you cannot upgrade, always pass an explicit output path — `-o` on the
+or the latest binaries. If you cannot upgrade, always pass an explicit output path — `-o` on the
 command line, or `outputPath` to `DecodeImages` — which is used exactly as given and is not
 influenced by the header.
 

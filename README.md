@@ -28,9 +28,13 @@ can be AES-256-GCM encrypted end to end.
 ## Supported platforms
 
 The codec is pure managed .NET 10 — no native dependencies — and the wire format is
-platform-agnostic by construction, so shards encoded on one OS decode on any other (verified:
-Windows→Linux and Linux→Windows transfers, including parity-recovering a Linux-encoded set on
-Windows).
+platform-agnostic by construction, so shards encoded on one OS decode on any other. That is not
+left to construction alone: the **Interop** workflow runs all sixteen pairs of
+{win-x64, linux-x64, linux-arm64, osx-arm64} encoders and decoders on every pull request, and
+each pair deletes a data image so the decode has to rebuild it through Cauchy parity — the
+GF(2⁸) kernels take a GFNI/AVX route on x64 and a different one on arm64, and a disagreement
+there would produce wrong bytes rather than a loud failure. The encrypted path is covered too,
+which also pins that the AES-GCM associated data is assembled identically on both sides.
 
 | Platform | Codec | Monitor auto-detection (`-r auto`) | Benchmark machine spec |
 |---|---|---|---|
@@ -310,21 +314,24 @@ that several-fold. Not sure what density your setup survives? `qrshard calibrate
 
 How fast the *receiver* turns captured images back into data — the number that decides whether
 the decoder can keep up with a slideshow or a video. Two figures per density: **one core** (the
-portable per-frame cost) and **parallel** (the default decoder, up to 16 image workers — the
-ceiling on the reference machine). Payload rate is the parallel frame rate times the payload each
-frame carries; the 250 MB column is decode time alone at that rate.
+portable per-frame cost) and **parallel** (the default decoder, up to 24 image workers). Payload
+rate is the parallel frame rate times the payload each frame carries; the 250 MB column is decode
+time alone at that rate.
 
 | Resolution / density | Payload / image | Frames/s, 1 core | Frames/s, parallel* | Payload rate* | 250 MB, decode only* |
 |---|---:|---:|---:|---:|---:|
-| 2160² · 3 px · 4-bit *(Default)* | ~212 KB | ~53 (19 ms) | ~250 | ~53 MB/s | ~4.7 s |
-| 2160² · 2 px · 6-bit *(Dense)* | ~716 KB | ~36 (28 ms) | ~170 | ~122 MB/s | ~2.0 s |
-| 3840×2160 · 1 px · 6-bit *(Max4K)* | ~4.9 MB | ~14 (74 ms) | ~70 | ~340 MB/s | ~0.7 s |
-| 3840×2160 · 1 px · 8-bit | ~6.5 MB | ~13 (78 ms) | ~65 | ~425 MB/s | ~0.6 s |
+| 2160² · 3 px · 4-bit *(Default)* | ~212 KB | ~52 (19 ms) | ~238 | ~50 MB/s | ~5.0 s |
+| 2160² · 2 px · 6-bit *(Dense)* | ~716 KB | ~39 (25 ms) | ~218 | ~156 MB/s | ~1.6 s |
+| 3840×2160 · 1 px · 6-bit *(Max4K)* | ~4.9 MB | ~14 (70 ms) | ~81 | ~397 MB/s | ~0.6 s |
+| 3840×2160 · 1 px · 8-bit | ~6.5 MB | ~13 (77 ms) | ~76 | ~498 MB/s | ~0.5 s |
 
-\*Parallel figures are on the [benchmark machine](#benchmark-snapshot) (32 logical cores). Past
-the 16-worker cap the decode is memory-bandwidth-bound, so these vary ~15% run to run and scale
-down on fewer cores; the one-core column does not. Reproduce with `dotnet run -c Release --
---fps-probe` in `tests/QrShard.Benchmarks`.
+\*Parallel figures are on the [benchmark machine](#benchmark-snapshot) (32 logical cores) and
+scale down on fewer cores; the one-core column does not. The worker cap is a **memory** ceiling,
+not a bandwidth one — each worker holds a full-resolution pixel buffer, while PNG read is only
+~6.5% of a 4K image's decode. Raise `DecodeMaxParallelism` if you have memory to spare. Work is
+handed out one image at a time rather than in pre-assigned ranges, so the rate does not depend on
+whether the image count divides evenly by the worker count. Reproduce with `dotnet run -c Release
+-- --fps-probe` in `tests/QrShard.Benchmarks`.
 
 Notice the frame rate *falls* with density while the payload rate *rises*: a 4K frame decodes
 about 4x slower than a 2160² one but carries ~23x more data, so denser images move more bytes
@@ -485,7 +492,7 @@ decoded output SHA-verified every iteration):
 | Motherboard | ASRock X670E Taichi (firmware 4.43) |
 | RAM | 4x DDR5-3600, 128 GB total |
 | Storage | Crucial T700 2 TB NVMe (temp/work); Corsair MP600 PRO NH 2 TB (artifacts) |
-| OS | Windows 11 Pro 25H2 (build 26200.8968) |
+| OS | Windows 11 Pro 25H2 (build 26200.8973) |
 | .NET | 10.0.10 (win-x64) |
 
 Presets: **Default** = 2160², 3 px cells, 4 bits (robust); **Dense** = 2160², 2 px, 6 bits;
@@ -493,11 +500,11 @@ Presets: **Default** = 2160², 3 px cells, 4 bits (robust); **Dense** = 2160², 
 
 | Size | Default enc / dec | Dense | Max4K | Max4K-R10 |
 |---:|---:|---:|---:|---:|
-| 1 KB | 13 / 50 ms | 16 / 67 ms | 78 / 114 ms | 99 / 129 ms |
-| 1 MB | 75 / 49 ms | 127 / 62 ms | 85 / 132 ms | 90 / 146 ms |
-| 10 MB | 225 / 246 ms | 236 / 129 ms | 106 / 142 ms | 152 / 137 ms |
-| 100 MB | 2.57 / 1.31 s | 1.35 / 0.60 s | **0.31 / 0.37 s** | 0.30 / 0.36 s |
-| 1 GB | 16.97 / 11.41 s | 11.42 / 5.76 s | **2.53 / 3.80 s** | 3.36 / 2.99 s |
+| 1 KB | 11 / 50 ms | 17 / 54 ms | 64 / 110 ms | 81 / 124 ms |
+| 1 MB | 73 / 44 ms | 130 / 60 ms | 79 / 122 ms | 96 / 126 ms |
+| 10 MB | 267 / 161 ms | 213 / 97 ms | 100 / 137 ms | 99 / 141 ms |
+| 100 MB | 2.47 / 1.06 s | 1.34 / 0.46 s | **0.28 / 0.28 s** | 0.35 / 0.37 s |
+| 1 GB | 16.57 / 9.37 s | 10.93 / 4.29 s | **2.24 / 2.42 s** | 2.71 / 2.58 s |
 
 One full-matrix run: all 40 cases (10 sizes x 4 presets) measured back to back on the same build,
 so nothing here is stitched together from different sittings. BenchmarkDotNet v0.15.8 means,
@@ -509,7 +516,7 @@ base and head builds race the same 30 MB round trip, failing on a >30% median re
 The crossover: below ~1 MB every preset needs one image, so the smaller Default canvas wins on
 fixed cost; at scale, Max4K packs ~13x more payload per pixel, so 100 MB is 22 images instead
 of 495 — which dominates end-to-end time too, since every image is a capture. At 1 GB it is 220
-images against 5,068, and Max4K also finishes the codec work ~4.5x faster (6.3 s vs 28.4 s
+images against 5,068, and Max4K also finishes the codec work ~5.5x faster (4.7 s vs 25.9 s
 round trip).
 
 ### Charts
@@ -555,46 +562,46 @@ Encode and decode are BenchmarkDotNet means.
 <!-- BENCH:TABLE:START -->
 | Size | Preset | Images | Encode | Decode | Codec MB/s | Est. manual (3 s/img) | Est. auto (0.5 s/img) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| 1KB | Default | 1 | 13.2 ms | 49.5 ms | 0.016 | 3.06 s | 562.7 ms |
-| 1KB | Dense | 1 | 15.7 ms | 66.9 ms | 0.012 | 3.08 s | 582.7 ms |
-| 1KB | Max4K | 1 | 78.1 ms | 113.8 ms | 0.005 | 3.19 s | 691.9 ms |
-| 1KB | Max4K-R10 | 1+1p | 98.5 ms | 129.1 ms | 0.004 | 6.23 s | 1.23 s |
-| 10KB | Default | 1 | 14.4 ms | 55.6 ms | 0.139 | 3.07 s | 570 ms |
-| 10KB | Dense | 1 | 18.1 ms | 61.7 ms | 0.122 | 3.08 s | 579.8 ms |
-| 10KB | Max4K | 1 | 80.6 ms | 124.3 ms | 0.048 | 3.2 s | 704.9 ms |
-| 10KB | Max4K-R10 | 1+1p | 81.7 ms | 113.2 ms | 0.05 | 6.19 s | 1.19 s |
-| 100KB | Default | 1 | 52.1 ms | 53.9 ms | 0.921 | 3.11 s | 606.1 ms |
-| 100KB | Dense | 1 | 37.5 ms | 65.2 ms | 0.951 | 3.1 s | 602.7 ms |
-| 100KB | Max4K | 1 | 84.4 ms | 115.9 ms | 0.488 | 3.2 s | 700.2 ms |
-| 100KB | Max4K-R10 | 1+1p | 108.2 ms | 124.5 ms | 0.42 | 6.23 s | 1.23 s |
-| 500KB | Default | 3 | 73.1 ms | 56.6 ms | 3.8 | 9.13 s | 1.63 s |
-| 500KB | Dense | 1 | 112.4 ms | 55.5 ms | 2.9 | 3.17 s | 668 ms |
-| 500KB | Max4K | 1 | 90.6 ms | 128.2 ms | 2.2 | 3.22 s | 718.8 ms |
-| 500KB | Max4K-R10 | 1+1p | 104.6 ms | 144.6 ms | 2 | 6.25 s | 1.25 s |
-| 1MB | Default | 5 | 75.1 ms | 49 ms | 8.1 | 15.12 s | 2.62 s |
-| 1MB | Dense | 2 | 127.2 ms | 61.5 ms | 5.3 | 6.19 s | 1.19 s |
-| 1MB | Max4K | 1 | 84.5 ms | 132.1 ms | 4.6 | 3.22 s | 716.6 ms |
-| 1MB | Max4K-R10 | 1+1p | 90.4 ms | 145.8 ms | 4.2 | 6.24 s | 1.24 s |
-| 10MB | Default | 50 | 225.4 ms | 246.4 ms | 21.2 | 2.5 min | 25.47 s |
-| 10MB | Dense | 15 | 235.5 ms | 129.4 ms | 27.4 | 45.36 s | 7.86 s |
-| 10MB | Max4K | 3 | 106.4 ms | 142.3 ms | 40.2 | 9.25 s | 1.75 s |
-| 10MB | Max4K-R10 | 3+1p | 151.9 ms | 137.3 ms | 34.6 | 12.29 s | 2.29 s |
-| 100MB | Default | 495 | 2.57 s | 1.31 s | 25.8 | 24.8 min | 4.2 min |
-| 100MB | Dense | 147 | 1.35 s | 604.1 ms | 51.3 | 7.4 min | 1.3 min |
-| 100MB | Max4K | 22 | 308.6 ms | 369.7 ms | 147 | 1.1 min | 11.68 s |
-| 100MB | Max4K-R10 | 22+3p | 304.8 ms | 357 ms | 151 | 1.3 min | 13.16 s |
-| 250MB | Default | 1238 | 4.73 s | 2.95 s | 32.5 | 1.03 h | 10.4 min |
-| 250MB | Dense | 366 | 3.73 s | 1.76 s | 45.6 | 18.4 min | 3.1 min |
-| 250MB | Max4K | 54 | 557.1 ms | 997.2 ms | 161 | 2.7 min | 28.55 s |
-| 250MB | Max4K-R10 | 54+6p | 842.8 ms | 1.04 s | 133 | 3 min | 31.88 s |
-| 500MB | Default | 2475 | 8.5 s | 5.53 s | 35.6 | 2.07 h | 20.9 min |
-| 500MB | Dense | 732 | 6.66 s | 3.04 s | 51.6 | 36.8 min | 6.3 min |
-| 500MB | Max4K | 108 | 1.15 s | 1.86 s | 166 | 5.5 min | 57.01 s |
-| 500MB | Max4K-R10 | 108+11p | 1.45 s | 2.01 s | 145 | 6 min | 1 min |
-| 1GB | Default | 5068 | 16.97 s | 11.41 s | 36.1 | 4.23 h | 42.7 min |
-| 1GB | Dense | 1499 | 11.42 s | 5.76 s | 59.6 | 1.25 h | 12.8 min |
-| 1GB | Max4K | 220 | 2.53 s | 3.8 s | 162 | 11.1 min | 1.9 min |
-| 1GB | Max4K-R10 | 220+22p | 3.36 s | 2.99 s | 161 | 12.2 min | 2.1 min |
+| 1KB | Default | 1 | 11.1 ms | 50.1 ms | 0.016 | 3.06 s | 561.2 ms |
+| 1KB | Dense | 1 | 17.1 ms | 53.6 ms | 0.014 | 3.07 s | 570.8 ms |
+| 1KB | Max4K | 1 | 63.7 ms | 109.7 ms | 0.006 | 3.17 s | 673.4 ms |
+| 1KB | Max4K-R10 | 1+1p | 81.1 ms | 124.1 ms | 0.005 | 6.21 s | 1.21 s |
+| 10KB | Default | 1 | 15.1 ms | 53.8 ms | 0.142 | 3.07 s | 568.9 ms |
+| 10KB | Dense | 1 | 17.3 ms | 56.7 ms | 0.132 | 3.07 s | 574 ms |
+| 10KB | Max4K | 1 | 78.7 ms | 127.9 ms | 0.047 | 3.21 s | 706.6 ms |
+| 10KB | Max4K-R10 | 1+1p | 90.2 ms | 130.6 ms | 0.044 | 6.22 s | 1.22 s |
+| 100KB | Default | 1 | 57.2 ms | 49.7 ms | 0.914 | 3.11 s | 606.9 ms |
+| 100KB | Dense | 1 | 33.5 ms | 59.4 ms | 1.1 | 3.09 s | 592.8 ms |
+| 100KB | Max4K | 1 | 89.4 ms | 123.6 ms | 0.458 | 3.21 s | 713.1 ms |
+| 100KB | Max4K-R10 | 1+1p | 90.5 ms | 137.5 ms | 0.428 | 6.23 s | 1.23 s |
+| 500KB | Default | 3 | 83.8 ms | 60.5 ms | 3.4 | 9.14 s | 1.64 s |
+| 500KB | Dense | 1 | 113.3 ms | 54.9 ms | 2.9 | 3.17 s | 668.2 ms |
+| 500KB | Max4K | 1 | 80 ms | 129.4 ms | 2.3 | 3.21 s | 709.3 ms |
+| 500KB | Max4K-R10 | 1+1p | 97.7 ms | 142.6 ms | 2 | 6.24 s | 1.24 s |
+| 1MB | Default | 5 | 73.2 ms | 43.6 ms | 8.6 | 15.12 s | 2.62 s |
+| 1MB | Dense | 2 | 130.3 ms | 60 ms | 5.3 | 6.19 s | 1.19 s |
+| 1MB | Max4K | 1 | 78.9 ms | 121.5 ms | 5 | 3.2 s | 700.4 ms |
+| 1MB | Max4K-R10 | 1+1p | 96.1 ms | 126.1 ms | 4.5 | 6.22 s | 1.22 s |
+| 10MB | Default | 50 | 266.8 ms | 161.4 ms | 23.3 | 2.5 min | 25.43 s |
+| 10MB | Dense | 15 | 212.5 ms | 96.8 ms | 32.3 | 45.31 s | 7.81 s |
+| 10MB | Max4K | 3 | 100.3 ms | 136.7 ms | 42.2 | 9.24 s | 1.74 s |
+| 10MB | Max4K-R10 | 3+1p | 98.6 ms | 140.9 ms | 41.8 | 12.24 s | 2.24 s |
+| 100MB | Default | 495 | 2.47 s | 1.06 s | 28.4 | 24.8 min | 4.2 min |
+| 100MB | Dense | 147 | 1.34 s | 461.9 ms | 55.5 | 7.4 min | 1.3 min |
+| 100MB | Max4K | 22 | 278.8 ms | 282.5 ms | 178 | 1.1 min | 11.56 s |
+| 100MB | Max4K-R10 | 22+3p | 347 ms | 365.8 ms | 140 | 1.3 min | 13.21 s |
+| 250MB | Default | 1238 | 4.47 s | 2.22 s | 37.4 | 1.03 h | 10.4 min |
+| 250MB | Dense | 366 | 3.39 s | 1.06 s | 56.2 | 18.4 min | 3.1 min |
+| 250MB | Max4K | 54 | 603.2 ms | 680 ms | 195 | 2.7 min | 28.28 s |
+| 250MB | Max4K-R10 | 54+6p | 636 ms | 704.6 ms | 186 | 3 min | 31.34 s |
+| 500MB | Default | 2475 | 8.34 s | 4.75 s | 38.2 | 2.07 h | 20.8 min |
+| 500MB | Dense | 732 | 6.28 s | 2.12 s | 59.5 | 36.7 min | 6.2 min |
+| 500MB | Max4K | 108 | 1.12 s | 1.31 s | 206 | 5.4 min | 56.43 s |
+| 500MB | Max4K-R10 | 108+11p | 1.23 s | 1.31 s | 196 | 6 min | 1 min |
+| 1GB | Default | 5068 | 16.57 s | 9.37 s | 39.5 | 4.23 h | 42.7 min |
+| 1GB | Dense | 1499 | 10.93 s | 4.29 s | 67.3 | 1.25 h | 12.7 min |
+| 1GB | Max4K | 220 | 2.24 s | 2.42 s | 220 | 11.1 min | 1.9 min |
+| 1GB | Max4K-R10 | 220+22p | 2.71 s | 2.58 s | 194 | 12.2 min | 2.1 min |
 <!-- BENCH:TABLE:END -->
 
 ### Running the benchmarks
@@ -694,11 +701,12 @@ through ImageSharp with lossless speed-tuned settings.
 Requires the .NET 10 SDK. `dotnet build -c Release` at the solution root; `./publish.ps1` for
 standalone binaries.
 
-Every push and pull request runs five workflows:
+Three workflows run on every push and pull request (CI, Interop, Package), a fourth on pull
+requests only (Perf gate), and a fifth on a weekly schedule (Fuzz):
 
 | Workflow | What it guards |
 |---|---|
-| **CI** | Build + the full suite on windows-latest, ubuntu-latest, ubuntu-24.04-arm and macos-latest — every platform a release binary is published for |
+| **CI** | Build + the full suite on windows-latest, ubuntu-latest, ubuntu-24.04-arm and macos-latest — every platform a release binary is published for. Each job renders totals, a per-class breakdown and the slowest tests into the run summary |
 | **Interop** | Four encoders x four decoders: shards encoded on each OS/arch must decode on every other, forcing parity reconstruction (where the x64 and arm64 GF(2⁸) paths could disagree) and covering the encrypted path |
 | **Package** | Packs both NuGet packages and consumes them from *outside* the repo — compiles the readme's own code sample against the packed package, round-trips through the public API, and installs the dotnet tool |
 | **Perf gate** | Base and head builds race the same 30 MB round trip; a >30% median regression fails |
@@ -716,7 +724,7 @@ https://sixlabors.com/pricing/) and either drop `sixlabors.lic` at the solution 
 `SIXLABORS_LICENSE_KEY` repository secret). The license is build-time only; published binaries
 and end users need nothing.
 
-- `dotnet test` — the xUnit suite (~15 s). Covers the codec math (CRC vectors, GF(2⁸) field
+- `dotnet test` — the xUnit suite, 610 tests in ~20 s. Covers the codec math (CRC vectors, GF(2⁸) field
   laws, Reed-Solomon incl. errors-and-erasures, interleaving, Cauchy and fountain erasure
   codes), round trips across every density/ECC/format/flag combination, simulated screenshots
   and camera photos, non-truecolor capture shapes, video recordings (duplicates, torn frames,
@@ -727,10 +735,15 @@ and end users need nothing.
   the tagged binaries themselves; the suite asserts the current decoder still reconstructs every
   one byte-for-byte, so a shard encoded with an old release always decodes.
   `golden/versions.json` lists which versions must be covered — one per released minor line,
-  since the wire format is versioned by a metadata nibble that patch releases don't touch, plus
-  the newest release. It is read by both the tests and `golden/regenerate.ps1`, so the fixtures on
-  disk and the set the tests demand cannot drift apart; a listed version with no fixtures fails
-  the suite. After tagging a new minor, run `regenerate.ps1` and commit what it produces (it skips
-  versions already present, because the fixtures are frozen).
+  since the wire format is versioned by a metadata nibble that patch releases don't touch. It is
+  read by both the tests and `golden/regenerate.ps1`, so the fixtures on disk and the set the
+  tests demand cannot drift apart; a listed version with no fixtures fails the suite, and so does
+  a fixture directory nothing lists. Two further checks keep the list honest without anyone
+  having to remember: the covered minor lines must have no gaps, and they must reach the line
+  below the shipping version — which is how a minor that ships without fixtures gets caught. (It
+  cannot demand the *current* version: a version-bump PR sets the csproj before the tag exists,
+  and `regenerate.ps1` builds each version from a worktree of its tag, so such a PR structurally
+  cannot carry its own fixtures.) After tagging a new minor, run `regenerate.ps1` and commit what
+  it produces — it skips versions already present, because the fixtures are frozen.
 - `qrshard test` — end-to-end self-test at real resolutions, including simulated screenshots
   with cursor damage and a cross-shard recovery scenario.
