@@ -41,6 +41,51 @@ public class WatchAndReceiveTests
     }
 
     [Fact]
+    public async Task WatchMode_RetriesACaptureThatIsRewritten()
+    {
+        // The old loop added every candidate to a path-keyed blacklist BEFORE decoding it, so a
+        // file that failed was never looked at again. Two ordinary cases hit that: a capture still
+        // being written when the 500 ms settle window elapsed, and a user re-saving a shot that
+        // came out badly. Both left watch mode waiting forever for an image already sitting in the
+        // folder. Retrying is keyed on the write time, so a rewrite gets another attempt while a
+        // permanently undecodable file is not re-read every poll.
+        using var tmp = new TempDir();
+        byte[] content = TestData.Random(150_000);
+        string input = tmp.WriteFile("input.bin", content);
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"), Fast);
+        Assert.True(result.ImageCount >= 3);
+
+        string watchDir = tmp.Sub("incoming");
+        string output = tmp.File("out.bin");
+        var stdout = new StringWriter();
+
+        string lastSource = result.Files[^1];
+        string lastDest = Path.Combine(watchDir, Path.GetFileName(lastSource));
+
+        var watch = Task.Run(() => new Cli().Run(
+            ["decode", watchDir, "--watch", "-o", output], stdout, stdout));
+
+        await Task.Delay(400);
+        // Everything except the final image arrives intact.
+        foreach (string f in result.Files.SkipLast(1))
+            File.Copy(f, Path.Combine(watchDir, Path.GetFileName(f)));
+
+        // The final image lands truncated — a half-written capture. It cannot decode.
+        byte[] whole = File.ReadAllBytes(lastSource);
+        File.WriteAllBytes(lastDest, whole[..(whole.Length / 2)]);
+
+        await Task.Delay(1500);
+        Assert.False(watch.IsCompleted); // the set is still short, as it should be
+
+        // Now it is written properly, exactly as a re-saved capture would be.
+        File.WriteAllBytes(lastDest, whole);
+
+        int code = await watch.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(0, code);
+        Assert.Equal(content, File.ReadAllBytes(output));
+    }
+
+    [Fact]
     public void LiveInputArgs_UsePlatformFramework_AndWrapDshowNames()
     {
         Assert.Equal("-f dshow -i \"video=Integrated Camera\"",

@@ -37,16 +37,16 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         int count = first.Count;
         foreach (var s in shards)
             if (s.Header.Count != count)
-                throw new ShardDecodeException($"Inconsistent shard set for '{first.FileName}': image counts differ.");
+                throw new ShardDecodeException($"Inconsistent shard set for '{ShardHeader.Display(first.FileName)}': image counts differ.");
 
         // Both reassembly paths bound their buffers by the declared sizes, so sanity-check first.
         if (first.TotalLength is < 0 or > ShardEncoder.MaxFileBytes || first.OriginalLength is < 0 or > ShardEncoder.MaxFileBytes)
-            throw new ShardDecodeException($"'{first.FileName}': shard header declares an implausible file size.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': shard header declares an implausible file size.");
         // Cross-shard geometry drives divisor/array math in both parity paths. Deserialize
         // already rejects this, but a directly-constructed shard set (session API, tests) must
         // fail cleanly rather than crash.
         if (first.StripeParity > 0 && first.StripeData < 1)
-            throw new ShardDecodeException($"'{first.FileName}': shard header declares invalid stripe geometry.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': shard header declares invalid stripe geometry.");
 
         byte[][] chunks;
         long[] chunkLengths;
@@ -73,7 +73,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         if (encrypted)
         {
             if (password is null)
-                throw new ShardDecodeException($"'{first.FileName}' is encrypted; supply the password with -p/--password.");
+                throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}' is encrypted; supply the password with -p/--password.");
             var blob = new byte[first.TotalLength];
             source.ReadExactly(blob);
             // Newer encrypted shards bind the identity header as AAD; older ones (no FlagAuthMeta)
@@ -129,7 +129,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         {
             TryDelete(outPath);
             TryDeleteDirectory(tempDir);
-            throw new ShardDecodeException($"'{first.FileName}': the reassembled stream failed to decompress. A shard is corrupt beyond recovery.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': the reassembled stream failed to decompress. A shard is corrupt beyond recovery.");
         }
         finally
         {
@@ -140,7 +140,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         {
             TryDelete(outPath);
             TryDeleteDirectory(tempDir);
-            throw new ShardDecodeException($"'{first.FileName}': SHA-256 of the reassembled file does not match the original. A shard was corrupted.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': SHA-256 of the reassembled file does not match the original. A shard was corrupted.");
         }
 
         if (archive)
@@ -155,11 +155,11 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
                 TryDelete(outPath);
                 TryDeleteDirectory(tempDir);
             }
-            log($"  SHA-256 verified ✓  '{first.FileName}' → extracted to {destDir}");
+            log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → extracted to {destDir}");
             return new RestoredFile(first.FileName, destDir, written);
         }
 
-        log($"  SHA-256 verified ✓  '{first.FileName}' → {outPath} ({written:N0} bytes)");
+        log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → {outPath} ({written:N0} bytes)");
         return new RestoredFile(first.FileName, outPath, written);
     }
 
@@ -361,11 +361,11 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         var missing = Enumerable.Range(0, first.Count).Where(i => byIndex[i] is null).ToList();
         if (missing.Count > 0)
             throw new ShardDecodeException(
-                $"'{first.FileName}': missing image(s) {string.Join(", ", missing.Select(i => i + 1))} of {first.Count}. " +
+                $"'{ShardHeader.Display(first.FileName)}': missing image(s) {string.Join(", ", missing.Select(i => i + 1))} of {first.Count}. " +
                 "Capture them and decode again.");
 
         if (byIndex.Sum(s => (long)s!.Payload.Length) != first.TotalLength)
-            throw new ShardDecodeException($"'{first.FileName}': reassembled length does not match expected {first.TotalLength:N0}.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': reassembled length does not match expected {first.TotalLength:N0}.");
 
         return [.. byIndex.Select(s => s!.Payload)];
     }

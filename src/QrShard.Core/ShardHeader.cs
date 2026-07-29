@@ -50,6 +50,39 @@ internal sealed class ShardHeader
 
     public static int Size(string fileName) => 92 + Encoding.UTF8.GetByteCount(fileName);
 
+    /// <summary>Longest file name rendered in a message before it is truncated.</summary>
+    private const int MaxDisplayLength = 120;
+
+    /// <summary>
+    /// The header file name, made safe to print. Deserialize accepts up to 4096 bytes of arbitrary
+    /// UTF-8 here with no character filtering — only a CRC the crafter also controls — and the
+    /// codebase already treats the field as hostile before it reaches the FILESYSTEM
+    /// (ShardAssembler.SafeFileName). Nothing treated it as hostile before it reached the TERMINAL,
+    /// where it is interpolated into progress lines, `info` output, success logs and every decode
+    /// exception message.
+    ///
+    /// A terminal is an interpreter. Escape sequences in this field can rewrite earlier output,
+    /// reposition the cursor, or set the window title — so a crafted shard could forge a
+    /// "SHA-256 verified" line, or hide its own presence from a `verify` listing. Carriage returns
+    /// alone are enough to overwrite the line just printed. Control characters become '?', and the
+    /// result is length-capped so a 4 KB name cannot flood the output either.
+    /// </summary>
+    public static string Display(string fileName)
+    {
+        int keep = Math.Min(fileName.Length, MaxDisplayLength);
+        var sb = new StringBuilder(keep + 3);
+        for (int i = 0; i < keep; i++)
+        {
+            char c = fileName[i];
+            // C0, DEL and the C1 range: ESC drives ANSI sequences, CR rewrites the current line,
+            // and the C1 block is an alternate introducer for the same sequences.
+            sb.Append(c < ' ' || c == '\x7f' || (c >= '\x80' && c <= '\x9f') ? '?' : c);
+        }
+        if (fileName.Length > keep)
+            sb.Append("...");
+        return sb.ToString();
+    }
+
     public byte[] Serialize()
     {
         using var ms = new MemoryStream();
