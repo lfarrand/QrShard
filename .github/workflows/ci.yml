@@ -36,7 +36,68 @@ jobs:
         run: dotnet build -c Release
 
       - name: Test
-        run: dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release --no-build --logger "console;verbosity=minimal"
+        run: >
+          dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release --no-build
+          --logger "console;verbosity=minimal"
+          --logger "trx;LogFileName=${{ matrix.os }}.trx"
+          --results-directory TestResults
+
+      # Totals and a per-class breakdown, rendered into the run summary.
+      #
+      # `always()` because a red run is exactly when the report is worth reading, and the Test
+      # step has already failed the job by that point.
+      #
+      # use-actions-summary (default true) writes the job summary INSTEAD of creating a check
+      # run — see the branch in the action's main.ts. That is the reason this needs nothing
+      # beyond the workflow's `contents: read`: the check-run path calls checks.create, which
+      # would need `checks: write` and would fail outright on a pull request from a fork.
+      - name: Test report
+        if: always()
+        uses: dorny/test-reporter@a6ddd83ac95ff4586f5d3aceeb314d9a1841db95 # v3.0.0
+        with:
+          name: Tests (${{ matrix.os }})
+          path: TestResults/${{ matrix.os }}.trx
+          reporter: dotnet-trx
+          # The Test step is what decides whether the job passes. Letting this fail as well would
+          # put a second red X on a step that only formats the result, pointing away from the
+          # actual failure.
+          fail-on-error: false
+
+      # test-reporter lists every test case but prints no per-test duration — it parses the
+      # figure and then aggregates it to the suite. This adds the part that is actually
+      # actionable when the suite starts to drag: which individual tests are costing the time.
+      - name: Slowest tests
+        if: always()
+        shell: pwsh
+        run: |
+          $path = "TestResults/${{ matrix.os }}.trx"
+          if (-not (Test-Path $path)) { exit 0 }
+          $ns = @{ t = 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010' }
+          $trx = [xml](Get-Content $path -Raw)
+          $all = Select-Xml -Xml $trx -Namespace $ns -XPath '//t:UnitTestResult' | ForEach-Object { $_.Node }
+          if (-not $all) { exit 0 }
+
+          $counters = (Select-Xml -Xml $trx -Namespace $ns -XPath '//t:ResultSummary/t:Counters').Node
+          $total = [TimeSpan]::Zero
+          foreach ($t in $all) { if ($t.duration) { $total += [TimeSpan]::Parse($t.duration) } }
+
+          $out = @(
+            "### Slowest tests — ${{ matrix.os }}",
+            "",
+            ("{0} tests, {1} passed, {2} failed — {3:N1}s of test time" -f `
+              $counters.total, $counters.passed, $counters.failed, $total.TotalSeconds),
+            "",
+            "| Time | Test |",
+            "|---:|:---|"
+          )
+          foreach ($t in ($all | Sort-Object { [TimeSpan]::Parse($_.duration) } -Descending | Select-Object -First 15)) {
+            # Names carry theory arguments, so they can be long and could contain a pipe that
+            # would silently break the table. Trim the fixed namespace, cap the length, escape.
+            $name = $t.testName -replace '^QrShard\.Tests\.', '' -replace '\|', '\|'
+            if ($name.Length -gt 90) { $name = $name.Substring(0, 89) + '…' }
+            $out += "| {0:N2}s | {1} |" -f [TimeSpan]::Parse($t.duration).TotalSeconds, $name
+          }
+          $out | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Round-trip self-test
         run: dotnet run --project src/QrShard -c Release --no-build -- test
