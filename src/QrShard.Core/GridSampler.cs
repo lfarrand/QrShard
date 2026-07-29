@@ -37,6 +37,21 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         // allocation site directly so no path can size a negative or absurd buffer from TotalBits.
         if (layout.TotalBytes is < 0 or > (long)Layout.MaxResolution * Layout.MaxResolution)
             throw new ShardDecodeException("Shard metadata declares an implausible data-grid size.");
+        // Tie the DECLARED geometry to the image actually in hand. Every previous bound compares
+        // the strip's fields against the encoder's maxima, and nothing compared them against the
+        // bitmap — so `sx = inner.W / layout.InnerW` just became a tiny scale factor, every sample
+        // coordinate clamped into range, and a few-KB image sized buffers for the declared grid.
+        // metaH = cellPx = 1 admits gridW 16382 x gridH 16378, which slips just under the cell
+        // ceiling above at ~268M cells and asks for well over a GB of scratch, per worker.
+        //
+        // A cell cannot be resolved from less than one pixel, so the grid can never legitimately
+        // be finer than the inner rectangle it was captured into. A real capture satisfies this
+        // with room to spare (inner.W is about layout.InnerW >= GridW * CellPx); only a capture
+        // downscaled past one pixel per cell trips it, and that is unrecoverable regardless.
+        if (layout.GridW > inner.W || layout.GridH > inner.H)
+            throw new ShardDecodeException(
+                $"Shard metadata declares a {layout.GridW}x{layout.GridH} grid, finer than the " +
+                $"{inner.W}x{inner.H} area it was found in; the capture cannot resolve it.");
         int streamLength = (int)((layout.TotalBits + 7) / 8);
         byte[] stream = scratch.ClearedCells(streamLength);
         // Ambiguity flags + second-choice values feed erasure and Chase decoding — only

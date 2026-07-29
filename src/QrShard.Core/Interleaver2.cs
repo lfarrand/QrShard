@@ -17,8 +17,27 @@ internal sealed class Interleaver2
 {
     private readonly ConcurrentDictionary<int, int[]> _cache = new();
 
+    /// <summary>
+    /// The cache is keyed on a length derived from attacker-declared geometry, so a set of images
+    /// each declaring a different size mints an int[length] per distinct value and never evicts —
+    /// and the instance is long-lived, so the growth outlives any one decode. A real transfer uses
+    /// ONE length for every image in the set, which is the whole point of caching here, so a cap
+    /// this far above 1 costs legitimate use nothing while bounding the adversarial case.
+    /// </summary>
+    private const int MaxCachedPermutations = 64;
+
     /// <summary>π for a protected region of <paramref name="length"/> bytes: dest[π[i]] = classic[i].</summary>
-    public int[] Permutation(int length) => _cache.GetOrAdd(length, BuildPermutation);
+    public int[] Permutation(int length)
+    {
+        if (_cache.TryGetValue(length, out var cached))
+            return cached;
+        // Past the cap, still correct — just uncached, so a pathological set pays time instead of
+        // unbounded memory. Racing callers may both build; the permutation is a pure function of
+        // length, so either result is identical and the loser's copy is simply collected.
+        if (_cache.Count >= MaxCachedPermutations)
+            return BuildPermutation(length);
+        return _cache.GetOrAdd(length, BuildPermutation);
+    }
 
     private static int[] BuildPermutation(int length)
     {

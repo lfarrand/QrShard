@@ -5,6 +5,27 @@ namespace QrShard;
 /// <summary>Reusable per-worker buffers for the large per-image allocations of decoding.</summary>
 internal sealed class DecodeScratch
 {
+    /// <summary>
+    /// Buffers grew to the largest image a worker had ever seen and were never given back. One
+    /// oversized image therefore raised that worker's floor for the rest of the run, and the decode
+    /// runs up to 24 workers: a single 500M-pixel image (the per-image cap) leaves Rgb24[500M] =
+    /// 1.5 GB plus bool[500M] = 500 MB retained, and the attacker picks the dimensions. The
+    /// in-code ~7 GB peak measurement assumed 4K captures, which are 60x smaller.
+    ///
+    /// The two large buffers are handed back when an image needs far less than the retained
+    /// capacity, so retention tracks the CURRENT work rather than the historical worst case. The
+    /// 4x hysteresis matters: shrinking on every small fluctuation would swap a memory problem for
+    /// an allocation-churn one, and ordinary sets are uniform in size so the common case never
+    /// resizes at all.
+    /// </summary>
+    private const int ShrinkFactor = 4;
+
+    /// <summary>Below this, releasing is not worth a reallocation (~4 MB of Rgb24).</summary>
+    private const int ShrinkFloor = 1 << 20;
+
+    private static bool ShouldShrink(int capacity, int needed) =>
+        capacity > ShrinkFloor && capacity > (long)needed * ShrinkFactor;
+
     private Rgb24[]? _pixels;
     private bool[]? _visited;
     private byte[]? _cells;
@@ -13,14 +34,14 @@ internal sealed class DecodeScratch
 
     public Rgb24[] Pixels(int length)
     {
-        if (_pixels is null || _pixels.Length < length)
+        if (_pixels is null || _pixels.Length < length || ShouldShrink(_pixels.Length, length))
             _pixels = new Rgb24[length];
         return _pixels;
     }
 
     public bool[] ClearedVisited(int length)
     {
-        if (_visited is null || _visited.Length < length)
+        if (_visited is null || _visited.Length < length || ShouldShrink(_visited.Length, length))
             _visited = new bool[length];
         else
             Array.Clear(_visited, 0, length);
