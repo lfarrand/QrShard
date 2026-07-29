@@ -135,6 +135,13 @@ internal sealed class ShardHeader
             {
                 if (stripeData < 1 || stripeData > CrossShardFec.MaxShardsPerStripe)
                     return null;
+                // Both counts index the SAME GF(2^8) domain, so their sum is what has to fit, not
+                // each alone. CrossShardFec.Encode enforces that; TryReconstruct does not, and it
+                // is the one reachable from a crafted header. Over 255 the byte casts in
+                // ParityMatrix wrap until a parity row and a data column collide, making x ^ y
+                // zero and Inv(0) throw DivideByZeroException out of the decode.
+                if (stripeData + (long)stripeParity > CrossShardFec.MaxShardsPerStripe)
+                    return null;
                 long stripes = ((long)count + stripeData - 1) / stripeData;
                 if (stripes * (long)stripeParity > MaxParityOrdinals)
                     return null;

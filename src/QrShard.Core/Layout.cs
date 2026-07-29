@@ -183,7 +183,12 @@ internal sealed class Layout
             return null;
         if (bitsPerCell is < Palette.MinBits or > Palette.MaxBits || gridW < 1 || gridH < 1 || cellPx < 1 || metaH < 1)
             return null;
-        if (eccParity is < 0 or > Fec.MaxParity)
+        // Range alone is not enough: Create rejects ODD parity, and the decode path has to reject
+        // it too or the encoder's invariant is only enforced on the side that is not under attack.
+        // Parity 1 in particular makes Fec.TryErasureRetry compute `parity - VerificationMargin`
+        // = -1, a limit its `f == limit` bound can never reach, so the erasure list runs past its
+        // 64-entry buffer. See the matching guard in Create.
+        if (eccParity is < 0 or > Fec.MaxParity || (eccParity & 1) != 0)
             return null;
         // Upper-bound and cross-check the geometry so a crafted CRC-16-valid strip (these 16-bit
         // fields reach 65535) cannot drive an overflowing or absurd buffer size downstream —
@@ -198,7 +203,7 @@ internal sealed class Layout
         if (innerW != 2 * metaH + gridW * cellPx || innerH != 6 * metaH + gridH * cellPx)
             return null;
 
-        return new Layout
+        var layout = new Layout
         {
             BitsPerCell = bitsPerCell,
             GridW = gridW,
@@ -213,5 +218,14 @@ internal sealed class Layout
             FinderModule = 0,
             Interleave2 = version == MetaVersionInterleave2,
         };
+
+        // The last of Create's invariants, and the one that needs the finished Layout to express.
+        // With CodewordCount 0 the FEC pass writes nothing and reports success, so the recovered
+        // buffer — pooled per worker and never cleared — is handed on still holding the PREVIOUS
+        // image's fully valid stream, header CRC and payload CRC included. Every downstream gate
+        // then passes and a shard is accepted from an image that contributed no bytes to it.
+        if (layout.EccParity > 0 && layout.CodewordCount < 1)
+            return null;
+        return layout;
     }
 }

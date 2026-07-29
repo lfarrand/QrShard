@@ -414,7 +414,7 @@ Six independent layers, from within-cell to whole-transfer:
 2. **Errors-and-erasures decoding**: the color classifier flags cells whose classification was
    ambiguous (far from every palette color, or nearly a tie), and codewords that fail
    errors-only decoding retry with those flags as *erasures* — RS corrects twice as many known
-   positions as unknown ones (`2·errors + erasures ≤ parity`), so borderline captures gain up
+   positions as unknown ones (`2·errors + erasures ≤ parity − 2`), so borderline captures gain up
    to ~75% more correctable damage per codeword.
 
    Two syndromes are always held back from that budget, so at the default parity of 16 up to 14

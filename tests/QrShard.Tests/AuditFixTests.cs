@@ -229,4 +229,111 @@ public class AuditFixTests
         Assert.Equal(0, reentrancy);              // never invoked while another invocation is in flight
         Assert.Equal(result.ImageCount, calls);   // one message per image, none lost to a race
     }
+
+    // ---- Finding: encode-side invariants were not mirrored on the decode side ----
+    //
+    // Create throws on these; UnpackMetadata accepted them. The encoder is the side nobody is
+    // attacking, so an invariant enforced only there is enforced nowhere that matters.
+
+    [Fact]
+    public void UnpackMetadata_OddEccParity_IsRejected()
+    {
+        // Parity 1 is the specific value that breaks Fec.TryErasureRetry: `parity - 2` is -1, a
+        // limit the `f == limit` bound can never reach, so the erasure list walks all 255 symbol
+        // positions into a 64-entry stackalloc.
+        var odd = CraftStrip(bits: 4, gridW: 100, gridH: 100, cellPx: 3, metaH: 10,
+            innerW: 2 * 10 + 100 * 3, innerH: 6 * 10 + 100 * 3, ecc: 1);
+        Assert.Null(Layout.UnpackMetadata(odd));
+
+        // The adjacent even values still work, so this rejects odd parity and not the field.
+        foreach (int ecc in (int[])[0, 2])
+        {
+            var even = CraftStrip(bits: 4, gridW: 100, gridH: 100, cellPx: 3, metaH: 10,
+                innerW: 2 * 10 + 100 * 3, innerH: 6 * 10 + 100 * 3, ecc: ecc);
+            Assert.NotNull(Layout.UnpackMetadata(even));
+        }
+    }
+
+    [Fact]
+    public void UnpackMetadata_EccWithNoCompleteCodeword_IsRejected()
+    {
+        // 20x20 cells at 4 bits = 200 bytes, short of one 255-byte codeword, so CodewordCount is
+        // 0 while EccParity > 0. The FEC pass then writes nothing and reports success, handing on
+        // a pooled recovered buffer that still holds the PREVIOUS image's valid stream — CRCs and
+        // all — so a shard gets accepted from an image that contributed none of its bytes.
+        var strip = CraftStrip(bits: 4, gridW: 20, gridH: 20, cellPx: 3, metaH: 10,
+            innerW: 2 * 10 + 20 * 3, innerH: 6 * 10 + 20 * 3, ecc: 2);
+        Assert.Null(Layout.UnpackMetadata(strip));
+
+        // Same geometry with ECC off is fine: no codewords are needed.
+        var noEcc = CraftStrip(bits: 4, gridW: 20, gridH: 20, cellPx: 3, metaH: 10,
+            innerW: 2 * 10 + 20 * 3, innerH: 6 * 10 + 20 * 3, ecc: 0);
+        Assert.NotNull(Layout.UnpackMetadata(noEcc));
+    }
+
+    /// <summary>Throws a NON-ShardDecodeException on the first image it is handed, then behaves.</summary>
+    private sealed class ThrowsOnceGridSampler : IGridSampler
+    {
+        private readonly GridSampler _real = new();
+        private int _calls;
+
+        public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
+            DecodeScratch scratch, out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null)
+        {
+            if (Interlocked.Increment(ref _calls) == 1)
+                throw new InvalidOperationException("simulated unanticipated decode fault");
+            return _real.ReadDataGrid(bmp, inner, layout, palettes, scratch, out suspectBytes, out secondChoiceBytes, cellMargins);
+        }
+    }
+
+    [Fact]
+    public void CollectShards_UnanticipatedFaultOnOneImage_DoesNotDiscardTheOthers()
+    {
+        // The decode pipeline only promises ShardDecodeException for the failures it anticipated.
+        // Anything else — an index that escaped a bounds check, a divide by zero in the field
+        // math — used to escape the worker and abort the whole batch, so one crafted image could
+        // throw away every other image that had already decoded. The specific defects that
+        // motivated this are fixed at source; this pins the backstop for the ones not found yet.
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("input.bin", TestData.Random(400_000));
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"),
+            new EncodeOptions { Width = 900, Height = 900, CellPx = 2, BitsPerCell = 2 });
+        Assert.True(result.Files.Count >= 8, $"need several images; got {result.Files.Count}");
+
+        var decoder = new ShardDecoder(AppSettings.Current, new CameraRectifier(),
+            new FrameLocator(new InnerRectScanner(), new StripReader()), new StripReader(),
+            new ThrowsOnceGridSampler(), new ShardAssembler(), new Fec(), new Crc(),
+            new FastPngReader(), new PhotoFusion(), new Interleaver2());
+
+        var shards = decoder.CollectShards(result.Files, _ => { });
+
+        // Exactly the faulting image is lost; everything else survives. Before the fix this call
+        // threw and returned nothing at all.
+        Assert.Equal(result.Files.Count - 1, shards.Count);
+    }
+
+    [Fact]
+    public void ShardHeader_StripeDataPlusParityBeyondTheField_IsRejected()
+    {
+        // Both counts index the same GF(2^8) domain, so it is their SUM that has to fit. Each was
+        // range-checked alone; over 255 together the byte casts in CrossShardFec.ParityMatrix wrap
+        // until a parity row collides with a data column, making x ^ y zero and Inv(0) throw.
+        var header = new ShardHeader
+        {
+            FileId = 0x0123456789abcdef, Index = 0, Count = 300, PayloadLength = 8,
+            OriginalLength = 8, FileName = "x.bin", Sha256 = new byte[32],
+            PayloadCrc32 = 0, TotalLength = 8, Flags = 0,
+            StripeData = 200, StripeParity = 100, // 300 > 255
+        };
+        Assert.Null(ShardHeader.Deserialize(header.Serialize(), out _));
+
+        var ok = new ShardHeader
+        {
+            FileId = 0x0123456789abcdef, Index = 0, Count = 300, PayloadLength = 8,
+            OriginalLength = 8, FileName = "x.bin", Sha256 = new byte[32],
+            PayloadCrc32 = 0, TotalLength = 8, Flags = 0,
+            StripeData = 200, StripeParity = 55, // 255 exactly — the boundary is inclusive
+        };
+        Assert.NotNull(ShardHeader.Deserialize(ok.Serialize(), out _));
+    }
 }

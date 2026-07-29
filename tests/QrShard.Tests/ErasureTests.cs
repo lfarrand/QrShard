@@ -49,11 +49,43 @@ public class ErasureTests
         int[] flagged = [5, 12, 30, 44, 52, 60, 77, 83, 95, 100, 104, 111]; // 12 erasures
         foreach (int p in flagged)
             damaged[p] ^= 0x33;
-        damaged[20] ^= 0x77; // plus 2 unflagged errors: 2*2 + 12 = 16 = nsym exactly
-        damaged[70] ^= 0x77;
+        damaged[20] ^= 0x77; // plus 1 unflagged error: 12 + 2*1 = 14 = nsym - VerificationMargin
 
         Assert.True(rs.TryDecodeWithErasures(damaged, nsym, flagged, out _));
         Assert.Equal(clean, damaged);
+    }
+
+    /// <summary>
+    /// This case USED to decode, correctly, and the assertion was that it did: 12 erasures plus 2
+    /// errors is 2e + f == nsym, the classical bound, where the answer is provably right.
+    ///
+    /// It is refused now, and that is a deliberate trade rather than a regression. At exactly the
+    /// bound every syndrome is consumed by the correction, so the verify loop at the end of
+    /// TryDecodeWithErasures vanishes by construction and confirms nothing. The decoder cannot
+    /// tell this case apart from a word whose real damage EXCEEDS the bound — same syndromes
+    /// spent, same guaranteed-to-pass verify, but a silently wrong answer. Erasure flags here come
+    /// from the colour classifier's confidence, so "more errors than were flagged" is ordinary,
+    /// not exotic.
+    ///
+    /// The cost is confined to mixed cases at the edge. Pure-erasure capability is untouched —
+    /// f &lt;= nsym - 2 was already the ceiling, so the documented ~14 erasures at parity 16 still
+    /// hold, which <see cref="ErasuresBeyondErrorCapacity_Decode"/> pins.
+    /// </summary>
+    [Fact]
+    public void MixedErrorsAndErasures_AtExactBound_IsRefusedRatherThanVacuouslyVerified()
+    {
+        const int nsym = 16;
+        var rs = new ReedSolomon();
+        byte[] clean = MakeCodeword(100, nsym, 2);
+        var damaged = (byte[])clean.Clone();
+
+        int[] flagged = [5, 12, 30, 44, 52, 60, 77, 83, 95, 100, 104, 111]; // 12 erasures
+        foreach (int p in flagged)
+            damaged[p] ^= 0x33;
+        damaged[20] ^= 0x77; // plus 2 unflagged errors: 12 + 2*2 = 16 = nsym exactly
+        damaged[70] ^= 0x77;
+
+        Assert.False(rs.TryDecodeWithErasures(damaged, nsym, flagged, out _));
     }
 
     [Fact]
