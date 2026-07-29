@@ -109,6 +109,108 @@ internal static class ParallelismSweep
         }
     }
 
+    /// <summary>
+    /// Throughput, memory and CPU for ONE (workers, images) pair, all from the same run, so the
+    /// figures describe a single configuration rather than three separate ones stitched together.
+    ///
+    /// Run one pair per process. Peak working set and allocation both carry over within a process
+    /// — a larger image count measured earlier leaves its peak behind, and the GC state it left
+    /// changes what the next configuration allocates — so looping counts in-process would report
+    /// the history of the run rather than the configuration.
+    ///
+    /// CPU is total processor time across the sampled region divided by that region's wall clock,
+    /// which gives cores actually kept busy. That is the number that distinguishes "faster" from
+    /// "burning more of the machine to go the same speed", and it is the whole question when
+    /// comparing a chunked partitioner against a work-stealing one.
+    /// </summary>
+    public static void Compare(TextWriter output, string presetName, int workers, int images, int samples)
+    {
+        try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High; }
+        catch (Exception ex) when (ex is PlatformNotSupportedException or InvalidOperationException) { }
+
+        var opt = BenchPresets.Options(presetName);
+        long capacity =
+            Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity).UsableBytes
+            - ShardHeader.Size(BenchPresets.PayloadName);
+
+        string root = Path.Combine(Path.GetTempPath(), $"qrshard-parcmp-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string input = Path.Combine(root, BenchPresets.PayloadName);
+            WriteRandom(input, capacity * images);
+            string shardDir = Path.Combine(root, "shards");
+            new ShardEncoder().Encode(input, shardDir, opt);
+            var files = Directory.GetFiles(shardDir, "*.png").OrderBy(p => p, StringComparer.Ordinal).ToList();
+            File.Delete(input);
+
+            var decoder = Build(root, workers);
+            decoder.CollectShards(files, _ => { }); // warm: JIT, file cache, pool threads
+
+            GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+            var self = Process.GetCurrentProcess();
+            self.Refresh();
+            long baseWs = self.WorkingSet64;
+
+            long peakWs = baseWs;
+            using var stop = new CancellationTokenSource();
+            var sampler = Task.Run(() =>
+            {
+                var p = Process.GetCurrentProcess();
+                while (!stop.IsCancellationRequested)
+                {
+                    p.Refresh();
+                    long ws = p.WorkingSet64;
+                    if (ws > peakWs) peakWs = ws;
+                    Thread.Sleep(10);
+                }
+            });
+
+            long allocBefore = GC.GetTotalAllocatedBytes(precise: false);
+            TimeSpan cpuBefore = self.TotalProcessorTime;
+            var regionSw = Stopwatch.StartNew();
+
+            var times = new List<double>(samples);
+            for (int rep = 0; rep < samples; rep++)
+            {
+                var sw = Stopwatch.StartNew();
+                var shards = decoder.CollectShards(files, _ => { });
+                sw.Stop();
+                if (shards.Count != files.Count)
+                    throw new InvalidOperationException($"decoded {shards.Count} of {files.Count} shards");
+                times.Add(sw.Elapsed.TotalSeconds);
+            }
+
+            regionSw.Stop();
+            self.Refresh();
+            TimeSpan cpuAfter = self.TotalProcessorTime;
+            long alloc = GC.GetTotalAllocatedBytes(precise: false) - allocBefore;
+            stop.Cancel();
+            sampler.Wait();
+
+            var fps = times.Select(t => images / t).ToList();
+            double medFps = Median(fps);
+            double bestFps = fps.Max();
+            // Sampler wall time includes the gaps between passes; there are none here beyond the
+            // loop itself, so this is the region's true occupancy.
+            double cpuCores = (cpuAfter - cpuBefore).TotalSeconds / regionSw.Elapsed.TotalSeconds;
+
+            output.WriteLine(
+                $"RESULT images={images} workers={workers} " +
+                $"medFps={medFps:0.0} bestFps={bestFps:0.0} MBps={medFps * capacity / MB:0} " +
+                $"peakWsMB={(peakWs - baseWs) / (1024.0 * 1024):0} allocPassMB={alloc / (double)samples / (1024 * 1024):0} " +
+                $"cpuCores={cpuCores:0.00} cpuPct={cpuCores / Environment.ProcessorCount * 100:0.0}");
+            output.WriteLine($"  raw fps: {string.Join(" ", fps.Select(f => f.ToString("0", CultureInfo.InvariantCulture)))}");
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch { /* best effort — temp dir */ }
+        }
+    }
+
     /// <summary>Peak working set added by one decode pass at a single worker count, measured from
     /// a post-encode baseline. Run one worker count per process for an uncontaminated figure.</summary>
     public static void Memory(TextWriter output, string presetName, int workers, int imageCount)
