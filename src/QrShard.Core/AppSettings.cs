@@ -43,6 +43,17 @@ internal sealed class AppSettings
     /// <summary>Max parallel image decodes; 0 = automatic (cores, capped at 24).</summary>
     public int DecodeMaxParallelism { get; private set; }
 
+    /// <summary>
+    /// Memory budget (MB) for the decoder's per-worker scratch buffers — the counterpart to
+    /// <see cref="EncodeMemoryBudgetMB"/>, which the decode side did not have.
+    ///
+    /// The default admits the full worker count for any realistic capture (a 4K frame costs about
+    /// 33 MB of scratch, a 48-megapixel phone photo about 192 MB) and only starts trading workers
+    /// away well beyond that. It bounds the case where the image dimensions are the attacker's
+    /// choice rather than a camera's.
+    /// </summary>
+    public int DecodeMemoryBudgetMB { get; private set; } = 4000;
+
     /// <summary>Default frame rate for the live receiver (`qrshard receive`).</summary>
     public double ReceiveFps { get; private set; } = 10;
 
@@ -109,6 +120,10 @@ internal sealed class AppSettings
             settings.DecodeMaxParallelism = ReadInt(root, "DecodeMaxParallelism", settings.DecodeMaxParallelism);
             if (settings.DecodeMaxParallelism is < 0 or > 1024)
                 throw Invalid("DecodeMaxParallelism", settings.DecodeMaxParallelism, "0 (auto) to 1024");
+
+            settings.DecodeMemoryBudgetMB = ReadInt(root, "DecodeMemoryBudgetMB", settings.DecodeMemoryBudgetMB);
+            if (settings.DecodeMemoryBudgetMB is < 64 or > 1_000_000)
+                throw Invalid("DecodeMemoryBudgetMB", settings.DecodeMemoryBudgetMB, "64-1000000");
 
             if (root.TryGetProperty("ReceiveFps", out var receiveFps))
             {

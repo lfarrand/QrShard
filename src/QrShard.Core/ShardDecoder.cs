@@ -103,7 +103,7 @@ internal sealed class ShardDecoder(
         // MaxDegreeOfParallelism, recycling ranges across more threads than it runs at once.
         // Peak working set is a wash — it ranged from -22% to +8% across these counts with no
         // trend, which is GC timing rather than a property of either scheme.
-        int workers = Math.Min(parallelism, ordered.Count);
+        int workers = BudgetedWorkers(ordered, parallelism, settings.DecodeMemoryBudgetMB, log);
         int next = -1;
 
         void Worker()
@@ -356,6 +356,62 @@ internal sealed class ShardDecoder(
         {
             throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
         }
+    }
+
+    /// <summary>
+    /// Scratch bytes a worker holds per pixel of the largest image it handles: Rgb24 pixels (3)
+    /// plus the flood-fill visited map (1). The grid-sized buffers are smaller by the cell size
+    /// and are not the term that matters.
+    /// </summary>
+    private const int ScratchBytesPerPixel = 4;
+
+    /// <summary>
+    /// Worker count for a decode, capped by a memory budget as well as by parallelism.
+    ///
+    /// ShardEncoder has always derived its degree from EncodeMemoryBudgetMB, because it knows the
+    /// canvas size it chose. The decode side had no counterpart: it took min(parallelism, images)
+    /// and each worker then sized its scratch from the largest image IT happened to see. With a
+    /// per-image ceiling of 500M pixels that is ~2 GB of scratch per worker, times up to 24 —
+    /// and the dimensions are the sender's choice, not the receiver's.
+    ///
+    /// The sizes are knowable before any decoding: Image.Identify reads a header without touching
+    /// pixel data, for every format the decoder accepts. The cost is one header read per file
+    /// against a full decode of each afterwards.
+    ///
+    /// Unreadable files are skipped rather than guessed at — they will fail to decode on their own
+    /// merits, and letting a corrupt header influence the pool size would hand the attacker the
+    /// very knob this is closing. If none can be identified the budget cannot bind and the
+    /// parallelism limit stands alone, which is the previous behaviour.
+    /// </summary>
+    private static int BudgetedWorkers(List<string> images, int parallelism, int budgetMB, Action<string> log)
+    {
+        int ceiling = Math.Min(parallelism, images.Count);
+        if (ceiling <= 1)
+            return Math.Max(ceiling, 0);
+
+        long largestPixels = 0;
+        foreach (string path in images)
+        {
+            try
+            {
+                var info = Image.Identify(path);
+                largestPixels = Math.Max(largestPixels, (long)info.Width * info.Height);
+            }
+            catch (Exception ex) when (ex is ImageFormatException or IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                // Not identifiable: leave it out of the estimate.
+            }
+        }
+        if (largestPixels <= 0)
+            return ceiling;
+
+        long perWorker = largestPixels * ScratchBytesPerPixel;
+        int affordable = (int)Math.Clamp(budgetMB * 1_000_000L / perWorker, 1, ceiling);
+        if (affordable < ceiling)
+            log($"  using {affordable} decode worker(s) instead of {ceiling}: the largest image is " +
+                $"{largestPixels:N0} pixels (~{perWorker / 1_000_000:N0} MB of scratch each) against a " +
+                $"{budgetMB:N0} MB budget (appsettings.json DecodeMemoryBudgetMB).");
+        return affordable;
     }
 
     private const long MaxDecodablePixels = 500_000_000; // matches FastPngReader's cap

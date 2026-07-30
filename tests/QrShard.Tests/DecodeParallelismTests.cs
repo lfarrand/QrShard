@@ -16,12 +16,13 @@ namespace QrShard.Tests;
 /// </summary>
 public class DecodeParallelismTests
 {
-    private static ShardDecoder DecoderWith(TempDir tmp, int parallelism)
+    private static ShardDecoder DecoderWith(TempDir tmp, int parallelism, int budgetMB = 4000)
     {
         // AppSettings is a parsed file with no public mutators, so the setting under test has to
         // travel through a real settings file — the same route the CLI uses.
-        string path = tmp.File($"appsettings-{parallelism}.json");
-        File.WriteAllText(path, $$"""{ "DecodeMaxParallelism": {{parallelism}} }""");
+        string path = tmp.File($"appsettings-{parallelism}-{budgetMB}.json");
+        File.WriteAllText(path,
+            $$"""{ "DecodeMaxParallelism": {{parallelism}}, "DecodeMemoryBudgetMB": {{budgetMB}} }""");
         return new ShardDecoder(AppSettings.Load(path), new CameraRectifier(),
             new FrameLocator(new InnerRectScanner(), new StripReader()), new StripReader(), new GridSampler(),
             new ShardAssembler(), new Fec(), new Crc(), new FastPngReader(), new PhotoFusion(), new Interleaver2());
@@ -63,6 +64,49 @@ public class DecodeParallelismTests
 
         Assert.Equal(original, File.ReadAllBytes(tmp.File("serial.bin")));
         Assert.Equal(original, File.ReadAllBytes(tmp.File("wide.bin")));
+    }
+
+    [Fact]
+    public void MemoryBudget_TradesWorkersAwayWhenTheImagesAreLarge()
+    {
+        // ShardEncoder has always derived its degree from EncodeMemoryBudgetMB; the decode side
+        // had no counterpart, so it took min(parallelism, images) and each worker then sized its
+        // scratch from the largest image it saw. At the 500M-pixel per-image ceiling that is ~2 GB
+        // per worker, times up to 24 — with the dimensions chosen by the sender, not the receiver.
+        using var tmp = new TempDir();
+        // Enough images that the ceiling (min of parallelism and image count) exceeds what the
+        // budget affords — otherwise the budget cannot be the binding constraint and the test
+        // would pass without exercising anything.
+        string input = tmp.WriteFile("input.bin", TestData.Random(1_200_000));
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"),
+            new EncodeOptions { Width = 900, Height = 900, CellPx = 2, BitsPerCell = 2 });
+        Assert.True(result.Files.Count >= 20, $"need enough images to exceed the budget; got {result.Files.Count}");
+
+        // 900x900 is 810,000 px, so ~3.2 MB of scratch each: a 64 MB budget affords about 19
+        // workers, fewer than the image count, so the budget binds rather than the ceiling.
+        var log = new List<string>();
+        var shards = DecoderWith(tmp, parallelism: 32, budgetMB: 64).CollectShards(result.Files, log.Add);
+
+        Assert.Equal(result.Files.Count, shards.Count); // still decodes everything, just narrower
+        Assert.Contains(log, l => l.Contains("decode worker(s) instead of"));
+    }
+
+    [Fact]
+    public void MemoryBudget_LeavesOrdinaryCapturesAlone()
+    {
+        // The bound must not quietly cost throughput on real captures. At the default budget a
+        // 900x900 image is ~3.2 MB of scratch, so nothing should be traded away and nothing should
+        // be reported.
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("input.bin", TestData.Random(400_000));
+        var result = new ShardEncoder().Encode(input, tmp.Sub("shards"),
+            new EncodeOptions { Width = 900, Height = 900, CellPx = 2, BitsPerCell = 2 });
+
+        var log = new List<string>();
+        var shards = DecoderWith(tmp, parallelism: 8, budgetMB: 4000).CollectShards(result.Files, log.Add);
+
+        Assert.Equal(result.Files.Count, shards.Count);
+        Assert.DoesNotContain(log, l => l.Contains("instead of"));
     }
 
     /// <summary>
