@@ -81,7 +81,7 @@ decode and discarding every other image's successful result. Those are availabil
 integrity, and are not itemised here.
 
 None of these is remotely exploitable: every one requires a shard image the user chooses to
-decode. **Take the current release (1.5.2)** if you decode images from anywhere you do not
+decode. **Take the current release (1.6.0)** if you decode images from anywhere you do not
 control, and pass `-o` explicitly regardless.
 
 ### Path traversal via the shard header's file name (fixed in 1.3.10)
@@ -104,7 +104,7 @@ from the header via `Path.GetFileNameWithoutExtension`, which is not a sanitizer
 anchored to that already-escaped root.
 
 **1.3.10 is the first release in which both are fixed**, and it is the floor rather than the
-recommendation — fixes go to the latest release only, so take the current one (1.5.2):
+recommendation — fixes go to the latest release only, so take the current one (1.6.0):
 
 ```
 dotnet tool update -g QrShard.Tool
