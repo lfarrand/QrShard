@@ -397,7 +397,19 @@ internal sealed class ShardDecoder(
                 var info = Image.Identify(path);
                 largestPixels = Math.Max(largestPixels, (long)info.Width * info.Height);
             }
-            catch (Exception ex) when (ex is ImageFormatException or IOException or UnauthorizedAccessException or NotSupportedException)
+            // Deliberately everything except the two conditions that belong to the whole run. An
+            // enumerated filter was wrong here and wrong in a way worth remembering: Identify also
+            // inflates ancillary text chunks, so a PNG carrying a malformed zTXt raises
+            // System.IO.InvalidDataException — which derives from SystemException, not
+            // IOException, and so escaped a filter that listed IOException. This runs BEFORE any
+            // worker, outside the per-image catch below, so one 88-byte crafted file killed the
+            // entire decode: exactly the failure that catch was added to prevent, reintroduced a
+            // screen away from it.
+            //
+            // The policy needs no enumeration anyway. A file this cannot read contributes nothing
+            // to a size estimate by definition, and the decode pass diagnoses it properly a moment
+            // later. Nothing here should ever be fatal to the batch.
+            catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
             {
                 // Not identifiable: leave it out of the estimate.
             }

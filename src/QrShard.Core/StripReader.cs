@@ -121,6 +121,11 @@ internal sealed class StripReader(Palette palette) : IStripReader
     /// </summary>
     private const long SeparabilityDivisor = 4000;
 
+    /// <summary>Test seam: the illumination gate is the discriminator two decode paths hang off,
+    /// and it is worth pinning directly rather than only through a full round trip.</summary>
+    internal static bool FitsAsIlluminationForTests(Rgb24[] measured, Rgb24[] theoretical) =>
+        FitsAsIllumination(measured, theoretical);
+
     private static bool FitsAsIllumination(Rgb24[] measured, Rgb24[] theoretical)
     {
         Span<double> gain = stackalloc double[3];
@@ -141,15 +146,39 @@ internal sealed class StripReader(Palette palette) : IStripReader
             if (g is < 0.2 or > 1.6)
                 return false;
 
-        double residual = 0;
+        double residual = 0, worstEntry = 0;
         for (int i = 0; i < measured.Length; i++)
         {
-            residual += Math.Abs(measured[i].R - gain[0] * theoretical[i].R);
-            residual += Math.Abs(measured[i].G - gain[1] * theoretical[i].G);
-            residual += Math.Abs(measured[i].B - gain[2] * theoretical[i].B);
+            double dr = Math.Abs(measured[i].R - gain[0] * theoretical[i].R);
+            double dg = Math.Abs(measured[i].G - gain[1] * theoretical[i].G);
+            double db = Math.Abs(measured[i].B - gain[2] * theoretical[i].B);
+            residual += dr + dg + db;
+            worstEntry = Math.Max(worstEntry, Math.Max(dr, Math.Max(dg, db)));
         }
-        return residual / (measured.Length * 3) < 28; // mean absolute residual per channel
+        // The MEAN alone was not enough, and the gap it left mattered. Illumination applies a gain
+        // to every entry at once; it cannot displace ONE entry and leave the rest. But one bad
+        // block out of sixteen contributes only about a sixteenth of a mean taken over 48 channel
+        // samples, so a single obscured block could move ~246 per channel and still "fit".
+        //
+        // That let an overlay across ONE strip through the gate, which then made things actively
+        // worse: the damage itself creates the top/bottom delta that switches interpolation ON,
+        // and ReadInterpolated lerps Top and Bottom without ever consulting Best. So the healthy
+        // strip was picked as Best and then not used, while the damaged one poisoned every row.
+        // Damaging one strip was fatal where damaging BOTH the same way decoded fine — the
+        // redundancy inverted.
+        //
+        // Capping the worst single deviation is the check that matches the physics. A strip that
+        // fails it is not badly lit, it is obscured, and the right answer is to stop interpolating
+        // and use the other copy.
+        return residual / (measured.Length * 3) < 28 && worstEntry < MaxEntryResidual;
     }
+
+    /// <summary>
+    /// Largest per-channel deviation from the gain-predicted value that still counts as
+    /// illumination rather than damage. Sampling noise, mild JPEG and small geometry error sit
+    /// well under this; a displaced palette block starts costing decodes around 55.
+    /// </summary>
+    private const double MaxEntryResidual = 48;
 
     private static int MaxChannelDelta(Rgb24[] a, Rgb24[] b)
     {
