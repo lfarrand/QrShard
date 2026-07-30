@@ -65,8 +65,61 @@ internal sealed class StripReader(Palette palette) : IStripReader
         // gain poorly and must not poison interpolation.
         bool interpolate = FitsAsIllumination(top, theoretical) && FitsAsIllumination(bottom, theoretical)
                            && MaxChannelDelta(top, bottom) >= 8;
+
+        // Last resort: the theoretical palette. Both copies sit at the SAME x as each other (the
+        // block centre depends only on the block index), so one vertical mark can poison the same
+        // entry in both, and picking the "better" of two equally-damaged strips still hands the
+        // classifier a broken reference. Nothing downstream noticed — GridSampler consumes Best
+        // unguarded, and theoretical was built here only as a yardstick for choosing between the
+        // measured pair, never as something to fall back ON.
+        //
+        // It is always available and correct by construction: SPEC section 3 derives the palette
+        // from bitsPerCell alone, so a decoder can regenerate it without reading anything from
+        // the image. The measured strip exists to track colour transforms the capture applied —
+        // valuable when it is intact, worthless when it is not.
+        if (!IsSeparable(best))
+            return new PaletteSet(theoretical, theoretical, theoretical, Interpolate: false);
         return new PaletteSet(best, top, bottom, interpolate);
     }
+
+    /// <summary>
+    /// Whether a measured palette's entries can still be told apart, which is the only thing a
+    /// palette is for. Damage overwrites whole blocks with one colour, collapsing distinct entries
+    /// onto each other; two entries the classifier cannot separate make their indices a coin flip,
+    /// and at 4 bits a single collapsed pair is order 12% of cells — well past what ECC absorbs.
+    ///
+    /// The test is the closest pair against the widest pair, which is invariant to gain: dimming
+    /// the whole capture shrinks both and leaves the ratio alone, so a legitimately dark or
+    /// warm-cast strip still passes. Collapse drives the closest pair toward zero and the ratio
+    /// with it. The threshold is deliberately far below any real palette's ratio (0.19 at 4 bits,
+    /// 0.06 at 8) so this fires on damage rather than on a difficult capture — being wrong in that
+    /// direction would throw away the colour tracking the measured strip exists to provide.
+    /// </summary>
+    private static bool IsSeparable(Rgb24[] measured)
+    {
+        if (measured.Length < 2)
+            return true;
+        long closest = long.MaxValue, widest = 0;
+        for (int i = 0; i < measured.Length; i++)
+            for (int j = i + 1; j < measured.Length; j++)
+            {
+                long dr = measured[i].R - measured[j].R;
+                long dg = measured[i].G - measured[j].G;
+                long db = measured[i].B - measured[j].B;
+                long d = dr * dr + dg * dg + db * db;
+                if (d < closest) closest = d;
+                if (d > widest) widest = d;
+            }
+        // An all-one-colour strip (widest 0) is total collapse, not a pass.
+        return widest > 0 && closest * SeparabilityDivisor >= widest;
+    }
+
+    /// <summary>
+    /// Closest pair must be at least 1/this of the widest. A 4-bit theoretical palette sits at
+    /// about 1/26 and an 8-bit one at about 1/260 by squared distance, so 4000 clears every real
+    /// palette by a wide margin while still catching a pair collapsed to near-zero separation.
+    /// </summary>
+    private const long SeparabilityDivisor = 4000;
 
     private static bool FitsAsIllumination(Rgb24[] measured, Rgb24[] theoretical)
     {
