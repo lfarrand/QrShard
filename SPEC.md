@@ -1,7 +1,7 @@
 # QrShard wire-format specification
 
 Version: format v2 (header version 2, metadata versions 2–3). Metadata version 3 arrived in
-QrShard 1.1 and nothing since has changed the format — this document describes what 1.5.1
+QrShard 1.1 and nothing since has changed the format — this document describes what 1.5.2
 produces, and the golden fixtures in `tests/QrShard.Tests/golden/` pin every released minor line
 against the current decoder. Later releases have added header *flags* (§4.1), which is a
 compatible extension: the version nibble is the capability field, and flags outside the known set
