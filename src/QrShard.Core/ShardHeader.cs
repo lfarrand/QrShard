@@ -168,12 +168,22 @@ internal sealed class ShardHeader
             {
                 if (stripeData < 1 || stripeData > CrossShardFec.MaxShardsPerStripe)
                     return null;
-                // Both counts index the SAME GF(2^8) domain, so their sum is what has to fit, not
-                // each alone. CrossShardFec.Encode enforces that; TryReconstruct does not, and it
-                // is the one reachable from a crafted header. Over 255 the byte casts in
-                // ParityMatrix wrap until a parity row and a data column collide, making x ^ y
-                // zero and Inv(0) throw DivideByZeroException out of the decode.
-                if (stripeData + (long)stripeParity > CrossShardFec.MaxShardsPerStripe)
+                // CAUCHY ONLY. Its parity rows and data columns index one shared GF(2^8) domain, so
+                // their sum is what has to fit: over 255 the byte casts in ParityMatrix wrap until
+                // a parity row collides with a data column, x ^ y is zero, and Inv(0) throws
+                // DivideByZeroException out of the decode. CrossShardFec.Encode enforces it;
+                // TryReconstruct does not, and that is the side a crafted header reaches.
+                //
+                // Fountain has no such domain. Its coefficients are random over GF(2^8) rather
+                // than positions in it, ReassembleFountain branches before any Cauchy matrix is
+                // built, StripePlanner.PlanFountain says so in as many words, and SPEC section 8
+                // imposes no limit where section 7 does. Applying the Cauchy bound to it made the
+                // encoder emit headers its own decoder refused: `-F 299` or higher over a full
+                // 64-image fountain stripe put the sum past 255, encode succeeded, and every
+                // image — data ones included — then failed with "Shard header is corrupt.
+                // Recapture this image.", pointing the user at their camera instead of the flag.
+                // The advertised range goes to 1000.
+                if ((flags & FlagFountain) == 0 && stripeData + (long)stripeParity > CrossShardFec.MaxShardsPerStripe)
                     return null;
                 long stripes = ((long)count + stripeData - 1) / stripeData;
                 if (stripes * (long)stripeParity > MaxParityOrdinals)
