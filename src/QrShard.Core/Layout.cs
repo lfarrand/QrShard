@@ -137,22 +137,107 @@ internal sealed class Layout
     public const int MetaVersion = 2;
     public const int MetaVersionInterleave2 = 3;
 
+    // ---- Version 4: the same information, error-corrected ----
+    //
+    // Versions 2 and 3 spend all 128 modules on 112 bits of fields plus a CRC-16, so a single
+    // flipped module loses the whole image — before the ECC that protects the data grid is ever
+    // consulted. The strips are duplicated top and bottom, but both copies sit at the SAME x as
+    // each other, so one narrow vertical mark can take out the same module in both.
+    //
+    // Room comes from two places. The dimension fields were sized to their storage rather than to
+    // their ranges (gridW/gridH/metaH cannot exceed MaxResolution, cellPx cannot exceed 64,
+    // eccParity is even and at most 64), and innerW/innerH are pure redundancy: version 2 carries
+    // them and then the decoder REJECTS any strip where they disagree with
+    // 2*metaH + gridW*cellPx / 6*metaH + gridH*cellPx. Deriving them cannot lose information,
+    // because a disagreeing strip was never accepted.
+    //
+    //   9 bytes  fields, 70 bits used and 2 reserved (zero)
+    //   2 bytes  CRC-16/CCITT over those 9
+    //   5 bytes  Reed-Solomon parity over the 11 preceding, GF(2^8), the codec already in the box
+    //  16 bytes  = 128 modules, unchanged
+    //
+    // RS with 5 parity symbols corrects 2 symbol errors anywhere in the 16. Symbols are laid out
+    // CONTIGUOUSLY and deliberately not interleaved: the damage this exists for is a burst — a
+    // mark, a cable, a scratch — and byte alignment is what absorbs a burst. Interleaving would
+    // scatter one mark across more symbols, which is precisely the wrong direction here. Two
+    // symbols buys roughly 8 adjacent modules, about 130 px at the 2160 px default's 16.1 px
+    // module pitch, against the single module that used to be fatal.
+    //
+    // The CRC is kept rather than trusting the code's own detection. RS can miscorrect beyond its
+    // bound, and this project's whole posture is to verify rather than assume: correct first, then
+    // check, and reject if the check fails.
+    public const int MetaVersionFec = 4;
+
+    /// <summary>Field bytes in a v4 strip, before CRC and parity.</summary>
+    private const int V4FieldBytes = 9;
+
+    /// <summary>Field + CRC bytes; the RS message length.</summary>
+    private const int V4MessageBytes = 11;
+
+    /// <summary>RS parity symbols, correcting <c>V4ParityBytes / 2</c> symbol errors.</summary>
+    private const int V4ParityBytes = 5;
+
     public byte[] PackMetadata()
     {
         var bits = new BitWriter();
         bits.Write(MetaMagic, 8);
-        bits.Write((uint)(Interleave2 ? MetaVersionInterleave2 : MetaVersion), 4);
+        bits.Write(MetaVersionFec, 4);
         bits.Write((uint)BitsPerCell, 4);
-        bits.Write((uint)GridW, 16);
-        bits.Write((uint)GridH, 16);
-        bits.Write((uint)CellPx, 8);
-        bits.Write((uint)MetaH, 16);
-        bits.Write((uint)InnerW, 16);
-        bits.Write((uint)InnerH, 16);
-        bits.Write((uint)EccParity, 8);
-        byte[] payload = bits.ToArray(); // 14 bytes
-        bits.Write(new Crc().Crc16Ccitt(payload), 16);
-        return bits.ToArray(); // 16 bytes = 128 module bits
+        bits.Write((uint)GridW, 14);
+        bits.Write((uint)GridH, 14);
+        bits.Write((uint)(CellPx - 1), 6);   // 1..64 stored as 0..63
+        bits.Write((uint)MetaH, 14);
+        bits.Write((uint)(EccParity / 2), 6); // even 0..64 stored as 0..32
+        // The interleave that version 3 signalled is now a field rather than a version, so v4
+        // carries both variants and the version nibble stays free for the next capability.
+        bits.Write((uint)(Interleave2 ? 1 : 0), 1);
+        bits.Write(0, 1);                     // reserved, must be zero — 72 bits exactly
+        byte[] fields = bits.ToArray();       // 9 bytes
+        bits.Write(new Crc().Crc16Ccitt(fields), 16);
+
+        byte[] message = bits.ToArray();      // 11 bytes: fields + CRC
+        var strip = new byte[V4MessageBytes + V4ParityBytes];
+        message.CopyTo(strip, 0);
+        new ReedSolomon().Encode(message, strip.AsSpan(V4MessageBytes, V4ParityBytes));
+        return strip;                         // 16 bytes = 128 module bits
+    }
+
+    /// <summary>
+    /// Repairs and unpacks a v4 strip. Returns null when the damage exceeds what 5 parity symbols
+    /// can correct, or when the CRC still fails afterwards — a miscorrection RS could not detect.
+    /// </summary>
+    private static Layout? UnpackV4(byte[] strip)
+    {
+        // Correct in place first. TryDecode returning false means the damage is past the bound;
+        // returning true still has to satisfy the CRC below, because correction beyond the bound
+        // can succeed loudly and be wrong.
+        if (!new ReedSolomon().TryDecode(strip, V4ParityBytes, out _))
+            return null;
+
+        var reader = new BitReader(strip);
+        reader.Read(8);                       // magic, already matched by the caller
+        reader.Read(4);                       // version, likewise
+        int bitsPerCell = (int)reader.Read(4);
+        int gridW = (int)reader.Read(14);
+        int gridH = (int)reader.Read(14);
+        int cellPx = (int)reader.Read(6) + 1;
+        int metaH = (int)reader.Read(14);
+        int eccParity = (int)reader.Read(6) * 2;
+        bool interleave2 = reader.Read(1) == 1;
+        if (reader.Read(1) != 0)              // reserved bit must be zero
+            return null;
+        ushort crc = (ushort)reader.Read(16);
+        if (crc != new Crc().Crc16Ccitt(strip.AsSpan(0, V4FieldBytes)))
+            return null;
+
+        // Derived, not carried. v2 stored these and rejected any strip where they disagreed with
+        // exactly this arithmetic, so computing them is the same constraint expressed once.
+        long innerW = 2L * metaH + (long)gridW * cellPx;
+        long innerH = 6L * metaH + (long)gridH * cellPx;
+        if (innerW is < 1 or > MaxResolution || innerH is < 1 or > MaxResolution)
+            return null;
+
+        return Validated(bitsPerCell, gridW, gridH, cellPx, metaH, (int)innerW, (int)innerH, eccParity, interleave2);
     }
 
     public static Layout? UnpackMetadata(ReadOnlySpan<bool> modules)
@@ -164,12 +249,16 @@ internal sealed class Layout
             if (modules[i])
                 bytes[i >> 3] |= (byte)(0x80 >> (i & 7));
 
+        // Dispatch on what the UNCORRECTED bytes say, because for v4 the magic and version live
+        // inside the RS-protected region: if they are the damaged bits, checking them first would
+        // reject the strip before the parity that could repair them ever runs. So an exact v2/v3
+        // header takes the legacy path, and anything else is offered to v4, which corrects first
+        // and only then insists on the magic. A genuinely corrupt v2 strip fails either way.
         var reader = new BitReader(bytes);
-        if (reader.Read(8) != MetaMagic)
-            return null;
+        uint magic = reader.Read(8);
         uint version = reader.Read(4);
-        if (version is not (MetaVersion or MetaVersionInterleave2))
-            return null;
+        if (magic != MetaMagic || version is not (MetaVersion or MetaVersionInterleave2))
+            return UnpackV4(bytes);
         int bitsPerCell = (int)reader.Read(4);
         int gridW = (int)reader.Read(16);
         int gridH = (int)reader.Read(16);
@@ -181,27 +270,40 @@ internal sealed class Layout
         ushort crc = (ushort)reader.Read(16);
         if (crc != new Crc().Crc16Ccitt(bytes.AsSpan(0, 14)))
             return null;
+        return Validated(bitsPerCell, gridW, gridH, cellPx, metaH, innerW, innerH, eccParity,
+            interleave2: version == MetaVersionInterleave2);
+    }
+
+    /// <summary>
+    /// The checks every accepted strip must pass, whatever version carried it. Shared so a new
+    /// version cannot quietly acquire a weaker decode path than the one before it — which is the
+    /// mistake this codebase has already made once, enforcing an encoder invariant only on the
+    /// side that is not under attack.
+    /// </summary>
+    private static Layout? Validated(int bitsPerCell, int gridW, int gridH, int cellPx, int metaH,
+        int innerW, int innerH, int eccParity, bool interleave2)
+    {
         if (bitsPerCell is < Palette.MinBits or > Palette.MaxBits || gridW < 1 || gridH < 1 || cellPx < 1 || metaH < 1)
             return null;
         // Range alone is not enough: Create rejects ODD parity, and the decode path has to reject
-        // it too or the encoder's invariant is only enforced on the side that is not under attack.
-        // Parity 1 in particular makes Fec.TryErasureRetry compute `parity - VerificationMargin`
-        // = -1, a limit its `f == limit` bound can never reach, so the erasure list runs past its
-        // 64-entry buffer. See the matching guard in Create.
+        // it too. Parity 1 in particular makes Fec.TryErasureRetry compute
+        // `parity - VerificationMargin` = -1, a limit its `f == limit` bound can never reach, so
+        // the erasure list runs past its 64-entry buffer.
         if (eccParity is < 0 or > Fec.MaxParity || (eccParity & 1) != 0)
             return null;
-        // Upper-bound and cross-check the geometry so a crafted CRC-16-valid strip (these 16-bit
-        // fields reach 65535) cannot drive an overflowing or absurd buffer size downstream —
-        // GridSampler sizes `streamLength = (int)((GridW*GridH*BitsPerCell+7)/8)`, which without a
-        // cap overflows int to a negative length or demands multi-GB. This mirrors the encoder
-        // invariants in Create: every dimension fits the max encodable image, and the inner
-        // rectangle equals the exact size the grid + gutters (metaH) + metadata/palette strips
-        // imply, so the whole strip must be internally consistent to be accepted.
+        // Bound the geometry so a strip that survives its checksum cannot drive an overflowing or
+        // absurd buffer size downstream — GridSampler sizes
+        // `streamLength = (int)((GridW*GridH*BitsPerCell+7)/8)`, which without a cap overflows int
+        // to a negative length or demands multi-GB.
         if (gridW > MaxResolution || gridH > MaxResolution || cellPx > MaxCellPx || metaH > MaxResolution
             || innerW is < 1 or > MaxResolution || innerH is < 1 or > MaxResolution)
             return null;
+        // v2/v3 carry the inner rectangle and must agree with the grid; v4 derives it from the
+        // same arithmetic, so this is a tautology there and a real cross-check here.
         if (innerW != 2 * metaH + gridW * cellPx || innerH != 6 * metaH + gridH * cellPx)
             return null;
+        if (interleave2 && eccParity == 0)
+            return null; // the permutation is defined over the ECC layout
 
         var layout = new Layout
         {
@@ -216,14 +318,12 @@ internal sealed class Layout
             // Not carried in the strip: after (any) rectification the decoder maps geometry
             // purely from the frame's inner rectangle, so band info is irrelevant downstream.
             FinderModule = 0,
-            Interleave2 = version == MetaVersionInterleave2,
+            Interleave2 = interleave2,
         };
-
-        // The last of Create's invariants, and the one that needs the finished Layout to express.
         // With CodewordCount 0 the FEC pass writes nothing and reports success, so the recovered
         // buffer — pooled per worker and never cleared — is handed on still holding the PREVIOUS
-        // image's fully valid stream, header CRC and payload CRC included. Every downstream gate
-        // then passes and a shard is accepted from an image that contributed no bytes to it.
+        // image's fully valid stream, and a shard is accepted from an image that contributed no
+        // bytes to it.
         if (layout.EccParity > 0 && layout.CodewordCount < 1)
             return null;
         return layout;
