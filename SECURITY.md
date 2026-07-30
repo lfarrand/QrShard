@@ -46,7 +46,47 @@ and nonce.
 
 ## Known advisories
 
-Path traversal via the shard header's file name: a crafted image could steer the decode write
+### Integrity: a crafted shard could make a decode report success wrongly (fixed in 1.5.0)
+
+Three separate defects, all reachable from an ordinary `qrshard decode` of images the user chose
+to accept, and all landing on the outcome this project treats as the serious one — **a decode
+reporting success while producing bytes that are not the ones encoded**, or none at all.
+
+| Defect | Affects | Fixed in |
+|---|---|---|
+| Header file name naming a Win32 device (`NUL`, `CON`, `COM1`…) | v1.0.0 – v1.4.0 | **1.5.0** |
+| Reed-Solomon erasure decode spending its whole verification margin | v1.0.0 – v1.4.0 | **1.5.0** |
+| Metadata strip declaring zero complete codewords with ECC on | v1.0.0 – v1.4.0 | **1.5.0** |
+
+**The device name is the one to understand.** On Windows, opening `<dir>\NUL` succeeds, discards
+every byte, and creates no file — and `File.Exists` on it is false, so the collision check never
+diverted. The SHA-256 could not catch it either, because it is computed over the payload as it is
+written rather than read back: `written` still matched, the digest still matched, and the decode
+printed `SHA-256 verified` over a file that does not exist. Total data loss presented as success.
+Reachable only without `-o`, since an explicit output path is used exactly as given.
+
+The Reed-Solomon defect is a silent miscorrection. Two syndromes are meant to stay unspent so the
+final check can detect a wrong answer, but the reserve was enforced against the erasure count
+only — one extra error at the maximum erasure count consumed it, leaving the verification
+vacuous. Erasure flags come from the colour classifier's confidence, so "more errors than were
+flagged" is an ordinary condition rather than an exotic one.
+
+The third let the FEC pass write nothing and report success, so the per-worker recovered buffer
+was handed on still holding the *previous* image's stream — valid header CRC, valid payload CRC —
+and a shard was accepted from an image that contributed none of its bytes.
+
+Alongside these, 1.5.0 bounds a set of denial-of-service paths where a small crafted image could
+size gigabytes of buffers or stall a decode, and stops one malformed image aborting a whole folder
+decode and discarding every other image's successful result. Those are availability rather than
+integrity, and are not itemised here.
+
+None of these is remotely exploitable: every one requires a shard image the user chooses to
+decode. **Take 1.5.0** if you decode images from anywhere you do not control, and pass `-o`
+explicitly regardless.
+
+### Path traversal via the shard header's file name (fixed in 1.3.10)
+
+A crafted image could steer the decode write
 outside the output directory, or to an absolute path, truncating the target before verification
 ran. Reachable from `qrshard decode <folder>` with no `-o`, and from `DecodeImages` with no
 `outputPath`.
@@ -64,7 +104,7 @@ from the header via `Path.GetFileNameWithoutExtension`, which is not a sanitizer
 anchored to that already-escaped root.
 
 **1.3.10 is the first release in which both are fixed**, and it is the floor rather than the
-recommendation — fixes go to the latest release only, so take the current one (1.4.0):
+recommendation — fixes go to the latest release only, so take the current one (1.5.0):
 
 ```
 dotnet tool update -g QrShard.Tool
