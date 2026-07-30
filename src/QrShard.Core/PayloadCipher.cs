@@ -78,7 +78,7 @@ internal sealed class PayloadCipher
     public ArraySegment<byte> DecryptInPlace(byte[] blob, string password, string fileName, ReadOnlySpan<byte> aad = default)
     {
         if (blob.Length < Overhead)
-            throw new ShardDecodeException($"'{fileName}': encrypted payload is truncated.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(fileName)}': encrypted payload is truncated.");
         ReadOnlySpan<byte> salt = blob.AsSpan(0, SaltSize);
         ReadOnlySpan<byte> nonce = blob.AsSpan(SaltSize, NonceSize);
         ReadOnlySpan<byte> tag = blob.AsSpan(SaltSize + NonceSize, TagSize);
@@ -91,7 +91,7 @@ internal sealed class PayloadCipher
         }
         catch (AuthenticationTagMismatchException)
         {
-            throw new ShardDecodeException($"'{fileName}': wrong password, corrupted payload, or a tampered shard header.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(fileName)}': wrong password, corrupted payload, or a tampered shard header.");
         }
         return new ArraySegment<byte>(blob, Overhead, blob.Length - Overhead);
     }

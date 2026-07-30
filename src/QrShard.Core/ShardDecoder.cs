@@ -120,8 +120,8 @@ internal sealed class ShardDecoder(
                 catch (ShardDecodeException ex)
                 {
                     results[i] = (null, ex.Message);
-                    if (diagnostics is { Layout: not null, Cells: not null })
-                        failures[i] = new FailedCapture(diagnostics.Layout, diagnostics.Cells, ordered[i]);
+                    if (diagnostics is { CellsLayout: not null, Cells: not null })
+                        failures[i] = new FailedCapture(diagnostics.CellsLayout, diagnostics.Cells, ordered[i]);
                 }
                 // Everything above runs on attacker-controlled bytes, and only the failures the
                 // pipeline anticipated arrive as ShardDecodeException. Anything else — an index
@@ -491,6 +491,9 @@ internal sealed class ShardDecoder(
             {
                 int salvageLength = layout.EccParity > 0 ? protectedLength : (int)((layout.TotalBits + 7) / 8);
                 diagnostics.Cells = work.AsSpan(0, salvageLength).ToArray();
+                // Recorded WITH the cells, not read back later: Layout is overwritten by the
+                // camera-rectified retry while these cells stay from the first attempt.
+                diagnostics.CellsLayout = layout;
             }
         }
 

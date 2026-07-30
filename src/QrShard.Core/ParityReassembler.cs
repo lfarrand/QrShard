@@ -140,7 +140,7 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
             return ReassembleFountain(shards, first, log, out chunkCapacity);
         int count = first.Count, s = first.StripeData, p = first.StripeParity;
         if (!StripeGeometryUsable(count, s, p))
-            throw new ShardDecodeException($"'{first.FileName}': shard header declares invalid stripe geometry.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': shard header declares invalid stripe geometry.");
         int stripes = (count + s - 1) / s;
         int cap = shards.Max(x => x.Payload.Length); // full per-image capacity (parity images are always full)
 
@@ -215,7 +215,7 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
 
         if (unrecoverable.Count > 0)
             throw new ShardDecodeException(
-                $"'{first.FileName}': {unrecoverable.Count} data image(s) are missing and beyond parity recovery " +
+                $"'{ShardHeader.Display(first.FileName)}': {unrecoverable.Count} data image(s) are missing and beyond parity recovery " +
                 $"(images {string.Join(", ", unrecoverable.Take(10).Select(i => i + 1))}{(unrecoverable.Count > 10 ? ", ..." : "")} of {count}). " +
                 "Capture more of the missing images and decode again.");
 
@@ -224,7 +224,7 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
 
         long lastLen = first.TotalLength - (long)(count - 1) * cap;
         if (lastLen < 0 || lastLen > cap)
-            throw new ShardDecodeException($"'{first.FileName}': reassembled length does not match expected {first.TotalLength:N0}.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': reassembled length does not match expected {first.TotalLength:N0}.");
 
         chunkCapacity = cap;
         return chunks;
@@ -236,7 +236,7 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
     {
         int count = first.Count, s = first.StripeData;
         if (!StripeGeometryUsable(count, s, first.StripeParity))
-            throw new ShardDecodeException($"'{first.FileName}': shard header declares invalid stripe geometry.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': shard header declares invalid stripe geometry.");
         int stripes = (count + s - 1) / s;
         int cap = shards.Max(x => x.Payload.Length); // coded frames are always full capacity
 
@@ -308,7 +308,7 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
 
         if (unrecoverable.Count > 0)
             throw new ShardDecodeException(
-                $"'{first.FileName}': {unrecoverable.Count} data image(s) are missing and the captured fountain frames " +
+                $"'{ShardHeader.Display(first.FileName)}': {unrecoverable.Count} data image(s) are missing and the captured fountain frames " +
                 $"do not span them (images {string.Join(", ", unrecoverable.Take(10).Select(i => i + 1))}{(unrecoverable.Count > 10 ? ", ..." : "")} of {count}). " +
                 "Capture more frames and decode again.");
 
@@ -317,7 +317,7 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
 
         long lastLen = first.TotalLength - (long)(count - 1) * cap;
         if (lastLen < 0 || lastLen > cap)
-            throw new ShardDecodeException($"'{first.FileName}': reassembled length does not match expected {first.TotalLength:N0}.");
+            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': reassembled length does not match expected {first.TotalLength:N0}.");
 
         chunkCapacity = cap;
         return chunks;

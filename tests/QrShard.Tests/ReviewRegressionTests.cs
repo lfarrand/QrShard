@@ -152,4 +152,130 @@ public class ReviewRegressionTests
         Assert.False(StripReader.FitsAsIlluminationForTests(obscured, theoretical),
             "a single displaced block must not read as illumination");
     }
+
+    [Fact]
+    public void UnknownMetadataVersion_IsRejectedRatherThanParsedAsV4()
+    {
+        // SPEC section 2.2 requires unknown versions to be rejected — that nibble is the format's
+        // capability field and the reason older builds refuse a v4 strip. UnpackV4 checked neither
+        // magic nor version after correcting, and the comments on those two lines claimed the
+        // caller had already matched them. It had not: dispatch reaches UnpackV4 precisely BECAUSE
+        // the raw bytes did not look like v2 or v3, which is what allows a damaged version to be
+        // repaired. So a future version 5 strip whose CRC verified would have been silently parsed
+        // as v4 — fields read at the wrong offsets, geometry wrong, and no error.
+        var layout = Layout.Create(2160, 2160, 3, 4, 16);
+        byte[] strip = layout.PackMetadata();
+        Assert.NotNull(Layout.UnpackMetadata(ToModules(strip)));
+
+        // Re-stamp the version nibble as 5 and repair the CRC and parity so the strip is
+        // internally perfect — only the version is unknown.
+        byte[] forged = ForgeVersion(strip, 5);
+        Assert.Null(Layout.UnpackMetadata(ToModules(forged)));
+
+        // And a wrong magic is refused too, for the same reason.
+        byte[] badMagic = (byte[])strip.Clone();
+        badMagic[0] = 0x00;
+        Reseal(badMagic);
+        Assert.Null(Layout.UnpackMetadata(ToModules(badMagic)));
+    }
+
+    /// <summary>Rewrites the version nibble, then rebuilds CRC and RS parity over the result.</summary>
+    private static byte[] ForgeVersion(byte[] strip, int version)
+    {
+        var f = (byte[])strip.Clone();
+        f[1] = (byte)((f[1] & 0x0F) | (version << 4));
+        Reseal(f);
+        return f;
+    }
+
+    /// <summary>Recomputes the CRC over the 9 field bytes and the RS parity over the 11 that follow.</summary>
+    private static void Reseal(byte[] strip)
+    {
+        ushort crc = new Crc().Crc16Ccitt(strip.AsSpan(0, 9));
+        strip[9] = (byte)(crc >> 8);
+        strip[10] = (byte)crc;
+        new ReedSolomon().Encode(strip.AsSpan(0, 11), strip.AsSpan(11, 5));
+    }
+
+    private static bool[] ToModules(byte[] packed)
+    {
+        var m = new bool[Layout.MetaModuleCount];
+        for (int i = 0; i < m.Length; i++)
+            m[i] = (packed[i >> 3] & (0x80 >> (i & 7))) != 0;
+        return m;
+    }
+
+    [Fact]
+    public void TwoArchivesSharingAHeaderName_DoNotOverwriteEachOther()
+    {
+        // Every multi-input encode is named "bundle", so any two `qrshard encode a b c` sets
+        // decoded together shared a destination — and ExtractTar writes with overwrite: true, so
+        // the later group silently replaced the earlier one's files. The single-file path had
+        // counted since the last round; this one stopped two lines short of it.
+        using var tmp = new TempDir();
+        string cwd = tmp.Sub("work");
+        string previous = Environment.CurrentDirectory;
+        try
+        {
+            Environment.CurrentDirectory = cwd;
+            var shards = new List<DecodedShard>
+            {
+                ArchiveShard("bundle.tar", "first.txt", "one", fileId: 0x1111),
+                ArchiveShard("bundle.tar", "second.txt", "two", fileId: 0x2222),
+            };
+            new ShardAssembler().Assemble(shards, null, _ => { });
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previous;
+        }
+
+        // Both payloads survived, in separate directories.
+        var found = Directory.GetFiles(cwd, "*.txt", SearchOption.AllDirectories).Select(File.ReadAllText).ToList();
+        Assert.Contains("one", found);
+        Assert.Contains("two", found);
+    }
+
+    private static DecodedShard ArchiveShard(string headerName, string entryName, string content, ulong fileId)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new System.Formats.Tar.TarWriter(ms, System.Formats.Tar.TarEntryFormat.Pax, leaveOpen: true))
+        {
+            var e = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, entryName);
+            var body = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(content));
+            e.DataStream = body;
+            w.WriteEntry(e);
+        }
+        byte[] tar = ms.ToArray();
+        var header = new ShardHeader
+        {
+            FileId = fileId, Index = 0, Count = 1,
+            PayloadLength = tar.Length, PayloadCrc32 = new Crc().Crc32(tar),
+            TotalLength = tar.Length, OriginalLength = tar.Length,
+            Flags = ShardHeader.FlagArchive,
+            Sha256 = System.Security.Cryptography.SHA256.HashData(tar),
+            FileName = headerName, StripeData = 0, StripeParity = 0,
+        };
+        return new DecodedShard(header, tar, "crafted.png", 0, 0);
+    }
+
+    [Fact]
+    public void HostileFileNamesAreNeutralisedInEveryDecodeMessage()
+    {
+        // Display was applied at eleven sites and missed eight, including the two users hit
+        // most: the wrong-password message and the beyond-parity-recovery one. Those print
+        // verbatim through the CLI's `error: {ex.Message}` handler, and a terminal is an
+        // interpreter — a bare CR overwrites the line just printed, and an escape sequence can
+        // rewrite earlier output entirely.
+        string hostile = "a\r\u001b[2Kevil.bin";
+        string shown = ShardHeader.Display(hostile);
+        Assert.DoesNotContain(shown, c => char.IsControl(c));
+        Assert.Contains("evil.bin", shown);   // the readable part survives
+
+        var ex = Record.Exception(() => new PayloadCipher().DecryptInPlace(
+            new byte[8], "wrong-password", hostile, default));
+        Assert.IsType<ShardDecodeException>(ex);
+        Assert.DoesNotContain(ex!.Message, c => char.IsControl(c));
+        Assert.Contains("evil.bin", ex.Message);
+    }
 }
