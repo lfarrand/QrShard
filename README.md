@@ -280,6 +280,7 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 | `PayloadCompressionLevel` | same four values | `Optimal` | Brotli level for compressing the file payload |
 | `EncodeMemoryBudgetMB` | 64–1000000 | 2000 | Pixel-buffer budget capping parallel encode workers |
 | `DecodeMaxParallelism` | 0–1024 | 0 (auto: cores, capped at 24) | Max parallel image decodes. The cap trades throughput for memory rather than marking a plateau — at 4K, 24 workers decode ~20% faster than 16 for ~1.5 GB more peak working set, and 32 adds a further ~8% for ~0.45 GB. Raise it if you have memory to spare; lower it on memory-constrained machines |
+| `DecodeMemoryBudgetMB` | 64–1000000 | 4000 | Scratch budget for parallel decoding — the counterpart to `EncodeMemoryBudgetMB`. Workers are the lower of `DecodeMaxParallelism` and what this affords against the largest image in the set (read from its header first). A 4K frame costs ~33 MB of scratch and a 48 MP photo ~192 MB, so the default admits the full worker count for any realistic capture and binds only on far larger images |
 | `ReceiveFps` | 0–120 | 10 | Default frame rate for the live `receive` capture |
 | `WatchPollMs` | 50–60000 | 250 | Folder poll interval (ms) for `decode --watch` |
 | `ReceiveDecodeWorkers` | 0–64 | 0 (auto) | Parallel frame-decode workers for the live receiver |
