@@ -1,11 +1,17 @@
 # QrShard wire-format specification
 
-Version: format v2 (header version 2, metadata versions 2–3). Metadata version 3 arrived in
-QrShard 1.1 and nothing since has changed the format — this document describes what 1.5.2
-produces, and the golden fixtures in `tests/QrShard.Tests/golden/` pin every released minor line
-against the current decoder. Later releases have added header *flags* (§4.1), which is a
-compatible extension: the version nibble is the capability field, and flags outside the known set
-are rejected rather than ignored.
+Version: format v2 (header version 2, metadata versions 2–4). Metadata version 4 adds error
+correction to the strip (§2.2) and is what current encoders emit; versions 2 and 3 remain readable
+and the golden fixtures in `tests/QrShard.Tests/golden/` pin every released minor line against the
+current decoder.
+
+**Version 4 is not readable by decoders older than it.** The version nibble is the capability
+field and unknown values are rejected rather than guessed at, so a shard written by a current
+encoder will not decode on an older build. That is the intended direction — old shards keep
+working forever, new ones need a current reader.
+
+Header *flags* (§4.1) extend compatibly by contrast: flags outside the known set are rejected, so
+the set can grow without a version change.
 
 This document specifies the on-image format completely enough to build an independent
 encoder/decoder. Everything a receiver needs is carried in the images themselves; the two
@@ -68,6 +74,12 @@ top band.
 
 | Field | Bits | Meaning |
 |---|---|---|
+Three versions exist. **Encoders SHOULD emit version 4**; decoders MUST read all three.
+
+### 2.1 Versions 2 and 3 (legacy, no error correction)
+
+| Field | Bits | Meaning |
+|---|---|---|
 | magic | 8 | `0xC5` |
 | version | 4 | `2` = classic interleave; `3` = same fields, v2 permuted interleave (§5.2) |
 | bitsPerCell | 4 | 1–8 |
@@ -80,8 +92,57 @@ top band.
 | eccParity | 8 | RS parity symbols per codeword (even, 0–64; 0 = no ECC) |
 | crc16 | 16 | CRC-16/CCITT (poly 0x1021, init 0xFFFF) over the preceding 14 bytes |
 
-Unknown versions MUST be rejected (the version nibble is the format's capability field — the
-strip is packed full, so new interleaves/densities ride new version values).
+Every one of the 128 modules is load-bearing: a single flipped module fails the CRC and the image
+is lost, **before** the Reed-Solomon protecting the data grid is ever consulted.
+
+### 2.2 Version 4 (error-corrected)
+
+Same 128 modules, reallocated so the strip survives damage:
+
+| Bytes | Contents |
+|---:|---|
+| 0–8 | fields, 72 bits (below) |
+| 9–10 | CRC-16/CCITT over bytes 0–8 |
+| 11–15 | Reed-Solomon parity over bytes 0–10 |
+
+| Field | Bits | Meaning |
+|---|---|---|
+| magic | 8 | `0xC5` |
+| version | 4 | `4` |
+| bitsPerCell | 4 | 1–8 |
+| gridW | 14 | data grid width in cells (≤ 16384) |
+| gridH | 14 | data grid height in cells (≤ 16384) |
+| cellPx | 6 | encoded cell size **minus 1** (stores 1–64) |
+| metaH | 14 | strip height / gutter, px (≤ 16384) |
+| eccParity | 6 | RS parity per codeword **divided by 2** (stores even 0–64) |
+| interleave2 | 1 | `1` = the v2 permuted interleave of §5.2 |
+| reserved | 1 | MUST be zero |
+
+`innerW` and `innerH` are **not carried**. A decoder derives them:
+
+```
+innerW = 2·metaH + gridW·cellPx
+innerH = 6·metaH + gridH·cellPx
+```
+
+This loses nothing: versions 2 and 3 carry the values and then require them to equal exactly this,
+so a strip that disagreed was never accepted.
+
+The Reed-Solomon is the same code as §5 — GF(2⁸), polynomial 0x11D, generator α = 2, first
+consecutive root α⁰ — as a shortened (16, 11) codeword. Five parity symbols correct **two symbol
+errors** anywhere in the 16. Symbols are contiguous and deliberately **not** interleaved: the
+damage this protects against is a burst (a mark, a cable, a scratch), and byte alignment is what
+absorbs a burst, where interleaving would scatter one mark across more symbols.
+
+A decoder MUST verify the CRC **after** correction and reject the strip if it fails. Reed-Solomon
+can miscorrect beyond its bound, and a miscorrected strip would point the decoder at the wrong
+geometry rather than failing.
+
+Because the magic and version live inside the corrected region, a decoder MUST NOT reject on those
+fields before running the correction — otherwise damage to them defeats the parity that exists to
+repair them.
+
+Unknown versions MUST be rejected (the version nibble is the format's capability field).
 
 ## 3. Palette
 

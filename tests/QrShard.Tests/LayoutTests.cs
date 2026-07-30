@@ -86,20 +86,90 @@ public class LayoutTests
         Assert.Equal(layout.EccParity, restored.EccParity);
     }
 
+    /// <summary>
+    /// This used to assert the opposite — that every single bit flip is REJECTED — which was an
+    /// accurate description of version 2 and the whole reason for version 4. The strip is read
+    /// before the data grid's ECC is consulted, so one flipped module lost an image whose payload
+    /// was intact and fully protected. Now the flip is repaired and the image decodes.
+    /// </summary>
     [Fact]
-    public void Metadata_AnySingleBitFlip_IsRejected()
+    public void Metadata_AnySingleBitFlip_IsCorrected()
     {
         var layout = Layout.Create(2160, 2160, 3, 4, 16);
         bool[] modules = ToModules(layout.PackMetadata());
 
-        // Every one of the 128 bits is protected (112 data + 16 CRC).
         for (int i = 0; i < Layout.MetaModuleCount; i++)
         {
             modules[i] = !modules[i];
-            Assert.Null(Layout.UnpackMetadata(modules));
+            var restored = Layout.UnpackMetadata(modules);
+            Assert.True(restored is not null, $"module {i} flipped: strip should have been repaired");
+            Assert.Equal(layout.GridW, restored!.GridW);
+            Assert.Equal(layout.GridH, restored.GridH);
+            Assert.Equal(layout.EccParity, restored.EccParity);
             modules[i] = !modules[i];
         }
         Assert.NotNull(Layout.UnpackMetadata(modules));
+    }
+
+    /// <summary>
+    /// The correction budget, from both sides. Five parity symbols correct two symbol errors, so a
+    /// burst confined to two bytes is repaired however many bits inside them are wrong — which is
+    /// the shape that matters, since the damage this exists for is a mark rather than scattered
+    /// noise. Past that it must FAIL rather than return a plausible wrong geometry: a miscorrected
+    /// strip would point the decoder at the wrong grid, and the CRC is retained underneath the RS
+    /// precisely to catch that.
+    /// </summary>
+    [Fact]
+    public void Metadata_BurstWithinTwoSymbols_IsCorrected_AndBeyondIsRejected()
+    {
+        var layout = Layout.Create(2160, 2160, 3, 4, 16);
+        byte[] clean = layout.PackMetadata();
+
+        // A 16-module burst aligned to two bytes: every bit of symbols 3 and 4 inverted.
+        var twoSymbols = (byte[])clean.Clone();
+        twoSymbols[3] ^= 0xFF;
+        twoSymbols[4] ^= 0xFF;
+        var repaired = Layout.UnpackMetadata(ToModules(twoSymbols));
+        Assert.True(repaired is not null, "a burst inside two symbols should be repaired");
+        Assert.Equal(layout.GridW, repaired!.GridW);
+        Assert.Equal(layout.MetaH, repaired.MetaH);
+
+        // Three corrupted symbols is past the bound and must not produce a Layout.
+        var threeSymbols = (byte[])clean.Clone();
+        threeSymbols[3] ^= 0xFF;
+        threeSymbols[4] ^= 0xFF;
+        threeSymbols[5] ^= 0xFF;
+        Assert.Null(Layout.UnpackMetadata(ToModules(threeSymbols)));
+    }
+
+    [Fact]
+    public void Metadata_LegacyVersion2Strip_StillDecodes()
+    {
+        // Forward compatibility is the point of the version nibble, but backward compatibility is
+        // what keeps shards already in the wild readable. A v2 strip carries innerW/innerH
+        // explicitly where v4 derives them, so this also pins that the two paths agree.
+        var layout = Layout.Create(2160, 2160, 3, 4, 16);
+        var bits = new BitWriter();
+        bits.Write(Layout.MetaMagic, 8);
+        bits.Write(Layout.MetaVersion, 4);
+        bits.Write((uint)layout.BitsPerCell, 4);
+        bits.Write((uint)layout.GridW, 16);
+        bits.Write((uint)layout.GridH, 16);
+        bits.Write((uint)layout.CellPx, 8);
+        bits.Write((uint)layout.MetaH, 16);
+        bits.Write((uint)layout.InnerW, 16);
+        bits.Write((uint)layout.InnerH, 16);
+        bits.Write((uint)layout.EccParity, 8);
+        byte[] payload = bits.ToArray();
+        bits.Write(new Crc().Crc16Ccitt(payload), 16);
+
+        var restored = Layout.UnpackMetadata(ToModules(bits.ToArray()));
+        Assert.NotNull(restored);
+        Assert.Equal(layout.GridW, restored!.GridW);
+        Assert.Equal(layout.GridH, restored.GridH);
+        Assert.Equal(layout.InnerW, restored.InnerW);
+        Assert.Equal(layout.InnerH, restored.InnerH);
+        Assert.Equal(layout.EccParity, restored.EccParity);
     }
 
     [Fact]

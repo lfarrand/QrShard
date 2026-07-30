@@ -473,7 +473,12 @@ Six independent layers, from within-cell to whole-transfer:
    strip are duplicated top and bottom, so an overlay across either edge cannot brick an image.
    When both palette strips are healthy but differ (vertical illumination gradients — screen
    falloff, room light), the decoder *interpolates the reference palette per grid row* between
-   them instead of picking one.
+   them instead of picking one. Both copies sit at the same x as each other, though, so one
+   narrow vertical mark can reach the same place in both — which is why neither strip relies on
+   the duplication alone. The metadata strip carries Reed-Solomon parity of its own (metadata
+   version 4), correcting a burst across two of its sixteen symbols; and if both palette copies
+   come back with entries collapsed onto each other, the decoder falls back to the theoretical
+   palette, which SPEC §3 derives from the bit depth without reading anything from the image.
 
 Parity/fountain images are self-labelling and carry the stripe geometry in every header, so the
 decoder discovers the recovery layout from any surviving image. Shards are order-independent,
@@ -668,7 +673,7 @@ charts are emitted with every presentation attribute inlined — GitHub's SVG sa
 │ ┌──────────────────────────────────┐ │
 │ │ solid black locator frame        │ │  ← found automatically in the screenshot
 │ │ ┌──────────────────────────────┐ │ │
-│ │ │ metadata strip (128 modules) │ │ │  ← geometry + density + ECC level; CRC-16
+│ │ │ metadata strip (128 modules) │ │ │  ← geometry + density + ECC level; CRC-16 + RS
 │ │ │ palette calibration strip    │ │ │  ← decoder classifies vs measured colors
 │ │ │                              │ │ │
 │ │ │ data grid: W x H cells,      │ │ │  ← RS-protected interleaved bitstream:
