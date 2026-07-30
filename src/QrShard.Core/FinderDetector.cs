@@ -110,8 +110,27 @@ internal sealed class FinderDetector : IFinderDetector
         }
     }
 
+    /// <summary>
+    /// Ceiling on distinct finder clusters. Add() scans the whole list for every accepted scanline
+    /// hit, recomputing each cluster's centre and module as divisions, so the work is
+    /// O(hits x clusters) with nothing bounding either factor. ChooseQuad does cap its own work
+    /// with .Take(12), but only AFTER this quadratic pass has run.
+    ///
+    /// The cluster count is bounded by area/(49*minModule^2), and minModule is only
+    /// max(3, min(w,h)/400) — so a wide-but-short image keeps a small floor while carrying a huge
+    /// area, and an image tiled with finder-like patterns produces clusters without limit. This is
+    /// single-threaded inside DetectPose, which VideoDecoder calls once per frame, so a hostile
+    /// recording stalls the decode rather than failing it.
+    ///
+    /// A real capture has three finders and yields a handful of clusters; 4096 is far past any
+    /// legitimate count while keeping the scan bounded.
+    /// </summary>
+    private const int MaxClusters = 4096;
+
     private static void Add(List<FinderCluster> clusters, double x, double y, double module)
     {
+        // Past the cap, hits that match an existing cluster still merge — only NEW clusters are
+        // refused, so a genuine finder already found keeps accumulating evidence.
         foreach (var c in clusters)
         {
             double d = Math.Max(Math.Abs(c.X - x), Math.Abs(c.Y - y));
@@ -124,6 +143,8 @@ internal sealed class FinderDetector : IFinderDetector
                 return;
             }
         }
+        if (clusters.Count >= MaxClusters)
+            return;
         clusters.Add(new FinderCluster { SumX = x, SumY = y, SumModule = module, Count = 1 });
     }
 }

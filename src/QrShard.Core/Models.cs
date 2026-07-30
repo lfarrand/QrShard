@@ -41,4 +41,17 @@ internal sealed class DecodeDiagnostics
     /// <summary>Per-cell classification margin (squared palette distance of the winning sample),
     /// captured even when the decode fails — drives the capture-quality heatmap.</summary>
     public int[]? CellMargins { get; set; }
+
+    /// <summary>
+    /// Whether the caller actually wants <see cref="CellMargins"/> and
+    /// <see cref="CodewordErrors"/>. Only the `diagnose` command reads them.
+    ///
+    /// Folder decode passes a live diagnostics object solely so the failure handler can fill
+    /// PhotoFusion's input, which reads just <see cref="Layout"/> and <see cref="Cells"/> — but
+    /// merely being non-null also switched on an int[GridW*GridH] and an int[CodewordCount] per
+    /// image. Both are sized from the attacker-supplied metadata strip, both recur on the
+    /// camera-rectified retry, and both were happening on every one of up to 24 workers at once,
+    /// for arrays nobody then looked at.
+    /// </summary>
+    public bool WantDetail { get; init; }
 }
