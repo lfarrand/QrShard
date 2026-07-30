@@ -278,13 +278,42 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 | `ShardFolderSuffix` | filename-safe suffix | `.shards` | Output-folder suffix when `-o` isn't given |
 | `PngCompressionLevel` | `Optimal`, `Fastest`, `SmallestSize`, `NoCompression` | `Optimal` | Deflate level for the built-in PNG writer where compression pays off (cells ≥ 2 px). 1 px cells bypass deflate entirely (stored blocks — their noise-like content is incompressible by construction) |
 | `PayloadCompressionLevel` | same four values | `Optimal` | Brotli level for compressing the file payload |
-| `EncodeMemoryBudgetMB` | 64–1000000 | 2000 | Pixel-buffer budget capping parallel encode workers |
+| `EncodeMemoryBudgetMB` | 64–1000000 | 2000 | Pixel-buffer budget capping parallel encode workers. Encode workers are additionally hard-capped at the logical core count, so raising this past what the cores can use changes nothing |
 | `DecodeMaxParallelism` | 0–1024 | 0 (auto: cores, capped at 24) | Max parallel image decodes. The cap trades throughput for memory rather than marking a plateau — at 4K, 24 workers decode ~20% faster than 16 for ~1.5 GB more peak working set, and 32 adds a further ~8% for ~0.45 GB. Raise it if you have memory to spare; lower it on memory-constrained machines |
 | `DecodeMemoryBudgetMB` | 64–1000000 | 4000 | Scratch budget for parallel decoding — the counterpart to `EncodeMemoryBudgetMB`. Workers are the lower of `DecodeMaxParallelism` and what this affords against the largest image in the set (read from its header first). A 4K frame costs ~33 MB of scratch and a 48 MP photo ~192 MB, so the default admits the full worker count for any realistic capture and binds only on far larger images |
 | `ReceiveFps` | 0–120 | 10 | Default frame rate for the live `receive` capture |
 | `WatchPollMs` | 50–60000 | 250 | Folder poll interval (ms) for `decode --watch` |
 | `ReceiveDecodeWorkers` | 0–64 | 0 (auto) | Parallel frame-decode workers for the live receiver |
 | `EncodeProfiles` | `{ "<name>": { …encode-default keys… } }` | (none) | Named encode presets selected with `--profile <name>`; each starts from `EncodeDefaults` and overrides only the keys it names |
+
+### Tuning for a large machine
+
+**The memory budgets only ever lower the worker count; neither can raise it.** Both are
+`Clamp(budget / per-worker-bytes, 1, someCap)`, so a bigger budget removes a constraint that may
+not have been binding in the first place. On a machine with plenty of RAM the budgets are almost
+never what limits you — the worker caps are:
+
+| | Worker cap | Raisable? |
+|---|---|---|
+| **Encode** | the logical core count | **No.** No setting exceeds it — more workers than cores does not help CPU-bound work |
+| **Decode** | `DecodeMaxParallelism`, default auto = `min(cores, 24)` | **Yes**, up to 1024 |
+
+So on a 32-thread machine the encoder already uses all 32 whenever memory allows, while the
+decoder stops at 24 and leaves 8 threads idle. The knob that helps is the parallelism cap, not
+the budget:
+
+```json
+{ "DecodeMaxParallelism": 32 }
+```
+
+Worth about **+8.4% median decode throughput** at 4K on a 16-core/32-thread part (measured idle,
+24 vs 32 workers) for roughly 0.45 GB more peak working set.
+
+Raising `DecodeMemoryBudgetMB` only matters if you decode images far larger than a camera
+produces — at the 500-megapixel per-image ceiling a worker holds ~2 GB, so a full pool would need
+tens of GB. That is a reasonable setting for very high-resolution scans **you produced yourself**.
+Be aware it also removes the bound for a *hostile* set: the image dimensions come from whoever
+made the shards, and that ceiling is what the budget exists to enforce.
 
 Deliberately *not* configurable: anything both sides of a transfer must agree on — frame
 geometry, metadata-strip layout, magic numbers, Reed-Solomon/GF(2⁸) parameters — plus the
