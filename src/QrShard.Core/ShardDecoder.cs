@@ -249,9 +249,14 @@ internal sealed class ShardDecoder(
         {
             image = Image.Load<Rgb24>(imageBytes);
         }
-        // NotSupportedException too: ImageSharp throws it (not ImageFormatException) for a
-        // recognized-but-unsupported image, and this in-memory path is fed attacker-controlled bytes.
-        catch (Exception ex) when (ex is ImageFormatException or NotSupportedException)
+        // Everything except the conditions that belong to the whole run, and ShardDecodeException
+        // which is already the typed failure. Enumerating types was wrong here for the same reason
+        // it was wrong in the worker-sizing probe: ImageSharp inflates ancillary PNG text chunks,
+        // so a malformed zTXt raises System.IO.InvalidDataException, which derives from
+        // SystemException and matched neither listed type. These bytes are attacker-controlled and
+        // this path has no outer net — it fed the exception straight out of the library.
+        catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException
+                                       and not ShardDecodeException)
         {
             throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
         }
@@ -351,8 +356,13 @@ internal sealed class ShardDecoder(
         // inside the try because its FileStream open throws UnauthorizedAccessException on a
         // directory/ACL path, which its own catch filter does not swallow. ToBitmap's
         // ShardDecodeException ("too large") is deliberately not in this filter, so it propagates.
-        catch (Exception ex) when (ex is ImageFormatException or IOException
-                                       or UnauthorizedAccessException or NotSupportedException)
+        // Broad by policy, not by enumeration. The list here missed InvalidDataException — raised
+        // when ImageSharp inflates a malformed zTXt chunk — and the comment above states exactly
+        // the contract that break violated. ShardDecodeException stays excluded so ToBitmap's
+        // "too large" propagates with its own message rather than being re-wrapped; OOM and
+        // cancellation stay fatal because they describe the run, not this image.
+        catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException
+                                       and not ShardDecodeException)
         {
             throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
         }
