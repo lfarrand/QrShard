@@ -160,16 +160,59 @@ internal sealed class QuadSelector(CameraMath math) : IQuadSelector
             double topLen = math.Dist(tl, tr);
             if (topLen < 1)
                 continue;
-            double step = Layout.OrientationTickOffsetModules * quad.Module / topLen;
-            var tick = (X: tl.X + (tr.X - tl.X) * step, Y: tl.Y + (tr.Y - tl.Y) * step);
-            var anti = (X: tr.X + (tl.X - tr.X) * step, Y: tr.Y + (tl.Y - tr.Y) * step);
 
-            int radius = Math.Max(2, (int)(quad.Module * 0.8));
+            // FinderDetector measures the module from HORIZONTAL scanlines, so a shard rotated
+            // in-plane by phi reports it inflated by 1/cos(phi): a row crossing a band of width m
+            // whose normal is turned away from x traverses m/cos(phi) pixels. The error folds with
+            // 90-degree symmetry (at 90 the scan simply measures the other axis), so it peaks at
+            // 45 degrees, where the module comes back 41% too large.
+            //
+            // That is not a degradation, it is a cliff. The tick sits SEVEN modules along the top
+            // edge, so a 19% overestimate displaces the probe by 1.33 modules against a disc of
+            // radius 0.8 — the disc lands entirely off the tick, DarkFraction falls under 0.6,
+            // ResolveOrientation returns null, and the capture is refused outright. Measured end
+            // to end on simulated captures, decoding failed for every rotation from 33 to 55
+            // degrees and succeeded either side of it:
+            //
+            //     rot   25   30   33   45   55   58   90
+            //           ok   ok  FAIL FAIL FAIL   ok   ok
+            //
+            // Photographing a screen at 45 degrees is an entirely ordinary thing to do, and the
+            // error it produced named nothing that would lead a user to straighten up.
+            double phi = Math.Atan2(tr.Y - tl.Y, tr.X - tl.X);
+            double folded = phi - Math.PI / 2 * Math.Round(phi / (Math.PI / 2));
+            double module = quad.Module * Math.Cos(folded);
+
+            // The tick is a fixed number of modules along the shard's top edge, which is a fact in
+            // the SHARD's plane. Walking the same FRACTION along the photo edge is only correct
+            // for an affine view -- a projective map does not preserve ratios along a line -- and
+            // the error compounds with the module one above. Map the canvas point through the same
+            // homography the rectifier will build instead.
+            double wc = (topLen + math.Dist(bl, br)) / 2;
+            double hc = (math.Dist(tl, bl) + math.Dist(tr, br)) / 2;
+            double offset = Layout.OrientationTickOffsetModules * module;
+            if (offset * 2 >= wc)
+                continue; // the tick and its mirror would cross — not a plausible labelling
+            (double X, double Y) tick, anti;
+            try
+            {
+                var h = Homography.Solve([(0, 0), (wc, 0), (wc, hc), (0, hc)], [tl, tr, br, bl]);
+                tick = h.Apply(offset, 0);
+                anti = h.Apply(wc - offset, 0);
+            }
+            catch (ShardDecodeException)
+            {
+                continue; // degenerate labelling — another rotation may still resolve
+            }
+
+            int radius = Math.Max(2, (int)(module * 0.8));
             if (DarkFraction(photo, dark, tick, radius) > 0.6 && DarkFraction(photo, dark, anti, radius) < 0.3)
             {
                 if (resolved is not null)
                     return null; // ambiguous — refuse rather than guess
-                resolved = new OrientedQuad(tl, tr, br, bl, quad.Module);
+                // The corrected module travels on, so BuildGeometry's 8-module margin and the
+                // canvas scale are sized from the real one rather than the inflated one.
+                resolved = new OrientedQuad(tl, tr, br, bl, module);
             }
         }
         return resolved;
