@@ -69,20 +69,34 @@ internal sealed class FrameEdgeTracer(CameraMath math) : IFrameEdgeTracer
         outerT = 0;
         thickness = 0;
         double search = Math.Max(12, module * 3);
-        const double step = 0.5;
 
         Span<double> lum = stackalloc double[512];
-        // Clamp SEARCH, not just the sample count. Truncating samples alone left t running down
-        // from the full +search, so the window became [search - 255.5, search] and its inward reach
-        // stopped at a fixed 255.5 px however large the module was — while the frame's inner edge
-        // sits at t = -thickness. Past roughly 6.4x photo scale at finderModule 8 (and 1.6x at 48)
-        // every sample fell outside the window, `valid` stayed 0, TraceSide returned null, and
-        // phase-2 refinement silently switched off on exactly the close-up captures it helps most.
-        // Rescaling the window keeps it centred on the edge; the cost is coarser resolution on a
-        // very large module rather than no result at all.
+        // Coarsen the STEP, never shrink the window. The window has to span the whole frame: the
+        // outer edge sits at t = +outerT and the inner one at t = -thickness, and the final check
+        // is `thickness <= search`, so any window narrower than the frame makes the trace
+        // impossible rather than imprecise.
+        //
+        // A previous fix here reached for the window because truncating the sample COUNT alone had
+        // the same effect — t ran down from the full +search and the reach stopped at a fixed
+        // 255.5 px. Its comment named the right principle, "the cost is coarser resolution on a
+        // very large module rather than no result at all", and then shrank the window anyway:
+        // `search = (maxSamples - 1) * step / 2` pins it at 127.75 px for EVERY module above 42.6.
+        // So the same failure came back at a different threshold, with a comment describing the
+        // behaviour the code does not have. Measured directly on a synthetic frame profile:
+        //
+        //     frame thickness   60   120   126   127   128   130   160
+        //     module  45        ok    ok    ok    ok  FAIL  FAIL  FAIL
+        //     module 110        ok    ok    ok    ok  FAIL  FAIL  FAIL
+        //
+        // Identical cliffs at module 45 and 110 is the signature of an absolute cap; a genuine
+        // module-relative bound would move with the module, as it correctly does at module 20
+        // (search = 60, so 120 px legitimately fails).
+        //
+        // Scaling the step keeps the window at +-3 modules always and simply samples the profile
+        // more coarsely when the module is large, which is what the subpixel `frac` interpolation
+        // degrades gracefully over.
         int maxSamples = lum.Length;
-        if ((int)(2 * search / step) + 1 > maxSamples)
-            search = (maxSamples - 1) * step / 2;
+        double step = Math.Max(0.5, 2 * search / (maxSamples - 1));
         int samples = Math.Min((int)(2 * search / step) + 1, maxSamples);
         double min = double.MaxValue, max = double.MinValue;
         for (int i = 0; i < samples; i++)
