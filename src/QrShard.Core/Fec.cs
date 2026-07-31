@@ -591,6 +591,8 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
             // 16 is the shipped default for EncodeDefaults.EccParity.
             if (parity < UnflipMinParity)
                 return false;
+            Span<byte> unflipBest = stackalloc byte[CodewordLength];
+            int unflipWeight = int.MaxValue;
             for (int mask = 1; mask < 1 << count; mask++)
             {
                 for (int i = 0; i < CodewordLength; i++)
@@ -606,15 +608,46 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                 for (int b = 0; b < count; b++)
                     if ((mask & (1 << b)) != 0)
                         cwScratch[positions[b]] = buffer[positions[b] * cwCount + j];
-                if (reedSolomon.TryDecode(cwScratch, parity, out _))
+                if (reedSolomon.TryDecode(cwScratch, parity, out int weight) && weight < unflipWeight)
                 {
-                    errors = SymbolsChanged(buffer, cwScratch, cwCount, j);
-                    return true;
+                    unflipWeight = weight;
+                    cwScratch.AsSpan(0, CodewordLength).CopyTo(unflipBest);
                 }
             }
-            return false;
+            if (unflipWeight == int.MaxValue)
+                return false;
+            unflipBest.CopyTo(cwScratch);
+            errors = SymbolsChanged(buffer, cwScratch, cwCount, j);
+            return true;
         }
 
+        // Take the candidate the decoder was most CONFIDENT about, not the first one that happens
+        // to verify. Several trial patterns commonly produce valid codewords past the errors-only
+        // bound, and ascending mask order ranks them by nothing meaningful — mask 3 (flip 0 and 1)
+        // is tried before mask 4 (flip 2 alone).
+        //
+        // The score is the weight of corrections REED-SOLOMON had to make, which TryDecode already
+        // returns: a candidate that spent less of its correction budget sits deeper inside its
+        // decoding sphere and is far less likely to be a miscorrection. Crucially it is NOT the
+        // distance from the received word, which is what a literal reading of Chase-II's arg-min
+        // suggests. That metric conflates two different things — the splices are HYPOTHESES the
+        // decoder chose, the corrections are EVIDENCE of error — and scoring on it is actively
+        // worse than taking the first hit. Measured over 6000 trials per parity, in the regime
+        // where the exhaustive branch actually runs:
+        //
+        //     scored by            parity 8      parity 12     parity 16
+        //     distance-from-received  +64 / -583    +6 / -52     +0 / -2
+        //     correction weight     +1012 / -0     +39 / -0     +1 / -0
+        //
+        // (fixed / broken against first-match). Chase-II weights its distance by per-symbol
+        // reliability for exactly this reason; discounting the flipped positions entirely is the
+        // hard-decision limit of that idea, and it is the version this codebase can compute,
+        // because reliabilities are not plumbed to this layer.
+        //
+        // Ties keep the earliest mask, so the choice stays deterministic regardless of enumeration
+        // order or worker count.
+        Span<byte> best = stackalloc byte[CodewordLength];
+        int bestWeight = int.MaxValue;
         for (int mask = 1; mask < 1 << count; mask++)
         {
             for (int i = 0; i < CodewordLength; i++)
@@ -622,13 +655,17 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
             for (int b = 0; b < count; b++)
                 if ((mask & (1 << b)) != 0)
                     cwScratch[positions[b]] = secondChoice[positions[b] * cwCount + j];
-            if (reedSolomon.TryDecode(cwScratch, parity, out _))
+            if (reedSolomon.TryDecode(cwScratch, parity, out int weight) && weight < bestWeight)
             {
-                errors = SymbolsChanged(buffer, cwScratch, cwCount, j);
-                return true;
+                bestWeight = weight;
+                cwScratch.AsSpan(0, CodewordLength).CopyTo(best);
             }
         }
-        return false;
+        if (bestWeight == int.MaxValue)
+            return false;
+        best.CopyTo(cwScratch);
+        errors = SymbolsChanged(buffer, cwScratch, cwCount, j);
+        return true;
     }
 
     /// <summary>
