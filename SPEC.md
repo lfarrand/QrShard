@@ -70,10 +70,8 @@ top band.
 
 ## 2. Metadata strip
 
-128 one-module-wide black/white cells, dark = 1, MSB-first:
+128 one-module-wide black/white cells, dark = 1, MSB-first.
 
-| Field | Bits | Meaning |
-|---|---|---|
 Three versions exist. **Encoders SHOULD emit version 4**; decoders MUST read all three.
 
 ### 2.1 Versions 2 and 3 (legacy, no error correction)
@@ -110,10 +108,10 @@ Same 128 modules, reallocated so the strip survives damage:
 | magic | 8 | `0xC5` |
 | version | 4 | `4` |
 | bitsPerCell | 4 | 1–8 |
-| gridW | 14 | data grid width in cells (≤ 16384) |
-| gridH | 14 | data grid height in cells (≤ 16384) |
+| gridW | 14 | data grid width in cells (≤ 16383) |
+| gridH | 14 | data grid height in cells (≤ 16383) |
 | cellPx | 6 | encoded cell size **minus 1** (stores 1–64) |
-| metaH | 14 | strip height / gutter, px (≤ 16384) |
+| metaH | 14 | strip height / gutter, px (≤ 16383) |
 | eccParity | 6 | RS parity per codeword **divided by 2** (stores even 0–64) |
 | interleave2 | 1 | `1` = the v2 permuted interleave of §5.2 |
 | reserved | 1 | MUST be zero |

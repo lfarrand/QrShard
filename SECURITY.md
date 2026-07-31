@@ -46,6 +46,31 @@ and nonce.
 
 ## Known advisories
 
+### Availability: a single crafted image could abort a decode (fixed in 1.6.1)
+
+Not an integrity failure — nothing decodes wrongly — but a denial of the tool's whole purpose:
+one malformed file among a folder of good captures could end the run, and the good captures were
+never written.
+
+| Defect | Affects | Fixed in |
+|---|---|---|
+| Terminal escape sequences in a header file name reaching the console unescaped | v1.0.0 – v1.4.0 | **1.5.0** |
+| `Image.Identify` in the worker-size probe raising an unlisted exception type | v1.5.2 – v1.5.2 | **1.6.0** |
+| The same, in the two single-image load paths | v1.0.0 – v1.6.0 | **1.6.1** |
+| The same, in `VideoDecoder.IsAnimatedImage` — reached by `decode` before any decoder runs | v1.0.0 – v1.6.0 | **1.6.1** |
+| The same, in `RecordingFrameSource`'s two frame loaders (no filter at all) | v1.0.0 – v1.6.0 | **1.6.1** |
+| An incomplete file discarding every complete file grouped after it | v1.0.0 – v1.6.0 | **1.6.1** |
+| Diagnostics and heatmap buffers sized from an unvalidated metadata strip | v1.3.4 – v1.6.0 | **1.6.1** |
+
+**These are all one defect wearing six hats**, and the shape is worth naming because this codebase
+keeps producing it: *a guard written for the case its author pictured, with the immediately
+neighbouring case going the other way.* The 1.6.0 fix broadened one `Image.Identify` filter and
+argued in its own comment that enumerating exception types is the wrong policy — then left three
+more call sites enumerating. Each subsequent round found the previous round's blind spot.
+
+The mitigation that has actually held is the blanket per-image `catch` in `CollectShards`: a
+policy rather than a list. Every site above now follows it.
+
 ### Integrity: a crafted shard could make a decode report success wrongly (fixed in 1.5.0)
 
 Three separate defects, all reachable from an ordinary `qrshard decode` of images the user chose

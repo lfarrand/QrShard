@@ -27,6 +27,9 @@ internal sealed class Layout
     public const int MaxResolution = 16384;
     public const int MaxCellPx = 64;
 
+    /// <summary>Largest value a 14-bit version-4 metadata field can carry.</summary>
+    public const int MaxMetaField = (1 << 14) - 1;
+
     // ---- Camera profile: finder-pattern geometry, in finder modules ----
     // A finder is the classic 7-module concentric square (3-module solid core, 1-module white
     // ring, 1-module black ring) whose row/column signature is 1:1:3:1:1. Four of them sit at
@@ -104,7 +107,12 @@ internal sealed class Layout
         int gridH = (innerHTarget - 2 * gutter - 4 * metaH) / cellPx;
         if (gridW < 16 || gridH < 16)
             throw new ArgumentException("Resolution is too small for the requested cell size.");
-        if (gridW > ushort.MaxValue || gridH > ushort.MaxValue)
+        // Version 4 narrowed these fields from 16 bits to 14; the guard kept naming ushort, a
+        // bound four times too loose for the format actually being written. Nothing can reach
+        // either today — Border 28 and metaH = innerW/100 cap gridW near 16002 at MaxResolution
+        // with cellPx 1 — but BitWriter.Write truncates silently rather than throwing, so if that
+        // headroom ever closes the failure is a corrupt strip, not an exception.
+        if (gridW > MaxMetaField || gridH > MaxMetaField || metaH > MaxMetaField)
             throw new ArgumentException("Grid dimensions exceed the encodable maximum.");
 
         var layout = new Layout
@@ -151,7 +159,7 @@ internal sealed class Layout
     // 2*metaH + gridW*cellPx / 6*metaH + gridH*cellPx. Deriving them cannot lose information,
     // because a disagreeing strip was never accepted.
     //
-    //   9 bytes  fields, 70 bits used and 2 reserved (zero)
+    //   9 bytes  fields, 71 bits used and 1 reserved (zero)
     //   2 bytes  CRC-16/CCITT over those 9
     //   5 bytes  Reed-Solomon parity over the 11 preceding, GF(2^8), the codec already in the box
     //  16 bytes  = 128 modules, unchanged
@@ -252,6 +260,23 @@ internal sealed class Layout
         return Validated(bitsPerCell, gridW, gridH, cellPx, metaH, (int)innerW, (int)innerH, eccParity, interleave2);
     }
 
+    /// <summary>
+    /// Rejects a layout whose declared grid is finer than the area it was captured into. A cell
+    /// cannot be resolved from less than one pixel, so this can only be a strip that is lying.
+    ///
+    /// Shared because it was not: GridSampler enforced it, and the diagnostics path allocated
+    /// GridW*GridH ints and rendered a GridW*6 x GridH*6 heatmap from the same unvalidated fields
+    /// several statements earlier. A 8.8 KB PNG declaring 2000x2000 produced a 12000x12000,
+    /// 4.2 MB heatmap on disk before the decoder rejected the very same layout as impossible.
+    /// </summary>
+    public void RequireResolvableIn(double innerW, double innerH)
+    {
+        if (GridW > innerW || GridH > innerH)
+            throw new ShardDecodeException(
+                $"Shard metadata declares a {GridW}x{GridH} grid, finer than the " +
+                $"{innerW}x{innerH} area it was found in; the capture cannot resolve it.");
+    }
+
     public static Layout? UnpackMetadata(ReadOnlySpan<bool> modules)
     {
         if (modules.Length != MetaModuleCount)
@@ -271,6 +296,18 @@ internal sealed class Layout
         uint version = reader.Read(4);
         if (magic != MetaMagic || version is not (MetaVersion or MetaVersionInterleave2))
             return UnpackV4(bytes);
+        // ...and if the legacy read then FAILS, still offer it to v4. Dispatching on uncorrected
+        // bytes is necessary, but it left a gap in exactly the case v4 exists for: a burst landing
+        // on byte 1 of a v4 strip can leave the magic intact and turn the version nibble into a 2
+        // or a 3, which routed the strip to a parser that cannot check its CRC — and the five
+        // parity symbols that would have repaired that nibble never ran. The image was lost to
+        // damage the format is specifically built to absorb. A legacy strip that fails its own CRC
+        // is corrupt anyway, so trying v4 second costs nothing and can only recover.
+        return UnpackLegacy(reader, bytes, version) ?? UnpackV4(bytes);
+    }
+
+    private static Layout? UnpackLegacy(BitReader reader, byte[] bytes, uint version)
+    {
         int bitsPerCell = (int)reader.Read(4);
         int gridW = (int)reader.Read(16);
         int gridH = (int)reader.Read(16);

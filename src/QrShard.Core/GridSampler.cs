@@ -48,10 +48,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         // be finer than the inner rectangle it was captured into. A real capture satisfies this
         // with room to spare (inner.W is about layout.InnerW >= GridW * CellPx); only a capture
         // downscaled past one pixel per cell trips it, and that is unrecoverable regardless.
-        if (layout.GridW > inner.W || layout.GridH > inner.H)
-            throw new ShardDecodeException(
-                $"Shard metadata declares a {layout.GridW}x{layout.GridH} grid, finer than the " +
-                $"{inner.W}x{inner.H} area it was found in; the capture cannot resolve it.");
+        layout.RequireResolvableIn(inner.W, inner.H);
         int streamLength = (int)((layout.TotalBits + 7) / 8);
         byte[] stream = scratch.ClearedCells(streamLength);
         // Ambiguity flags + second-choice values feed erasure and Chase decoding — only

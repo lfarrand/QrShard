@@ -53,7 +53,14 @@ internal sealed class VideoDecoder(
             var info = Image.Identify(path);
             return info.FrameMetadataCollection.Count > 1;
         }
-        catch (ImageFormatException)
+        // The fourth Image.Identify/Image.Load site, and the one the previous two rounds walked
+        // past. Cli dispatch calls this on the raw path BEFORE any decoder runs, so it sits
+        // outside every per-image net in ShardDecoder: a PNG with a malformed zTXt chunk raises
+        // System.IO.InvalidDataException here and `qrshard decode <that file>` died with a stack
+        // trace, while `info` and `verify` on the same file reported it cleanly. Same policy as
+        // the other three: a file this cannot identify is simply not an animation, and the decode
+        // pass that follows diagnoses it properly.
+        catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
         {
             return false;
         }
