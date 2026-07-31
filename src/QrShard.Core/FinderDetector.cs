@@ -89,7 +89,20 @@ internal sealed class FinderDetector : IFinderDetector
         if (!RunOutward(dark, w, h, x, top, -1, module) || !RunOutward(dark, w, h, x, bottom, +1, module))
             return false;
 
-        cy = (top + bottom) / 2.0;
+        // +1 because top and bottom are INCLUSIVE pixel indices: the run covers [top, bottom+1) in
+        // the continuous coordinates everything downstream uses, so its centre is one half-pixel
+        // further down than the midpoint of the two indices. The line computing `center` above
+        // already carries that +1; this one did not, and the two sit four lines apart.
+        //
+        // The horizontal scan was never wrong, because it works from run LENGTHS rather than
+        // indices and l2/2 carries the +1 implicitly. So the detector disagreed with itself about
+        // where a pixel is, by axis: measured against ground truth on a synthetic capture, every
+        // finder came back dx=+0.0000, dy=-0.5000.
+        //
+        // It fed Homography.Solve as a photo corner, so every rectified canvas inherited the same
+        // half-pixel shift. At the 1-3 px cell sizes this tool encodes at, that is a real fraction
+        // of the sampling margin spent on nothing.
+        cy = (top + bottom + 1) / 2.0;
         return true;
 
         // From just past the center run: expect ~1 module light then ~1 module dark.
