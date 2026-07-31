@@ -551,7 +551,10 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     ? secondChoice[idx]
                     : buffer[idx];
             }
-            return reedSolomon.TryDecode(cwScratch, parity, out errors);
+            if (!reedSolomon.TryDecode(cwScratch, parity, out _))
+                return false;
+            errors = SymbolsChanged(buffer, cwScratch, cwCount, j);
+            return true;
         }
 
         for (int mask = 1; mask < 1 << count; mask++)
@@ -561,10 +564,46 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
             for (int b = 0; b < count; b++)
                 if ((mask & (1 << b)) != 0)
                     cwScratch[positions[b]] = secondChoice[positions[b] * cwCount + j];
-            if (reedSolomon.TryDecode(cwScratch, parity, out errors))
+            if (reedSolomon.TryDecode(cwScratch, parity, out _))
+            {
+                errors = SymbolsChanged(buffer, cwScratch, cwCount, j);
                 return true;
+            }
         }
         return false;
+    }
+
+    /// <summary>
+    /// Symbols the decode actually changed: the Hamming distance from the RECEIVED codeword to the
+    /// decoded one. Chase must report this rather than the inner decoder's count, because the
+    /// symbols it splices in from the second-choice stream are corrections — they are precisely the
+    /// difference between what the classifier read and what was transmitted — and the inner decoder
+    /// never sees them. It is handed the already-spliced word.
+    ///
+    /// In the all-flip branch that splice frequently makes the word syndrome-clean, so TryDecode
+    /// returns true with correctedErrors == 0 and a codeword rescued from dozens of misread symbols
+    /// reported none. Measured at parity 16, second choice holding the true value:
+    ///
+    ///     symbols wrong    3    6   10   25   60
+    ///     reported         3    6   10    0    0
+    ///
+    /// The first three are the errors-only and erasure paths, which count correctly; the last two
+    /// are Chase, past the point where the erasure retry can take the job.
+    ///
+    /// It is not a cosmetic miscount. CalibrationRunner divides CorrectedBytes by the parity budget
+    /// to score a capture's ECC utilisation and recommends a DENSER setting when that comes back
+    /// low — so a capture rescued at the very last resort scored 0% and was advised to push
+    /// further. The quality heatmap read the same zero and drew every codeword clean.
+    ///
+    /// One 255-byte pass, on a path that has just run up to 63 Reed-Solomon decodes.
+    /// </summary>
+    private static int SymbolsChanged(byte[] buffer, byte[] cwScratch, int cwCount, int j)
+    {
+        int changed = 0;
+        for (int i = 0; i < CodewordLength; i++)
+            if (cwScratch[i] != buffer[i * cwCount + j])
+                changed++;
+        return changed;
     }
 
     private bool TryErasureRetry(byte[] buffer, int parity, int cwCount, int j, byte[] cwScratch,
