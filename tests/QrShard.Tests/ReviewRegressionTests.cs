@@ -278,4 +278,40 @@ public class ReviewRegressionTests
         Assert.DoesNotContain(ex!.Message, c => char.IsControl(c));
         Assert.Contains("evil.bin", ex.Message);
     }
+
+    [Fact]
+    public void ASingleUnreadableImage_SurfacesAsATypedFailureNotACrash()
+    {
+        // The seventh instance of the same pattern. The previous round broadened the exception
+        // filter in the worker-sizing probe, and argued in its own comment that enumerating types
+        // is the wrong policy because Image.Identify inflates ancillary chunks and raises
+        // System.IO.InvalidDataException, which derives from SystemException rather than
+        // IOException. That argument applies verbatim to the two ImageSharp entry points sixty and
+        // a hundred and fifty lines away in the same file, and neither was touched.
+        //
+        // LoadBitmap's own comment states the contract: these "must all surface as the typed
+        // decode failure - so the session API returns an error result ... never leak a raw
+        // exception". InvalidDataException broke it, so `qrshard info`, `qrshard calibrate` and
+        // QrShardDecodeSession.AddImage all died with a stack trace on one crafted file.
+        //
+        // The batch path was already safe, via the blanket per-image catch in CollectShards -
+        // which is why the previous round's test passed while both single-image paths crashed.
+        using var tmp = new TempDir();
+        string path = tmp.File("evil.png");
+        File.WriteAllBytes(path, PngWithCorruptZtxt());
+
+        var fromFile = Record.Exception(() => new ShardDecoder().DecodeImage(path));
+        Assert.IsType<ShardDecodeException>(fromFile);
+
+        var fromBytes = Record.Exception(() => new QrShardDecodeSession().AddImageBytes(PngWithCorruptZtxt()));
+        Assert.Null(fromBytes); // the session API reports, it does not throw
+    }
+
+    [Fact]
+    public void TheSessionApiReportsAnUnreadableImageRatherThanThrowing()
+    {
+        var result = new QrShardDecodeSession().AddImageBytes(PngWithCorruptZtxt());
+        Assert.False(result.Accepted);
+        Assert.False(string.IsNullOrWhiteSpace(result.Error));
+    }
 }
