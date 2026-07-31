@@ -18,7 +18,18 @@ internal sealed class RecordingFrameSource : IFrameSource
 
     private static IEnumerable<Bitmap> AnimatedImageFrames(string path)
     {
-        using var image = Image.Load<Rgb24>(path);
+        // Fifth site. Same hostile bytes as the folder path, and it had no filter at all.
+        Image<Rgb24> image;
+        try
+        {
+            image = Image.Load<Rgb24>(path);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException
+                                       and not ShardDecodeException)
+        {
+            throw new ShardDecodeException($"'{Path.GetFileName(path)}' is not a readable image ({ex.Message}).");
+        }
+        using (image)
         for (int i = 0; i < image.Frames.Count; i++)
         {
             var frame = image.Frames[i];
@@ -80,10 +91,22 @@ internal sealed class RecordingFrameSource : IFrameSource
                 if (!ReadExactly(stdout, bmp.AsSpan(6, size - 6)))
                     break;
 
-                using var image = Image.Load<Rgb24>(bmp);
-                var px = new Rgb24[image.Width * image.Height];
-                image.CopyPixelDataTo(px);
-                yield return new Bitmap(px, image.Width, image.Height);
+                // Sixth site. A torn or truncated frame is a NORMAL event in a screen recording,
+                // so this one skips rather than throws: ending the enumeration here would discard
+                // every shard already collected from the recording.
+                Bitmap decoded;
+                try
+                {
+                    using var image = Image.Load<Rgb24>(bmp);
+                    var px = new Rgb24[image.Width * image.Height];
+                    image.CopyPixelDataTo(px);
+                    decoded = new Bitmap(px, image.Width, image.Height);
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
+                {
+                    continue;
+                }
+                yield return decoded;
             }
         }
         finally

@@ -25,9 +25,31 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         if (outputPath is not null && groups.Count > 1)
             throw new ShardDecodeException("The images belong to multiple different files; omit -o or decode them separately.");
 
+        // Attempt EVERY group before reporting, then rethrow the first failure. Throwing from
+        // inside the loop meant one incomplete file discarded every complete file that happened to
+        // be grouped after it: with a partial capture of A and a whole capture of B in one folder,
+        // the tool printed "'B': 1/1 data — recoverable ✓" and then wrote nothing at all. Which
+        // file survived was decided by shard order, i.e. by filename. Cli's own comment on the
+        // call site already promised the behaviour implemented here — "so a folder mixing a
+        // complete file with an incomplete one still yields the complete one on disk" — and that
+        // was true only when the complete one sorted first.
         var restored = new List<RestoredFile>();
+        ShardDecodeException? failure = null;
         foreach (var group in groups)
-            restored.Add(Reassemble([.. group], outputPath, log, password));
+        {
+            try
+            {
+                restored.Add(Reassemble([.. group], outputPath, log, password));
+            }
+            catch (ShardDecodeException ex)
+            {
+                failure ??= ex;
+            }
+        }
+        // Reassemble writes each file as it goes, so everything recoverable is already on disk by
+        // the time this throws; the caller reports the failure and the user keeps the good files.
+        if (failure is not null)
+            throw failure;
         return restored;
     }
 

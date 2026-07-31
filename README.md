@@ -263,7 +263,9 @@ that path — so listing them would be a guess.
 ## Configuration (appsettings.json)
 
 An optional `appsettings.json` next to the executable holds preferences and machine tuning.
-Comments are allowed in it and every value is documented inline there. Precedence: **CLI flag >
+Comments are allowed in it, and the settings it ships with are documented inline there
+(`ReceiveFps`, `ReceiveDecodeWorkers` and `WatchPollMs` are accepted but not listed in the sample;
+the table below is the complete set). Precedence: **CLI flag >
 appsettings.json > built-in default**. Invalid values fail loudly, naming the setting.
 
 | Setting | Supported values | Default | Description |
@@ -280,8 +282,8 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 | `PayloadCompressionLevel` | same four values | `Optimal` | Brotli level for compressing the file payload |
 | `EncodeMemoryBudgetMB` | 64–1000000 | 2000 | Pixel-buffer budget capping parallel encode workers. Encode workers are additionally hard-capped at the logical core count, so raising this past what the cores can use changes nothing |
 | `DecodeMaxParallelism` | 0–1024 | 0 (auto: cores, capped at 24) | Max parallel image decodes. The cap trades throughput for memory rather than marking a plateau — at 4K, 24 workers decode ~20% faster than 16 for ~1.5 GB more peak working set, and 32 adds a further ~8% for ~0.45 GB. Raise it if you have memory to spare; lower it on memory-constrained machines |
-| `DecodeMemoryBudgetMB` | 64–1000000 | 4000 | Scratch budget for parallel decoding — the counterpart to `EncodeMemoryBudgetMB`. Workers are the lower of `DecodeMaxParallelism` and what this affords against the largest image in the set (read from its header first). A 4K frame costs ~33 MB of scratch and a 48 MP photo ~192 MB, so the default admits the full worker count for any realistic capture and binds only on far larger images |
-| `ReceiveFps` | 0–120 | 10 | Default frame rate for the live `receive` capture |
+| `DecodeMemoryBudgetMB` | 64–1000000 | 4000 | Scratch budget for parallel decoding — the counterpart to `EncodeMemoryBudgetMB`. Workers are the lower of `DecodeMaxParallelism` and what this affords against the largest image in the set (read from its header first). A 4K frame costs ~199 MB of scratch and a 48 MP photo ~1.15 GB — dominated by the binarizer's two 8-byte-per-pixel integral images — so the default admits ~20 workers at 4K and ~3 on phone-sized photos. Raise it if you have memory to spare |
+| `ReceiveFps` | >0–120 | 10 | Default frame rate for the live `receive` capture |
 | `WatchPollMs` | 50–60000 | 250 | Folder poll interval (ms) for `decode --watch` |
 | `ReceiveDecodeWorkers` | 0–64 | 0 (auto) | Parallel frame-decode workers for the live receiver |
 | `EncodeProfiles` | `{ "<name>": { …encode-default keys… } }` | (none) | Named encode presets selected with `--profile <name>`; each starts from `EncodeDefaults` and overrides only the keys it names |
@@ -496,8 +498,9 @@ Six independent layers, from within-cell to whole-transfer:
    protected from both directions: a mark across **one** copy is rejected as damage rather than
    mistaken for illumination — a shadow displaces one entry, where lighting moves them all
    together — so the healthy copy is used alone instead of being averaged with the bad one; and
-   if **both** copies come back with entries collapsed onto each other, the decoder falls back to
-   the theoretical palette, which SPEC §3 derives from the bit depth without reading anything
+   if the **better-scoring** copy still has entries collapsed onto each other — which is only
+   possible when both are damaged, since the better one is chosen first — the decoder falls back
+   to the theoretical palette, which SPEC §3 derives from the bit depth without reading anything
    from the image.
 
 Parity/fountain images are self-labelling and carry the stripe geometry in every header, so the
@@ -710,8 +713,8 @@ charts are emitted with every presentation attribute inlined — GitHub's SVG sa
 
 - **One flat parallel loop over all images** (data + parity together, no phase barrier), with a
   **thread-local pixel canvas** per worker. Worker count adapts to the configured pixel budget.
-- **Custom fast PNG writer AND reader** ([FastPng.cs](src/QrShard/FastPng.cs),
-  [FastPngReader.cs](src/QrShard/FastPngReader.cs)): the writer streams one IDAT straight from
+- **Custom fast PNG writer AND reader** ([FastPng.cs](src/QrShard.Core/FastPng.cs),
+  [FastPngReader.cs](src/QrShard.Core/FastPngReader.cs)): the writer streams one IDAT straight from
   the render buffer (row-blit rendering, Up filter — or raw *stored* deflate blocks for
   incompressible 1 px cells); the reader handles the truecolor subset every screenshot tool
   emits, ~2x faster than a general decoder, falling back to ImageSharp for anything else.
@@ -779,7 +782,7 @@ https://sixlabors.com/pricing/) and either drop `sixlabors.lic` at the solution 
 `SIXLABORS_LICENSE_KEY` repository secret). The license is build-time only; published binaries
 and end users need nothing.
 
-- `dotnet test` — the xUnit suite, 683 tests in ~20 s. Covers the codec math (CRC vectors, GF(2⁸) field
+- `dotnet test` — the xUnit suite, 691 tests in ~20 s. Covers the codec math (CRC vectors, GF(2⁸) field
   laws, Reed-Solomon incl. errors-and-erasures, interleaving, Cauchy and fountain erasure
   codes), round trips across every density/ECC/format/flag combination, simulated screenshots
   and camera photos, non-truecolor capture shapes, video recordings (duplicates, torn frames,

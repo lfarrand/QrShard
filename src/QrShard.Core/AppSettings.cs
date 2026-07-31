@@ -47,10 +47,13 @@ internal sealed class AppSettings
     /// Memory budget (MB) for the decoder's per-worker scratch buffers — the counterpart to
     /// <see cref="EncodeMemoryBudgetMB"/>, which the decode side did not have.
     ///
-    /// The default admits the full worker count for any realistic capture (a 4K frame costs about
-    /// 33 MB of scratch, a 48-megapixel phone photo about 192 MB) and only starts trading workers
-    /// away well beyond that. It bounds the case where the image dimensions are the attacker's
-    /// choice rather than a camera's.
+    /// A 4K frame costs about 199 MB of scratch and a 48-megapixel phone photo about 1.15 GB, so
+    /// the default affords roughly 20 workers at 4K and about 3 on phone-sized photos. The figures
+    /// were 33 MB and 192 MB until the estimate was corrected: it counted 4 bytes per pixel and
+    /// omitted the adaptive binarizer's two 8-byte-per-pixel integral images, which dominate it.
+    /// Under-counting here is the dangerous direction, since the budget exists to stop the workers
+    /// collectively committing to an image they cannot afford. It bounds the case where the image
+    /// dimensions are the attacker's choice rather than a camera's.
     /// </summary>
     public int DecodeMemoryBudgetMB { get; private set; } = 4000;
 

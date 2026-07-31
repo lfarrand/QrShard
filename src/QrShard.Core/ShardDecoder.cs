@@ -373,7 +373,26 @@ internal sealed class ShardDecoder(
     /// plus the flood-fill visited map (1). The grid-sized buffers are smaller by the cell size
     /// and are not the term that matters.
     /// </summary>
-    private const int ScratchBytesPerPixel = 4;
+    // Counted, not guessed. 4 was an undercount by roughly 6x, which matters because the whole
+    // point of this budget is to stop 24 workers deciding together that they can afford an image
+    // they cannot. Concurrently live, per source pixel:
+    //
+    //     3   ImageSharp's own Image<Rgb24>, live while ToBitmap copies out of it
+    //     3   DecodeScratch.Pixels (Rgb24)
+    //     1   DecodeScratch.ClearedVisited (bool)
+    //     1   AdaptiveBinarizer lum (byte)
+    //    16   AdaptiveBinarizer integral + integralSq (two long[], 8 bytes each)
+    //     1   AdaptiveBinarizer dark (bool)
+    //    ---
+    //    25   and the camera path adds another Rgb24 canvas on top of this
+    //
+    // The two Sauvola integral images dominate and were simply never in the estimate. 24 is one
+    // shy of the count above because ImageSharp's copy is released before the binarizer allocates
+    // in the common path; it is a floor, not a ceiling, and the camera path exceeds it. The exact
+    // peak is worth measuring on an idle machine — this project does not quote unmeasured numbers
+    // — but no measurement is needed to know 4 was wrong: Pixels alone is 3 and never travels
+    // alone.
+    private const int ScratchBytesPerPixel = 24;
 
     /// <summary>
     /// Worker count for a decode, capped by a memory budget as well as by parallelism.
@@ -456,6 +475,10 @@ internal sealed class ShardDecoder(
     private DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path, DecodeDiagnostics? diagnostics)
     {
         var (layout, inner) = frameLocator.Locate(bmp, scratch);
+        // BEFORE anything is sized from it. This check used to live only in ReadDataGrid, three
+        // statements further on, so the diagnostics allocation below and every heatmap downstream
+        // of it were sized from a strip nothing had yet called impossible.
+        layout.RequireResolvableIn(inner.W, inner.H);
         // Capture per-cell classification margins for diagnostics only — the frame located, so a
         // quality heatmap can show WHERE a capture is weak even if the grid decode later fails.
         int[]? cellMargins = diagnostics is { WantDetail: true } ? new int[(long)layout.GridW * layout.GridH] : null;

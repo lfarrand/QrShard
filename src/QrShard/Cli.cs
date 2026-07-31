@@ -16,9 +16,16 @@ internal sealed class Cli(AppSettings? settings = null)
     {
         var @out = stdout ?? Console.Out;
         var err = stderr ?? Console.Error;
-        var cfg = settings ?? AppSettings.Current;
         try
         {
+            // Inside the try, not before it. AppSettings.Load raises InvalidOperationException with
+            // a message written to be read by a user — "appsettings.json: invalid
+            // DecodeMaxParallelism '99999'. Possible values: 0 (auto) to 1024." — and
+            // InvalidOperationException is in the Handled list below. Evaluating it one line
+            // earlier meant that carefully worded message was delivered as an unhandled crash with
+            // a stack trace and a 0xE0434352 exit code that appears in no documentation, which is
+            // the opposite of the "fail loudly, naming the setting" contract README states.
+            var cfg = settings ?? AppSettings.Current;
             using var provider = ServiceRegistration.BuildProvider(cfg);
             var services = new CliServices(
                 provider.GetRequiredService<IShardEncoder>(),
@@ -274,6 +281,11 @@ internal sealed class Cli(AppSettings? settings = null)
                         return 3;
                     }
                     PrintSetStatus(@out.WriteLine, shards, services.Parity);
+                    // The underlying message, always. This branch assumed the failure was always
+                    // "images are missing", so decoding a mixed folder with -o reported "capture
+                    // the missing images" when the actual fault was "omit -o and decode them
+                    // separately" — advice that cannot fix it, for a set that was not incomplete.
+                    err.WriteLine($"error: {ex.Message}");
                     @out.WriteLine("Incomplete — some images are missing or unreadable. Capture them and decode again, or:");
                     @out.WriteLine("  • add --session <file> to accumulate captures across sittings (resumes from what you have),");
                     @out.WriteLine("  • or --watch to decode images as they land and finish automatically.");
@@ -407,7 +419,10 @@ internal sealed class Cli(AppSettings? settings = null)
                 if (h.StripeParity > 0)
                     @out.WriteLine($"recovery  : {h.StripeParity} parity per {h.StripeData} data images per stripe");
                 @out.WriteLine($"ecc       : {(shard.EccParity > 0 ? $"RS parity {shard.EccParity}, corrected {shard.CorrectedBytes} byte(s)" : "none")}");
-                @out.WriteLine($"original  : {h.OriginalLength:N0} bytes{((h.Flags & ShardHeader.FlagCompressed) != 0 ? $", deflate-compressed to {h.TotalLength:N0}" : "")}");
+                // The label has to follow FlagBrotli. Hardcoding "deflate" mislabelled every
+                // compressed shard a current encoder produces, since Brotli is the default.
+                string codec = (h.Flags & ShardHeader.FlagBrotli) != 0 ? "brotli" : "deflate";
+                @out.WriteLine($"original  : {h.OriginalLength:N0} bytes{((h.Flags & ShardHeader.FlagCompressed) != 0 ? $", {codec}-compressed to {h.TotalLength:N0}" : "")}");
                 @out.WriteLine($"sha-256   : {Convert.ToHexStringLower(h.Sha256)}");
                 return 0;
             }
