@@ -215,8 +215,20 @@ internal sealed class Layout
             return null;
 
         var reader = new BitReader(strip);
-        reader.Read(8);                       // magic, already matched by the caller
-        reader.Read(4);                       // version, likewise
+        // Both MUST be checked here, and the comments that used to sit on these two lines claimed
+        // the caller had already matched them. It has not: UnpackMetadata dispatches to this
+        // method precisely BECAUSE the raw bytes did not look like v2 or v3, which is what lets a
+        // damaged magic or version be repaired. So the check has to happen after correction, and
+        // it was simply missing.
+        //
+        // The consequence is worse than a lax magic. SPEC section 2.2 requires unknown versions to
+        // be rejected — that nibble is the format's capability field, and the whole reason a v4
+        // strip is refused by older builds. Without this, a future version 5 strip whose CRC
+        // happens to verify would be silently PARSED AS v4 by this decoder: fields read at the
+        // wrong offsets, geometry wrong, and no error. Rejecting unknown versions is what makes
+        // adding version 5 safe later.
+        if (reader.Read(8) != MetaMagic || reader.Read(4) != MetaVersionFec)
+            return null;
         int bitsPerCell = (int)reader.Read(4);
         int gridW = (int)reader.Read(14);
         int gridH = (int)reader.Read(14);

@@ -145,7 +145,12 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
 
         if (archive)
         {
-            string destDir = outputPath ?? Path.Combine(Environment.CurrentDirectory, SafeDirectoryName(first.FileName));
+            // Collision avoidance was added to the single-file path and stopped two lines short of
+            // this one. The archive branch extracts with overwrite: true, so two groups sharing a
+            // header FileName landed in the identical directory and the later one silently
+            // replaced the earlier one's files. Not exotic: every multi-input encode is named
+            // "bundle", so any two `qrshard encode a b c` sets decoded together collide by default.
+            string destDir = outputPath ?? FreeDirectory(SafeDirectoryName(first.FileName));
             try
             {
                 ExtractTar(outPath, destDir);
@@ -321,6 +326,28 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         }
         throw new ShardDecodeException(
             $"Cannot find a free output name for '{safe}' — 10,000 variants already exist. Pass -o explicitly.");
+    }
+
+    /// <summary>
+    /// An extraction directory that does not already exist, counting like the single-file path
+    /// does. An EMPTY existing directory is reused: `qrshard decode` into a folder the user made
+    /// themselves is normal, and diverting to "name.restored" there would be surprising. Only a
+    /// directory with something in it is treated as occupied.
+    /// </summary>
+    private static string FreeDirectory(string stem)
+    {
+        string first = Path.Combine(Environment.CurrentDirectory, stem);
+        if (!Directory.Exists(first) || !Directory.EnumerateFileSystemEntries(first).Any())
+            return first;
+        for (int n = 1; n < 10_000; n++)
+        {
+            string candidate = Path.Combine(Environment.CurrentDirectory,
+                n == 1 ? $"{stem}.restored" : $"{stem}.restored-{n}");
+            if (!Directory.Exists(candidate) || !Directory.EnumerateFileSystemEntries(candidate).Any())
+                return candidate;
+        }
+        throw new ShardDecodeException(
+            $"Cannot find a free extraction directory for '{stem}' — 10,000 variants are already in use. Pass -o explicitly.");
     }
 
     private static void TryDeleteDirectory(string path)

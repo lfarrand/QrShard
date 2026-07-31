@@ -38,6 +38,18 @@ internal sealed class DecodeDiagnostics
     /// <summary>Copy of the sampled cell stream when the decode failed after grid sampling — fusion input.</summary>
     public byte[]? Cells { get; set; }
 
+    /// <summary>
+    /// The Layout that produced <see cref="Cells"/>, captured at the same instant.
+    ///
+    /// <see cref="Layout"/> is overwritten on every decode attempt, but Cells deliberately keeps
+    /// the FIRST failing attempt's buffer. An image that fails axis-aligned and then fails again
+    /// after camera rectification has two independent layouts — both read from attacker-controlled
+    /// metadata strips on different regions of the image — so pairing the later Layout with the
+    /// earlier Cells described a buffer that was never sized for it, and PhotoFusion indexes by
+    /// the layout it is handed.
+    /// </summary>
+    public Layout? CellsLayout { get; set; }
+
     /// <summary>Per-cell classification margin (squared palette distance of the winning sample),
     /// captured even when the decode fails — drives the capture-quality heatmap.</summary>
     public int[]? CellMargins { get; set; }

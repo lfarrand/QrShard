@@ -163,7 +163,7 @@ so the rest of the desktop is never captured or scanned.
 | `--slideshow <kind>` | `html`, `apng` | `html` | With `--video`: a self-contained `slideshow.html` page, or a single animated PNG (`slideshow.apng`) cycling the shards — useful where one media file is easier to display/record than a browser page |
 | `--open` | flag | off | With `--video`: open the slideshow in the default browser once encoding finishes. `qrshard send` is exactly `encode --video --open` |
 | `-i, --interval <ms>` | ≥ 100 | 500 | Slideshow interval per image (both slideshow kinds) |
-| `--interleave2` | flag | off | v2 permuted interleave: spreads **vertical** damage (a horizontal banner/overlay) across codewords as well as horizontal. Needs ECC; rides a metadata-version nibble so older decoders reject it rather than misread |
+| `--interleave2` | flag | off | v2 permuted interleave: spreads **vertical** damage (a horizontal banner/overlay) across codewords as well as horizontal. Needs ECC. Signalled by a metadata field from version 4 onward (it rode the version nibble in v3), so a decoder that cannot read it rejects the strip rather than misreading it |
 | `--profile <name>` | a name in `appsettings.json` `EncodeProfiles` | — | Apply a named encode preset (see [Configuration](#configuration-appsettingsjson)); explicit flags still override it |
 | `--json` | flag | off | Emit the encode result (image/parity counts, geometry, file list, slideshow path) as JSON on stdout instead of the human summary |
 | `--dry-run` | flag | off | Print the exact image count and geometry — computed after compression, without rendering — then exit. A guardrail before a large folder silently emits hundreds of PNGs. Honors `--json` |
@@ -321,6 +321,22 @@ decoder's detection heuristics. Those are protocol, not preference. Shards carry
 flags from a newer QrShard fail with an explicit "update QrShard" error rather than decoding
 wrong.
 
+### Version compatibility
+
+Old shards decode on new readers, always: the golden fixtures pin every released minor line
+against the current decoder, and that direction is a hard commitment.
+
+**The reverse is not, and 1.6.0 broke it.** Its metadata strip carries error correction and
+declares version 4, which readers older than 1.6.0 reject outright — deliberately, since the
+version nibble is the format's capability field and guessing at an unknown one is how a decoder
+silently produces the wrong bytes. So:
+
+> **Upgrade the receiver first, or upgrade both ends together.** A sender on 1.6.0 talking to a
+> receiver on 1.5.x produces images the receiver cannot read.
+
+Header *flags* extend compatibly by contrast — unknown bits are rejected without a version
+change, which is why new features usually cost nothing here.
+
 ## Capacity and throughput
 
 Per image (with the default ECC): `bytes ≈ grid cells × bits/cell / 8 × 239/255 − ~100`
@@ -476,9 +492,13 @@ Six independent layers, from within-cell to whole-transfer:
    them instead of picking one. Both copies sit at the same x as each other, though, so one
    narrow vertical mark can reach the same place in both — which is why neither strip relies on
    the duplication alone. The metadata strip carries Reed-Solomon parity of its own (metadata
-   version 4), correcting a burst across two of its sixteen symbols; and if both palette copies
-   come back with entries collapsed onto each other, the decoder falls back to the theoretical
-   palette, which SPEC §3 derives from the bit depth without reading anything from the image.
+   version 4), correcting a burst across two of its sixteen symbols. The palette strips are
+   protected from both directions: a mark across **one** copy is rejected as damage rather than
+   mistaken for illumination — a shadow displaces one entry, where lighting moves them all
+   together — so the healthy copy is used alone instead of being averaged with the bad one; and
+   if **both** copies come back with entries collapsed onto each other, the decoder falls back to
+   the theoretical palette, which SPEC §3 derives from the bit depth without reading anything
+   from the image.
 
 Parity/fountain images are self-labelling and carry the stripe geometry in every header, so the
 decoder discovers the recovery layout from any surviving image. Shards are order-independent,
@@ -759,7 +779,7 @@ https://sixlabors.com/pricing/) and either drop `sixlabors.lic` at the solution 
 `SIXLABORS_LICENSE_KEY` repository secret). The license is build-time only; published binaries
 and end users need nothing.
 
-- `dotnet test` — the xUnit suite, 610 tests in ~20 s. Covers the codec math (CRC vectors, GF(2⁸) field
+- `dotnet test` — the xUnit suite, 683 tests in ~20 s. Covers the codec math (CRC vectors, GF(2⁸) field
   laws, Reed-Solomon incl. errors-and-erasures, interleaving, Cauchy and fountain erasure
   codes), round trips across every density/ECC/format/flag combination, simulated screenshots
   and camera photos, non-truecolor capture shapes, video recordings (duplicates, torn frames,
