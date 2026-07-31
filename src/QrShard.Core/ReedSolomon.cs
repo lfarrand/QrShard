@@ -220,19 +220,29 @@ internal sealed class ReedSolomon
     }
 
     /// <summary>
-    /// Errors-AND-erasures decoding: positions in <paramref name="erasures"/> are known-suspect
-    /// symbols (their received values may still be right — magnitude 0 corrections are fine).
-    /// Capacity: 2·errors + erasures ≤ nsym, i.e. a flagged symbol costs half an unknown error.
-    /// Implemented as Berlekamp-Massey seeded with the erasure locator Γ(x) = Π(1 - X_k x)
-    /// (Blahut), after which Chien/Forney/verify run exactly as in <see cref="TryDecode"/>.
-    /// </summary>
-    /// <summary>
     /// Syndromes never spent on erasure correction, reserved for verifying the result. Reed-Solomon
     /// cannot detect every miscorrection beyond its bound, but decoding with the entire budget
     /// consumed makes a wrong answer *certain* to pass rather than merely possible.
     /// </summary>
     internal const int VerificationMargin = 2;
 
+    /// <summary>
+    /// Errors-AND-erasures decoding: positions in <paramref name="erasures"/> are known-suspect
+    /// symbols (their received values may still be right — magnitude 0 corrections are fine).
+    ///
+    /// Capacity: 2·errors + erasures ≤ nsym − <see cref="VerificationMargin"/>. That is TWO SHORT
+    /// of the classical 2·errors + erasures ≤ nsym, deliberately, and the shortfall is enforced at
+    /// the guard in this method rather than being advisory — see the comment there. The classical
+    /// figure is what this comment used to state, from a position where it documented neither
+    /// method: it sat above the VerificationMargin field with a second summary beneath it, so both
+    /// bound to the field, this method had no documentation at all, and the surviving text
+    /// promised a capacity the code refuses. `dotnet build -p:GenerateDocumentationFile=true`
+    /// named it as CS1734 the whole time; the package does not generate documentation, so nobody
+    /// saw it. README §Resilience had it right.
+    ///
+    /// Implemented as Berlekamp-Massey seeded with the erasure locator Γ(x) = Π(1 - X_k x)
+    /// (Blahut), after which Chien/Forney/verify run exactly as in <see cref="TryDecode"/>.
+    /// </summary>
     public bool TryDecodeWithErasures(Span<byte> codeword, int nsym, ReadOnlySpan<int> erasures, out int correctedErrors)
     {
         correctedErrors = 0;

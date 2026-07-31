@@ -572,9 +572,12 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     {
         errors = 0;
 
-        // Collect this codeword's flagged symbols, up to the full erasure capacity: f = parity
-        // still decodes when every real error is marked, and when it isn't the attempt simply
-        // fails — the same outcome as not trying.
+        // Collect this codeword's flagged symbols, up to the capacity the decoder will actually
+        // honour — which is NOT the full erasure capacity. This comment used to say "f = parity
+        // still decodes when every real error is marked", and that has been impossible since the
+        // verification margin landed: the clamp four lines below caps f at parity − 2, and
+        // ReedSolomon refuses 2·errors + erasures > nsym − 2 regardless. Two comments in one
+        // method disagreeing about the same bound, with the correct one immediately below.
         Span<int> erasures = stackalloc int[MaxParity];
         int f = 0;
         // Matches the decoder's own ceiling: erasure correction that spends every syndrome leaves
