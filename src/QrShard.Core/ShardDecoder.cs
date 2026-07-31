@@ -215,19 +215,26 @@ internal sealed class ShardDecoder(
             {
                 diagnostics.Shard = DecodeBitmap(bmp, scratch, path, diagnostics);
             }
-            catch (ShardDecodeException)
+            catch (ShardDecodeException axisAlignedError)
             {
                 Bitmap? rectified;
+                string? cameraRefusal = null;
                 try
                 {
                     rectified = cameraRectifier.TryRectify(bmp);
                 }
-                catch (ShardDecodeException)
+                catch (ShardDecodeException ex)
                 {
+                    // Keep WHY the camera path declined. Swallowing it discarded the only message
+                    // that named something the user could act on — see the note at the sibling
+                    // site in DecodeImage.
                     rectified = null;
+                    cameraRefusal = ex.Message;
                 }
                 if (rectified is null)
-                    throw;
+                    throw cameraRefusal is null
+                        ? axisAlignedError
+                        : new ShardDecodeException($"{axisAlignedError.Message} (camera capture: {cameraRefusal})");
                 diagnostics.Shard = DecodeBitmap(rectified, scratch, path, diagnostics);
             }
         }
@@ -279,16 +286,31 @@ internal sealed class ShardDecoder(
         catch (ShardDecodeException axisAlignedError)
         {
             Bitmap? rectified;
+            string? cameraRefusal = null;
             try
             {
                 rectified = cameraRectifier.TryRectify(bmp);
             }
-            catch (ShardDecodeException)
+            catch (ShardDecodeException ex)
             {
+                // The camera path can decline for a reason the user can act on, and the message
+                // saying so was being thrown away. AdaptiveBinarizer refuses a photo over 80
+                // megapixels with "Image is WxH; too large for camera-capture binarization ...
+                // Crop closer to the shard, or capture at a lower resolution." — composed
+                // deliberately, and then unreachable, because all three TryRectify call sites
+                // swallowed it and rethrew the axis-aligned error instead. A real 9000x9000 photo
+                // reported "Could not locate the black frame", which is both wrong and unhelpful.
+                //
+                // The same file is explicit that the OTHER "too large" refusal, ToBitmap's, is
+                // deliberately allowed to propagate. One oversize message was preserved on purpose
+                // and its neighbour discarded unconditionally.
                 rectified = null;
+                cameraRefusal = ex.Message;
             }
             if (rectified is null)
-                throw;
+                throw cameraRefusal is null
+                    ? axisAlignedError
+                    : new ShardDecodeException($"{axisAlignedError.Message} (camera capture: {cameraRefusal})");
             try
             {
                 return DecodeBitmap(rectified, scratch, label, null);
@@ -315,16 +337,31 @@ internal sealed class ShardDecoder(
             // pipeline cannot handle. If the image carries camera-profile finder patterns,
             // rectify it into an axis-aligned canvas and run the same pipeline on that.
             Bitmap? rectified;
+            string? cameraRefusal = null;
             try
             {
                 rectified = cameraRectifier.TryRectify(bmp);
             }
-            catch (ShardDecodeException)
+            catch (ShardDecodeException ex)
             {
+                // The camera path can decline for a reason the user can act on, and the message
+                // saying so was being thrown away. AdaptiveBinarizer refuses a photo over 80
+                // megapixels with "Image is WxH; too large for camera-capture binarization ...
+                // Crop closer to the shard, or capture at a lower resolution." — composed
+                // deliberately, and then unreachable, because all three TryRectify call sites
+                // swallowed it and rethrew the axis-aligned error instead. A real 9000x9000 photo
+                // reported "Could not locate the black frame", which is both wrong and unhelpful.
+                //
+                // The same file is explicit that the OTHER "too large" refusal, ToBitmap's, is
+                // deliberately allowed to propagate. One oversize message was preserved on purpose
+                // and its neighbour discarded unconditionally.
                 rectified = null;
+                cameraRefusal = ex.Message;
             }
             if (rectified is null)
-                throw;
+                throw cameraRefusal is null
+                    ? axisAlignedError
+                    : new ShardDecodeException($"{axisAlignedError.Message} (camera capture: {cameraRefusal})");
 
             try
             {
