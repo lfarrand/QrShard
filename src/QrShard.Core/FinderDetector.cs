@@ -154,10 +154,16 @@ internal sealed class FinderDetector : IFinderDetector
     /// with .Take(12), but only AFTER this quadratic pass has run.
     ///
     /// The cluster count is bounded by area/(49*minModule^2), and minModule is only
-    /// max(3, min(w,h)/400) — so a wide-but-short image keeps a small floor while carrying a huge
+    /// max(3, min(w,h)/1200) — so a wide-but-short image keeps a small floor while carrying a huge
     /// area, and an image tiled with finder-like patterns produces clusters without limit. This is
     /// single-threaded inside DetectPose, which VideoDecoder calls once per frame, so a hostile
     /// recording stalls the decode rather than failing it.
+    ///
+    /// That divisor was 400 when this bound was written, and lowering it to 1200 — to stop the
+    /// floor encoding an undocumented framing rule — makes this ceiling MORE load-bearing, not
+    /// less: a floor three times lower admits up to nine times the clusters from the same area
+    /// before 4096 stops it. The cap is what keeps that bounded, and it is why the framing change
+    /// was safe to make.
     ///
     /// A real capture has three finders and yields a handful of clusters; 4096 is far past any
     /// legitimate count while keeping the scan bounded.
