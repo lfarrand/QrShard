@@ -20,7 +20,31 @@ internal sealed class FinderDetector : IFinderDetector
     public List<FinderCluster> FindCandidates(Bitmap photo, bool[] dark)
     {
         int w = photo.Width, h = photo.Height;
-        double minModule = Math.Max(3.0, Math.Min(w, h) / 400.0);
+        // The absolute 3.0 is the real floor: below it the 1:1:3:1:1 run-length arithmetic has no
+        // resolution left to work with. The photo-relative term exists to keep the much smaller
+        // DATA cells from being mistaken for finders — but data-cell size scales with the SHARD in
+        // the photo, and this term scales with the PHOTO. Those are different quantities, and the
+        // gap between them was an undocumented framing rule.
+        //
+        // Layout.Create makes a shard about 84 finder-modules across, so a divisor of 400 demanded
+        // the shard span 84/400 = 21% of the frame's short side. Stand further back, use a wider
+        // lens, or own a higher-resolution phone, and a capture whose pixels decode bit-exactly was
+        // refused before Fits or VerifyVertical ever ran. Encoding at higher resolution made it
+        // strictly worse: past a 4032 px shard the finderModule clamp at 48 pushes the demand past
+        // 31%. Measured by pasting ONE capture onto progressively larger canvases — same pixels,
+        // more surround:
+        //
+        //     frame px   1702   3404   4255   4680   5106   6808
+        //     minModule   4.3    8.5   10.6   11.7   12.8   17.0
+        //                  ok     ok     ok   FAIL   FAIL   FAIL
+        //
+        // The true finder module is ~11.7 px in every one of those photos. Detection collapsed the
+        // moment the floor crossed it, and the user was told "No decodable shard images were
+        // found" — nothing about standing closer.
+        //
+        // 1200 keeps a photo-relative guard against runaway cluster counts (MaxClusters bounds the
+        // work regardless) while dropping the implied framing demand to about 7%.
+        double minModule = Math.Max(3.0, Math.Min(w, h) / 1200.0);
         var clusters = new List<FinderCluster>();
 
         var runStarts = new List<int>(64);
