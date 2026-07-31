@@ -471,6 +471,14 @@ Six independent layers, from within-cell to whole-transfer:
    valid codeword and the verification step passes even when the answer is wrong. A codeword
    flagged beyond the budget is handed to Chase decoding instead of being answered on a guess.
    Wrong flags on a healthy codeword still cost nothing.
+
+   Chase tries the classifier's runner-up values. Few ambiguous cells get an exhaustive subset
+   search; many get an all-flipped trial — the codeword the classifier would have produced had
+   every coin-flip landed the other way, which is what systematic blur across a region actually
+   looks like. When most but not all of them were misread, flipping the ones already right can
+   overshoot the correction bound, so at parity 16 and above a further subset search un-flips up
+   to six positions to get back under it. That extra search is deliberately not offered below
+   parity 16: with fewer syndromes to spare it returns more wrong answers than right ones.
 3. **Multi-capture fusion**: several photos of the same shard that each fail on their own are
    combined — per-codeword selection with a majority vote from three captures up; with exactly
    two, the spatial clusters where the captures disagree are hypothesis-tested (glare moves

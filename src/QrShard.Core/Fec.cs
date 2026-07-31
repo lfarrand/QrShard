@@ -510,6 +510,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     private const int MaxChasePositions = 6;
 
     /// <summary>
+    /// Below this parity the all-flip branch does NOT get its un-flip subset search. Extra shots at
+    /// the decoding bound are only safe when there are syndromes to spare: at parity 8 the same
+    /// search turns 109 false accepts into 2706 over 3000 past-capacity codewords, and returns more
+    /// wrong answers than right ones. At 16 and above it produced neither, across both arms.
+    /// </summary>
+    private const int UnflipMinParity = 16;
+
+    /// <summary>
     /// Chase decoding: the classifier recorded each ambiguous cell's runner-up value, so trial
     /// codewords splice second choices over the received symbols. Few ambiguous symbols get an
     /// exhaustive subset search; many (systematic blur — best/second swapped across a whole
@@ -551,10 +559,60 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     ? secondChoice[idx]
                     : buffer[idx];
             }
-            if (!reedSolomon.TryDecode(cwScratch, parity, out _))
+            if (reedSolomon.TryDecode(cwScratch, parity, out _))
+            {
+                errors = SymbolsChanged(buffer, cwScratch, cwCount, j);
+                return true;
+            }
+
+            // All-flip assumes EVERY ambiguous cell was misread. That is the case its author
+            // pictured — systematic blur swapping best and second across a whole region — and for
+            // it the single trial is optimal. The neighbouring case, most but not all misread, got
+            // nothing: flipping the ones that were already right introduces fresh errors, and if
+            // that overshoot pushes the count past t = parity/2 the codeword is simply lost.
+            //
+            // Un-flipping only has to get back UNDER the bound, not undo every mistake. With the
+            // overshoot at t+1 a single un-flip suffices, so a subset search over the first six
+            // flagged positions lands often enough to matter, and needs no reliability ordering
+            // to aim it. Same trial budget as the exhaustive branch, so the worst case is
+            // unchanged at 63 decodes.
+            //
+            // Gated hard at parity 16, because below it the extra shots at the bound are not
+            // free. Measured over 3000 trials per parity, in the regime where all-flip has just
+            // failed — "recoverable" carries a truth that a correct decoder could reach,
+            // "unrecoverable" is past capacity so every acceptance is a miscorrection:
+            //
+            //     parity                 4      8     12     16     32
+            //     rescued              212   1636   2602   2763   2949
+            //     WRONG answers       2788   1329     55      0      0
+            //     false accepts   1471->3000  109->2706  5->216  0->0  0->0
+            //
+            // At 4 and 8 it is catastrophic; at 12 it is a trade; at 16 and above it is free, and
+            // 16 is the shipped default for EncodeDefaults.EccParity.
+            if (parity < UnflipMinParity)
                 return false;
-            errors = SymbolsChanged(buffer, cwScratch, cwCount, j);
-            return true;
+            for (int mask = 1; mask < 1 << count; mask++)
+            {
+                for (int i = 0; i < CodewordLength; i++)
+                {
+                    int idx = i * cwCount + j;
+                    cwScratch[i] = idx < suspectBytes.Length && suspectBytes[idx]
+                                   && idx < secondChoice.Length && buffer[idx] != secondChoice[idx]
+                        ? secondChoice[idx]
+                        : buffer[idx];
+                }
+                // Put the received value back at the chosen positions: the classifier's first
+                // choice was right there and all-flip had broken it.
+                for (int b = 0; b < count; b++)
+                    if ((mask & (1 << b)) != 0)
+                        cwScratch[positions[b]] = buffer[positions[b] * cwCount + j];
+                if (reedSolomon.TryDecode(cwScratch, parity, out _))
+                {
+                    errors = SymbolsChanged(buffer, cwScratch, cwCount, j);
+                    return true;
+                }
+            }
+            return false;
         }
 
         for (int mask = 1; mask < 1 << count; mask++)
