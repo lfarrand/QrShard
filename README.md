@@ -333,8 +333,8 @@ declares version 4, which readers older than 1.6.0 reject outright — deliberat
 version nibble is the format's capability field and guessing at an unknown one is how a decoder
 silently produces the wrong bytes. So:
 
-> **Upgrade the receiver first, or upgrade both ends together.** A sender on 1.6.0 talking to a
-> receiver on 1.5.x produces images the receiver cannot read.
+> **Upgrade the receiver first, or upgrade both ends together.** A sender on 1.6.0 **or newer**
+> talking to a receiver on 1.5.x produces images the receiver cannot read.
 
 Header *flags* extend compatibly by contrast — unknown bits are rejected without a version
 change, which is why new features usually cost nothing here.
@@ -796,7 +796,7 @@ https://sixlabors.com/pricing/) and either drop `sixlabors.lic` at the solution 
 `SIXLABORS_LICENSE_KEY` repository secret). The license is build-time only; published binaries
 and end users need nothing.
 
-- `dotnet test` — the xUnit suite, 691 tests in ~20 s. Covers the codec math (CRC vectors, GF(2⁸) field
+- `dotnet test` — the xUnit suite, 732 tests in ~20 s. Covers the codec math (CRC vectors, GF(2⁸) field
   laws, Reed-Solomon incl. errors-and-erasures, interleaving, Cauchy and fountain erasure
   codes), round trips across every density/ECC/format/flag combination, simulated screenshots
   and camera photos, non-truecolor capture shapes, video recordings (duplicates, torn frames,
