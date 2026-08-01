@@ -48,14 +48,22 @@ internal sealed class AppSettings
     /// <see cref="EncodeMemoryBudgetMB"/>, which the decode side did not have.
     ///
     /// A 4K frame costs about 199 MB of scratch and a 48-megapixel phone photo about 1.15 GB, so
-    /// the default affords roughly 20 workers at 4K and about 3 on phone-sized photos. The figures
+    /// the default affords the full 24 workers at 4K and about 6 on phone-sized photos. The figures
     /// were 33 MB and 192 MB until the estimate was corrected: it counted 4 bytes per pixel and
     /// omitted the adaptive binarizer's two 8-byte-per-pixel integral images, which dominate it.
-    /// Under-counting here is the dangerous direction, since the budget exists to stop the workers
+    /// Under-counting there is the dangerous direction, since the budget exists to stop the workers
     /// collectively committing to an image they cannot afford. It bounds the case where the image
     /// dimensions are the attacker's choice rather than a camera's.
+    ///
+    /// Raised from 4000 once that correction landed. At 4000 the corrected per-pixel figure priced
+    /// Max4K decode down to 20 workers where it had been running 24 — and only Max4K, since the
+    /// smaller presets still fit. 8000 restores the full pool there and doubles it on photo-sized
+    /// input. What it costs is headroom: this is a declared ceiling on scratch, NOT a reading of
+    /// free memory, so a full pool on 48-megapixel input now reaches about 6.9 GB against 3.5 GB
+    /// before. Machines with less RAM than that should lower it — the setting exists for exactly
+    /// that, and the decode simply runs with fewer workers rather than failing.
     /// </summary>
-    public int DecodeMemoryBudgetMB { get; private set; } = 4000;
+    public int DecodeMemoryBudgetMB { get; private set; } = 8000;
 
     /// <summary>Default frame rate for the live receiver (`qrshard receive`).</summary>
     public double ReceiveFps { get; private set; } = 10;
