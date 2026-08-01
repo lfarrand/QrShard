@@ -113,8 +113,10 @@ public class SessionAndDiagnosticsTests
 
         new SessionStore().Save(session, Array.Empty<DecodedShard>());
 
-        FileSecurity acl = new FileInfo(session).GetAccessControl(AccessControlSections.Access);
+        FileSecurity acl = new FileInfo(session)
+            .GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
         Assert.True(acl.AreAccessRulesProtected);
+        Assert.Equal(current, acl.GetOwner(typeof(SecurityIdentifier)));
         var rules = acl.GetAccessRules(includeExplicit: true, includeInherited: true,
                 targetType: typeof(SecurityIdentifier))
             .Cast<FileSystemAccessRule>()

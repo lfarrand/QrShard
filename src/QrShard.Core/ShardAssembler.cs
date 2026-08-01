@@ -531,12 +531,20 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     }
 
     [SupportedOSPlatform("windows")]
-    private static DirectorySecurity PrivateDirectorySecurity()
+    internal static DirectorySecurity PrivateDirectorySecurity()
     {
+        SecurityIdentifier current = CurrentWindowsUserSid();
         var security = new DirectorySecurity();
+        // The access token's default owner is not necessarily its user SID. In particular,
+        // elevated/service accounts that belong to BUILTIN\Administrators commonly default new
+        // objects to the Administrators group. IsVerifiedPrivateWindowsDirectory deliberately
+        // requires the narrower user owner, so put it in the create-time descriptor instead of
+        // assuming the token default. This also ensures only this identity has the owner's
+        // implicit WRITE_DAC right while plaintext occupies the staging tree.
+        security.SetOwner(current);
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new FileSystemAccessRule(
-            CurrentWindowsUserSid(),
+            current,
             FileSystemRights.FullControl,
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
             PropagationFlags.None,
@@ -601,12 +609,14 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     }
 
     [SupportedOSPlatform("windows")]
-    private static FileSecurity PrivateFileSecurity()
+    internal static FileSecurity PrivateFileSecurity()
     {
+        SecurityIdentifier current = CurrentWindowsUserSid();
         var security = new FileSecurity();
+        security.SetOwner(current);
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new FileSystemAccessRule(
-            CurrentWindowsUserSid(),
+            current,
             FileSystemRights.FullControl,
             AccessControlType.Allow));
         return security;

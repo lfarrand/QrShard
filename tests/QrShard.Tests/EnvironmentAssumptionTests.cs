@@ -1,4 +1,7 @@
 using System.Globalization;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 
 namespace QrShard.Tests;
@@ -194,5 +197,32 @@ public class EnvironmentAssumptionTests
         string restored = tmp.File("out.bin");
         decoder.DecodeFolder(encoded.Files, restored, _ => { });
         Assert.Equal(content, File.ReadAllBytes(restored));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void PrivateWindowsStagingDescriptorsDoNotAssumeTheTokensDefaultOwner()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        // Members of BUILTIN\Administrators can have that group, rather than their user SID, as
+        // the access token's default owner. GitHub's Windows runner does. The runtime verifier
+        // requires the user SID so the create-time descriptor must name it explicitly; relying on
+        // the machine's token defaults made every one of the 32 lease attempts fail on that host.
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        SecurityIdentifier current = identity.User!;
+        byte[] directoryBinary = ShardAssembler.PrivateDirectorySecurity().GetSecurityDescriptorBinaryForm();
+        var roundTrippedDirectory = new DirectorySecurity();
+        roundTrippedDirectory.SetSecurityDescriptorBinaryForm(directoryBinary);
+
+        byte[] fileBinary = ShardAssembler.PrivateFileSecurity().GetSecurityDescriptorBinaryForm();
+        var roundTrippedFile = new FileSecurity();
+        roundTrippedFile.SetSecurityDescriptorBinaryForm(fileBinary);
+
+        Assert.Equal(current, roundTrippedDirectory.GetOwner(typeof(SecurityIdentifier)));
+        Assert.True(roundTrippedDirectory.AreAccessRulesProtected);
+        Assert.Equal(current, roundTrippedFile.GetOwner(typeof(SecurityIdentifier)));
+        Assert.True(roundTrippedFile.AreAccessRulesProtected);
     }
 }

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using QrShard;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
@@ -192,21 +193,57 @@ public class VideoDecodeTests
             new ShardAssembler(), new ParityReassembler(), new CameraRectifier());
         string output = tmp.File("cancelled-live-out.bin");
 
-        Task<VideoDecodeStats> receive = Task.Run(() =>
+        // Decode is synchronous and itself schedules a producer and workers. Giving the outer
+        // orchestration a dedicated thread avoids starving that nested work on constrained CI
+        // pools; the CLI likewise invokes Decode from its main thread rather than a pool worker.
+        Task<VideoDecodeStats> receive = Task.Factory.StartNew(() =>
+            {
+                decoder.Decode("live-device", output, 8, _ => { }, out VideoDecodeStats stats,
+                    decodeWorkers: 2);
+                return stats;
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        VideoDecodeStats? stats = null;
+        Exception? failure = null;
+        try
         {
-            decoder.Decode("live-device", output, 8, _ => { }, out VideoDecodeStats stats,
-                decodeWorkers: 2);
-            return stats;
-        });
+            // Await the handshake rather than blocking another pool thread. The macOS runner
+            // exposed the old nested-Task.Run/ManualResetEvent wait as a scheduling race before
+            // the test reached any of its cancellation or output assertions.
+            Task handshake = source.ProducerBlocked.Task;
+            Task first = await Task.WhenAny(handshake, receive, Task.Delay(TimeSpan.FromSeconds(10)));
+            if (first == receive)
+            {
+                stats = await receive; // propagate an early product failure instead of hiding it as a timeout
+                Assert.Fail("decode completed before the producer reached the simulated stalled camera read");
+            }
+            Assert.True(first == handshake, "producer never reached the simulated stalled camera read");
+            stats = await receive.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+        finally
+        {
+            // A failed handshake must not leave a later-scheduled producer blocked in the suite.
+            source.EmergencyRelease.Set();
+            try
+            {
+                // WaitAsync does not stop its underlying task. Bounded-join it after releasing the
+                // fake camera so TempDir cannot normally be disposed while decode still uses it.
+                await receive.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch (Exception cleanupFailure)
+            {
+                // Awaiting observes a producer fault. Preserve the first, most diagnostic failure.
+                failure ??= cleanupFailure;
+            }
+        }
 
-        Assert.True(source.ProducerBlocked.Wait(TimeSpan.FromSeconds(5)),
-            "producer never reached the simulated stalled camera read");
-        Task completed = await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(5)));
-        if (completed != receive)
-            source.EmergencyRelease.Set(); // avoid leaking a blocked worker if the assertion fails
-        Assert.Same(receive, completed);
-
-        VideoDecodeStats stats = await receive;
+        if (failure is not null)
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        Assert.NotNull(stats);
         Assert.True(stats.StoppedEarly);
         Assert.Equal(content, File.ReadAllBytes(output));
     }
@@ -341,7 +378,8 @@ public class VideoDecodeTests
 
     private sealed class BlockingAfterFramesSource(IReadOnlyList<Bitmap> frames) : IFrameSource
     {
-        internal ManualResetEventSlim ProducerBlocked { get; } = new(false);
+        internal TaskCompletionSource<bool> ProducerBlocked { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal ManualResetEventSlim EmergencyRelease { get; } = new(false);
 
         public IEnumerable<Bitmap> Frames(string path, double fps,
@@ -349,7 +387,7 @@ public class VideoDecodeTests
         {
             foreach (Bitmap frame in frames)
                 yield return frame;
-            ProducerBlocked.Set();
+            ProducerBlocked.TrySetResult(true);
             WaitHandle.WaitAny([cancellationToken.WaitHandle, EmergencyRelease.WaitHandle]);
             cancellationToken.ThrowIfCancellationRequested();
         }

@@ -113,10 +113,12 @@ public class ArchiveInputSafetyTests
         using (var temp = Cli.CreatePrivateTempDirectory())
         {
             string path = temp.Path;
-            DirectorySecurity acl = new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access);
+            DirectorySecurity acl = new DirectoryInfo(path)
+                .GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
             Assert.True(acl.AreAccessRulesProtected);
             using WindowsIdentity identity = WindowsIdentity.GetCurrent();
             SecurityIdentifier current = identity.User!;
+            Assert.Equal(current, acl.GetOwner(typeof(SecurityIdentifier)));
             var rules = acl.GetAccessRules(includeExplicit: true, includeInherited: true,
                     targetType: typeof(SecurityIdentifier))
                 .Cast<FileSystemAccessRule>()
