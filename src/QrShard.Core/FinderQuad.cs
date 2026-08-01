@@ -63,15 +63,47 @@ internal sealed class QuadSelector(CameraMath math) : IQuadSelector
 
     /// <summary>
     /// Reconstructs a finder quad from exactly three clusters (one corner occluded). Identifies
-    /// the right-angle corner of the L they form, synthesizes the opposite corner by
-    /// parallelogram completion (fourth = a + c − vertex), and validates it with the same edge
-    /// and module checks as the four-finder path. Deliberately strict on the corner angle and
-    /// module agreement to bound false accepts — anything wrong is caught later by the CRC.
+    /// the right-angle corner of the L they form and synthesizes the opposite corner by
+    /// parallelogram completion (fourth = a + c − vertex).
+    ///
+    /// The module-agreement bound is the ONLY thing standing between this and a badly wrong quad,
+    /// and it used to be nowhere near tight enough. Parallelogram completion is exact for an
+    /// affine view and degrades linearly with foreshortening, which the module ratio measures
+    /// directly. Measured on a perspective projection of a square of finder centres:
+    ///
+    ///     tilt          0     5    10    15    20    30    40 degrees
+    ///     moduleRatio 1.000 1.032 1.065 1.098 1.131 1.198 1.262
+    ///     error         0.0   3.7   7.4  10.9  14.4  20.8  26.5 modules
+    ///
+    /// so error ≈ 113·(ratio − 1) modules. The old bound of 1.6 admitted more than 60 modules of
+    /// error, and the doc claimed the corner ANGLE was the strict guard — it is not: |cos| only
+    /// reaches 0.149 at 40° tilt against a 0.30 threshold, so it accepts everything this can get
+    /// wrong. 1.02 holds the error near two modules, which is about the frame thickness the
+    /// scanner downstream has to find.
+    ///
+    /// The comment here also used to claim validation "with the same edge and module checks as the
+    /// four-finder path". Those checks could not fire. fourth = a + c − vertex makes an exact
+    /// parallelogram, so opposite edges are identically equal and Min(e0,e2)·1.8 &lt; Max(e0,e2)
+    /// reduces to e·1.8 &lt; e; and every edge equals one of the two vectors already tested against
+    /// avgModule·8 above, so the min-edge check was equally dead. All three were removed rather
+    /// than repaired, because the module bound is what actually constrains this construction.
+    ///
+    /// If the tilt limit ever needs raising, the answer is not a looser ratio but a better
+    /// reconstruction: module is proportional to 1/depth, which is exactly the homogeneous weight,
+    /// so P₄ ≅ P_a/m_a + P_c/m_c − P_v/m_v is EXACT at any tilt (measured: 0.00 modules out to
+    /// 50°). It trades tilt sensitivity for module-noise sensitivity — about 210·noise modules,
+    /// tilt-independent, so roughly 4 modules at 2% module error — and wins beyond a ratio of
+    /// about 1.04. Not adopted here because this path is near-unreachable today (see DetectPose),
+    /// so the safe, exact-when-it-runs construction is the better trade.
     /// </summary>
     private FinderQuad? ThreeFinderQuad(List<FinderCluster> three)
     {
         double minM = three.Min(s => s.Module), maxM = three.Max(s => s.Module);
-        if (maxM > minM * 1.6) // tighter than the 4-finder path: less evidence, demand more agreement
+        // Bounds the reconstruction error to about two modules; see the note above for the curve
+        // this comes from. Far tighter than the four-finder path's 2.0 because that path measures
+        // all four corners while this one INFERS one, and the inference is only as good as the
+        // view is affine.
+        if (maxM > minM * MaxThreeFinderModuleRatio)
             return null;
         double avgModule = three.Average(s => s.Module);
         var p = three.Select(s => (X: s.X, Y: s.Y)).ToArray();
@@ -100,18 +132,15 @@ internal sealed class QuadSelector(CameraMath math) : IQuadSelector
         int a = (vertex + 1) % 3, c = (vertex + 2) % 3;
         var fourth = (X: p[a].X + p[c].X - p[vertex].X, Y: p[a].Y + p[c].Y - p[vertex].Y);
         var pts = OrderConvex([p[vertex], p[a], fourth, p[c]]);
-        if (pts is null)
-            return null;
-
-        // Same opposite-edge and min-edge sanity as the four-finder path.
-        double e0 = math.Dist(pts[0], pts[1]), e1 = math.Dist(pts[1], pts[2]);
-        double e2 = math.Dist(pts[2], pts[3]), e3 = math.Dist(pts[3], pts[0]);
-        if (Math.Min(e0, e2) * 1.8 < Math.Max(e0, e2) || Math.Min(e1, e3) * 1.8 < Math.Max(e1, e3))
-            return null;
-        if (Math.Min(Math.Min(e0, e1), Math.Min(e2, e3)) < avgModule * 8)
-            return null;
-        return new FinderQuad(pts, avgModule);
+        return pts is null ? null : new FinderQuad(pts, avgModule);
     }
+
+    /// <summary>
+    /// Largest module disagreement a three-finder reconstruction may show. The parallelogram
+    /// completion it uses is exact only for an affine view, and this ratio is what measures the
+    /// departure from one.
+    /// </summary>
+    private const double MaxThreeFinderModuleRatio = 1.02;
 
     /// <summary>Orders four points into a convex cycle around their centroid; null if not convex.</summary>
     private static (double X, double Y)[]? OrderConvex((double X, double Y)[] pts)

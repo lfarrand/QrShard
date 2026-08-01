@@ -50,7 +50,12 @@ internal sealed class CameraRectifier(
     {
         bool[] dark = binarizer.Threshold(photo);
         var clusters = finderDetector.FindCandidates(photo, dark);
-        if (clusters.Count < 4)
+        // Three, not four. ChooseQuad reconstructs an occluded fourth corner from exactly three
+        // clusters, and this pre-check refused to let it: a capture yielding precisely the three
+        // visible finders was rejected here, before the fallback written to rescue it was ever
+        // consulted. ChooseQuad already declines fewer than three, so this only duplicated a
+        // weaker version of a decision it makes better.
+        if (clusters.Count < 3)
             return null;
 
         var quad = quadSelector.ChooseQuad(clusters);
