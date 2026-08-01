@@ -8,24 +8,26 @@ permissions:
 
 jobs:
   compare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
-      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.302
 
       # Shared-runner clocks are noisy in absolute terms, so the gate is RELATIVE: build the
       # PR base and head side by side, run the same 30 MB round trip three times each, and
       # fail only on a >30% median regression — real regressions, not runner weather.
       - name: Build base and head
+        env:
+          SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
         run: |
           git worktree add ../base ${{ github.event.pull_request.base.sha }}
           dotnet build ../base/src/QrShard/QrShard.csproj -c Release

@@ -48,22 +48,23 @@ internal sealed class StripReader(Palette palette) : IStripReader
 
     public PaletteSet ReadPalette(Bitmap bmp, InnerRect inner, Layout layout)
     {
-        // Two calibration strips exist (top and bottom). The better one (closest to the
-        // theoretical palette) drives the classic path — an overlay across one strip then
-        // costs nothing. When both strips are individually plausible but differ materially,
-        // the capture has a vertical illumination gradient and per-row interpolation between
-        // them tracks it.
+        // Two calibration strips exist (top and bottom). Among the separable copies, the better
+        // one (closest to the theoretical palette) drives the classic path — an overlay that
+        // collapses colors in one strip then costs nothing. When both strips are individually
+        // plausible but differ materially, the capture has a vertical illumination gradient and
+        // per-row interpolation between them tracks it.
         var theoretical = palette.Build(layout.BitsPerCell);
         var top = MeasurePaletteStrip(bmp, inner, layout, layout.Gutter + layout.MetaH * 1.5);
         var bottom = MeasurePaletteStrip(bmp, inner, layout, layout.InnerH - layout.Gutter - layout.MetaH * 1.5);
-        long topScore = StripScore(top, theoretical), bottomScore = StripScore(bottom, theoretical);
-        var best = topScore <= bottomScore ? top : bottom;
+        bool topSeparable = IsSeparable(top), bottomSeparable = IsSeparable(bottom);
+        var best = SelectBestMeasured(top, bottom, theoretical, topSeparable, bottomSeparable);
 
         // Trustworthy = the strip is explainable as per-channel GAIN applied to the theoretical
         // palette. Illumination (screen falloff, room light) is gain-like at any strength, so
         // this accepts even strong gradients — while an overlay or damaged strip fits a pure
         // gain poorly and must not poison interpolation.
-        bool interpolate = FitsAsIllumination(top, theoretical) && FitsAsIllumination(bottom, theoretical)
+        bool interpolate = topSeparable && bottomSeparable &&
+                           FitsAsIllumination(top, theoretical) && FitsAsIllumination(bottom, theoretical)
                            && MaxChannelDelta(top, bottom) >= 8;
 
         // Last resort: the theoretical palette. Both copies sit at the SAME x as each other (the
@@ -77,9 +78,26 @@ internal sealed class StripReader(Palette palette) : IStripReader
         // from bitsPerCell alone, so a decoder can regenerate it without reading anything from
         // the image. The measured strip exists to track colour transforms the capture applied —
         // valuable when it is intact, worthless when it is not.
-        if (!IsSeparable(best))
+        if (best is null)
             return new PaletteSet(theoretical, theoretical, theoretical, Interpolate: false);
         return new PaletteSet(best, top, bottom, interpolate);
+    }
+
+    /// <summary>
+    /// Chooses among usable measured copies before comparing colour distance. A collapsed strip
+    /// can be numerically closer to the theoretical palette than a healthy strip under strong
+    /// illumination gain; distance-first selection would then discard the only usable copy.
+    /// </summary>
+    internal static Rgb24[]? SelectBestMeasured(Rgb24[] top, Rgb24[] bottom, Rgb24[] theoretical,
+        bool? topIsSeparable = null, bool? bottomIsSeparable = null)
+    {
+        bool topUsable = topIsSeparable ?? IsSeparable(top);
+        bool bottomUsable = bottomIsSeparable ?? IsSeparable(bottom);
+        if (!topUsable)
+            return bottomUsable ? bottom : null;
+        if (!bottomUsable)
+            return top;
+        return StripScore(top, theoretical) <= StripScore(bottom, theoretical) ? top : bottom;
     }
 
     /// <summary>

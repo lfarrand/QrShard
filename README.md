@@ -9,8 +9,9 @@ back into the original file, **bit-for-bit, verified by SHA-256**.
 
 The image format is custom (not QR-standard) and tuned for screen-to-screenshot transfer.
 Because a screenshot is a lossless pixel copy, each image can be vastly denser than a real QR
-code: from ~212 KB per image at the robust default up to **~6.5 MB per image** on a 4K display —
-so a 100 MB file fits in 22 screenshots and a 300 MB zip in ~65. Layered error correction
+code: from ~212 KB per image at the robust default, to ~4.9 MB with the Max4K profile, and up to
+**~6.5 MB per image** at 8-bit density on a 4K display — so a 100 MB file fits in 22 Max4K
+screenshots and a 300 MB zip in ~65. Layered error correction
 (including errors-and-erasures Reed-Solomon fed by the classifier's own confidence) absorbs
 cursors, pop-ups, and re-encoding; parity or fountain-coded images let whole captures be lost
 and rebuilt; multiple failed photos of the same image can be *fused* into a good one; payloads
@@ -27,37 +28,95 @@ can be AES-256-GCM encrypted end to end.
 
 ## Supported platforms
 
-The codec is pure managed .NET 10 — no native dependencies — and the wire format is
-platform-agnostic by construction, so shards encoded on one OS decode on any other. That is not
-left to construction alone: the **Interop** workflow runs all sixteen pairs of
-{win-x64, linux-x64, linux-arm64, osx-arm64} encoders and decoders on every pull request, and
-each pair deletes a data image so the decode has to rebuild it through Cauchy parity — the
-GF(2⁸) kernels take a GFNI/AVX route on x64 and a different one on arm64, and a disagreement
-there would produce wrong bytes rather than a loud failure. The encrypted path is covered too,
-which also pins that the AES-GCM associated data is assembled identically on both sides.
+The codec is pure managed .NET 10 — no native codec dependency — and the wire format is
+platform-agnostic by construction. The **Interop** workflow runs all sixteen pairs of
+{win-x64, linux-x64, linux-arm64, osx-arm64} encoders and decoders on every pull request. Each pair
+deletes a data image so decode must rebuild it through Cauchy parity; the encrypted path also pins
+cross-platform construction of AES-GCM associated data.
 
-| Platform | Codec | Monitor auto-detection (`-r auto`) | Benchmark machine spec |
+| Target | Current CI/release evidence | Monitor auto-detection (`-r auto`) | Benchmark machine spec |
 |---|---|---|---|
-| Windows (x64) | ✅ | ✅ EnumDisplaySettings (physical pixels, DPI-scaling-proof) | ✅ WMI |
-| Linux (x64/arm64) | ✅ verified via WSL | ✅ `xrandr` parsing (X11/XWayland); headless falls back | degraded (OS + .NET + cores) |
-| macOS (x64/arm64) | ✅ (managed-only code) | ✅ CoreGraphics Retina pixel dimensions (untested on real hardware) | degraded |
+| Windows x64 (`windows-2025`) | build/test + interop + `win-x64` Native-AOT release smoke | `EnumDisplaySettings` physical pixels | WMI |
+| Linux x64 (`ubuntu-22.04`) | build/test + interop + `linux-x64` Native-AOT release smoke | `xrandr` on X11/XWayland; headless fallback | OS + .NET + cores only |
+| Linux arm64 (`ubuntu-24.04-arm`) | build/test + interop + `linux-arm64` Native-AOT release smoke | `xrandr` on X11/XWayland; headless fallback | OS + .NET + cores only |
+| macOS arm64 (`macos-15`) | build/test + interop + `osx-arm64` Native-AOT release smoke | CoreGraphics Retina pixel dimensions | OS + .NET + cores only |
+| macOS x64 (`osx-x64`) | local JIT single-file publish target; **not** in CI, interop, or tagged releases | same CoreGraphics implementation; expected, not workflow-verified | OS + .NET + cores only |
+
+"Verified" here means hosted build/test, cross-runner wire interop, and release-binary smoke tests.
+Hosted runners do **not** exercise a physical monitor, webcam, capture card, real Retina/DPI
+scaling, or a real X11 desktop. Treat live capture and display auto-detection as implemented but
+hardware-dependent; run `qrshard calibrate` on the actual sender/receiver setup.
 
 Video decoding and the live receiver additionally need [ffmpeg](https://ffmpeg.org) on `PATH`
 (animated png/gif/webp recordings decode natively without it).
+
+The tagged Native-AOT Linux binaries have explicit libc floors: **glibc 2.35** for `linux-x64`
+(built on Ubuntu 22.04) and **glibc 2.39** for `linux-arm64` (built on Ubuntu 24.04). On an older
+distribution, use the .NET tool package with a compatible .NET 10 runtime or build locally.
 
 ## Installing
 
 - **dotnet tool**: `dotnet tool install -g QrShard.Tool` → the `qrshard` command (needs the
   .NET 10 runtime).
 - **Standalone binaries**: tagged releases attach Native-AOT single-file binaries for
-  win-x64 / linux-x64 / linux-arm64 / osx-arm64 — no .NET install needed. `./publish.ps1`
-  (or `.sh`) produces the same locally.
+  win-x64 / linux-x64 / linux-arm64 / osx-arm64 — no .NET install needed (see the Linux glibc
+  floors above). The executable is named `QrShard.exe` on Windows and case-sensitive `QrShard`
+  on Unix. Beginning with v1.6.2, GitHub stores signed SLSA build-provenance and SPDX 2.2 SBOM
+  attestations for the archives and release packages. These attestations authenticate the exact
+  GitHub Release bytes; they are not platform code signatures. Windows is not Authenticode-signed,
+  and macOS output is expected to be ad-hoc only rather than Developer ID signed or notarized.
+- **Local single-file publish**: `./publish.ps1` (or `.sh`) creates self-contained, single-file
+  **JIT** builds for win-x64 / linux-x64 / linux-arm64 / osx-x64 / osx-arm64. These convenient
+  local builds are not the Native-AOT artifacts produced by the tagged-release workflow. Each RID
+  is built in a private sibling stage; replacing an existing local output keeps a rollback copy
+  until the new directory has been installed. The scripts hold `publish/.qrshard-publish.lock`, so
+  a concurrent invocation fails before changing output. An abnormally terminated publisher leaves
+  the lock for inspection and verified manual removal rather than guessing that it is stale.
 - **As a library**: `dotnet add package QrShard.Core` — the embeddable codec, wire-compatible with
   the CLI. `QrShardCodec.EncodeFile` / `DecodeImages` for one-shot use, plus `QrShardDecodeSession`
   for **incremental** decoding: feed captures (files or in-memory image bytes) as they arrive,
   query which images are still missing, and assemble the moment the set is recoverable.
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
   [Building](#building-and-testing) for the ImageSharp license note).
+
+### Verifying a v1.6.2-or-later tagged release
+
+The current release workflow first applies these controls to v1.6.2. Older published releases do
+not have the SBOM, checksum, or attestation assets described here. Install the
+[GitHub CLI](https://cli.github.com/), download a v1.6.2-or-later binary archive or `.nupkg`, and
+constrain verification to this repository's release workflow and tag:
+
+```sh
+tag=vX.Y.Z
+asset=qrshard-linux-x64.tar.gz
+
+gh attestation verify "$asset" --repo lfarrand/QrShard \
+  --signer-workflow lfarrand/QrShard/.github/workflows/release.yml \
+  --source-ref "refs/tags/$tag"
+
+gh attestation verify "$asset" --repo lfarrand/QrShard \
+  --signer-workflow lfarrand/QrShard/.github/workflows/release.yml \
+  --source-ref "refs/tags/$tag" \
+  --predicate-type https://spdx.dev/Document/v2.2
+
+gh release verify-asset "$tag" "$asset" --repo lfarrand/QrShard
+```
+
+The first command verifies SLSA provenance; the second verifies the artifact-specific SPDX
+document and its staged file hash. Each Native-AOT archive has its own RID-specific restored graph,
+including that RID's Native-AOT runtime/compiler packs; each `.nupkg` has a separate ordinary
+framework-dependent package graph. The third command verifies the asset digest and its association
+with the immutable GitHub Release. `SHA256SUMS` and the six standalone SBOM JSON files have
+provenance and immutable-release coverage, but are not themselves subjects of an SBOM predicate.
+`SHA256SUMS` remains a plaintext convenience index, but its bytes and every listed release file are
+also covered by provenance attestations. Releases produced by the current workflow, beginning with
+v1.6.2, are immutable after publication: GitHub locks their assets and tag and creates a release
+attestation.
+
+The `.nupkg` attached to GitHub Releases is the exact pre-publication byte sequence covered here.
+NuGet.org subsequently repository-signs an uploaded package, which changes its bytes. NuGet clients
+can verify that repository signature as a separate trust boundary; enforcement depends on the
+platform and the client's [signed-package verification policy](https://learn.microsoft.com/dotnet/core/tools/nuget-signed-package-verification).
 
 Both packages are published to [nuget.org](https://www.nuget.org/packages/QrShard.Tool) by the
 release workflow, using trusted publishing — no API key is stored in this repository. Releases are
@@ -81,8 +140,9 @@ qrshard encode secrets.db -p "correct horse" # AES-256-GCM encrypted payload
 This creates `holiday-photos.zip.shards/` next to the input, containing numbered images sized to
 your primary monitor. Open the folder in any image viewer, display each image fullscreen at
 **100% zoom**, and capture each one for the receiving side (a cropped region capture is fine —
-just include the whole black frame with a little margin). For large files add `-R 10` so up to
-~10% of the captures can be botched or skipped without redoing anything.
+just include the whole black frame with a little margin). For large files add `-R 10` to add
+roughly 10 parity images per 100 data images; recovery capacity is allocated and enforced per
+stripe.
 
 **On the receiving machine**, put the captures in a folder (any filenames, any order,
 duplicates fine) and:
@@ -97,11 +157,13 @@ reported by exact part number ("missing image 7 of 22 — recapture it"); and th
 verified against a SHA-256 carried inside the shards. If decode says it succeeded, the file is
 bit-identical.
 
-**Video mode — no manual capturing at all.** Add `--video` when encoding and a self-contained
-`slideshow.html` is written next to the shards: open it in any browser, press F11, and it
-cycles every image forever (default 500 ms each; `--interval` to tune; `--slideshow apng` writes a
-single animated PNG instead of an HTML page, for setups where one media file is easier to display
-or record). On the receiving side, **record the screen** for one full cycle — or point a phone at
+**Video mode — no manual capturing at all.** Add `--video` when encoding and `slideshow.html` is
+written next to the shards: open it in any browser, press F11, and it cycles every image forever
+(default 500 ms each; `--interval` to tune). The HTML page is a small **relative manifest**, not a
+self-contained copy: keep it beside the shard images and any generated `.slideshow-…-frame-….png`
+sidecars. Moving only the HTML file breaks its references. `--slideshow apng` instead writes one
+animated PNG, but APNG creation is capped at **256 MiB of decoded RGB frame pixels**; use HTML for
+larger sets. On the receiving side, **record the screen** for one full cycle — or point a phone at
 it (`--camera` shards decode from handheld video, with the detected pose cached between frames) —
 and feed the recording in:
 
@@ -112,9 +174,10 @@ qrshard decode recording.mp4 -o holiday-photos.zip
 Near-duplicate frames are skipped cheaply, torn mid-transition frames fail checksums harmlessly
 and come around again next cycle, and decoding **stops early** the moment the collected set is
 complete or recoverable. If a file recording still comes up short, it is automatically re-extracted
-at a higher frame rate before giving up. Add `-F 100` (fountain coding) when encoding and the slideshow also
-cycles random-linear coded frames: **any** enough captured frames per stripe reconstruct the
-data, so lost or glared frames simply don't count — the ideal mode for lossy capture chains.
+at a higher frame rate before giving up. Add `-F 100` (fountain coding) when encoding and the
+slideshow also cycles random-linear coded frames: a **full-rank set of roughly `stripeData`
+frames per stripe** reconstructs the data, so duplicates, dependent rows, and lost or glared
+frames simply do not count — the ideal mode for lossy capture chains.
 
 **Live mode — no recording either.** Point a webcam (or capture card) at the sender's screen:
 
@@ -134,8 +197,8 @@ so the rest of the desktop is never captured or scanned.
 
 | Command | Description |
 |---|---|
-| `qrshard encode <file\|folder> [options]` | Split a file (or tar-ed folder) into shard images |
-| `qrshard send <file\|folder> [options]` | Encode + open the slideshow in the default browser |
+| `qrshard encode <file\|folder>... [options]` | Split a file, folder, or multi-input archive into shard images |
+| `qrshard send <file\|folder>... [options]` | Encode + open the slideshow in the default browser |
 | `qrshard decode <folder\|images...\|recording> [options]` | Reconstitute the original from captures or a recording (`--watch` to keep decoding as captures land; `--clipboard` on Windows; `--json` for scripts) |
 | `qrshard receive [--device d \| --screen] [options]` | Live decode from a webcam — or from THIS machine's screen (`--screen`): put the slideshow in an RDP/VM window and transfer out of locked-down remotes |
 | `qrshard verify <folder\|images...> [--session f] [--json]` | Report set completeness without writing output |
@@ -149,18 +212,18 @@ so the rest of the desktop is never captured or scanned.
 
 | Option | Supported values | Default | Description |
 |---|---|---|---|
-| `-o, --out <dir>` | any path | `<file>.shards` next to the input | Output folder for the shard images |
+| `-o, --out <dir>` | any path | `<input>.shards` beside the input; `bundle.shards` beside the first input for multiple inputs | Output folder for the shard images |
 | `-r, --resolution <px>` | `auto`; one number (square); `WxH` — 700–16384 per side | `auto` | Image size. `auto` detects the primary monitor's native resolution so shards fill the screen they'll be captured from |
 | `-c, --cell <px>` | 1–64 | 3 | Data cell size in pixels. 3 survives fractional display rescaling; 1 doubles-to-quadruples density but needs pixel-perfect captures |
 | `-b, --bits <n>` | 1–8 | 4 | Bits per cell (color density): 2ⁿ palette colors |
 | `-e, --ecc <n>` | even, 0–64 | 16 | Reed-Solomon parity bytes per 255-byte block. 16 ≈ 6% overhead; fixes 8 unknown-position bytes/block, up to ~14 when the classifier can flag them (erasures) |
-| `-R, --recovery <pct>` | 0–100 | 0 (off) | Extra **parity images** (Cauchy erasure code): any lost images up to the budget are rebuilt without recapture |
-| `-F, --fountain <pct>` | 0–1000 | 0 (off) | **Fountain-coded frames** (random linear code) for video mode: any enough captured frames per stripe reconstruct the data; no per-stripe frame-count ceiling. Mutually exclusive with `-R` |
-| `-p, --password <pw>` | any string | off | AES-256-GCM encrypt the payload (PBKDF2-SHA256 key); decode needs the same password |
+| `-R, --recovery <pct>` | 0–100 | 0 (off) | Extra **parity images** (Cauchy erasure code), calculated as a percentage of data images and distributed per stripe. Loss tolerance is per stripe: `-R 15` adds about 15 parity images per 100 data images (~13% of the resulting set) |
+| `-F, --fountain <pct>` | 0–1000 | 0 (off) | **Fountain-coded frames** (random linear code) for video mode: a full-rank set of roughly `stripeData` captured frames per stripe reconstructs the data; dependent/duplicate frames do not count. Mutually exclusive with `-R` |
+| `-p, --password <pw>` | any string | off | AES-256-GCM encrypt the payload (PBKDF2-SHA256 key); decode needs the same password. Command-line passwords may be exposed in shell history and process listings |
 | `-f, --format <fmt>` | `png`, `bmp`, `tga`, `qoi`, `webp`, `tiff` | `png` | Lossless container format |
 | `--camera` | flag | off | Camera profile: finder patterns so shards decode from **photos/handheld video** of the screen; shifts defaults to cell 8 / 2 bits / ECC 32 |
 | `--video` | flag | off | Also write a slideshow (see `--slideshow`) for recording-based capture |
-| `--slideshow <kind>` | `html`, `apng` | `html` | With `--video`: a self-contained `slideshow.html` page, or a single animated PNG (`slideshow.apng`) cycling the shards — useful where one media file is easier to display/record than a browser page |
+| `--slideshow <kind>` | `html`, `apng` | `html` | With `--video`: a relative-manifest `slideshow.html` that must stay beside the shard/sidecar files, or a single `slideshow.apng`. APNG creation refuses sets exceeding 256 MiB of decoded RGB frames; HTML scales without retaining every frame |
 | `--open` | flag | off | With `--video`: open the slideshow in the default browser once encoding finishes. `qrshard send` is exactly `encode --video --open` |
 | `-i, --interval <ms>` | ≥ 100 | 500 | Slideshow interval per image (both slideshow kinds) |
 | `--interleave2` | flag | off | v2 permuted interleave: spreads **vertical** damage (a horizontal banner/overlay) across codewords as well as horizontal. Needs ECC. Signalled by a metadata field from version 4 onward (it rode the version nibble in v3), so a decoder that cannot read it rejects the strip rather than misreading it |
@@ -175,21 +238,65 @@ archive root; multiple inputs keep their names (colliding names are refused, nev
 overwritten). Unknown or misspelled options are rejected up front — a typo'd `--pasword` errors
 with a "did you mean" hint rather than silently encoding **unencrypted**.
 
+Archive transfer is deliberately a portable subset. Ordinary files and directories, including
+empty directories, are carried. The archive carries Unix regular-file owner/group/other rwx bits,
+including executability; extraction applies them subject to the receiver's umask, while .NET strips
+setuid, setgid, and sticky special bits. A top-level symbolic link/junction is rejected and
+reparse-point entries found inside a selected folder are skipped rather than followed. Hard-linked
+paths are copied as independent regular files.
+Unsafe platform-specific names and paths that alias by case or Unicode normalization are rejected
+at encode and extract time. Ownership, ACLs, extended attributes, alternate data streams,
+sparse-file state, directory modes/metadata, and hard-link identity are not portable archive
+guarantees.
+
 ### `decode` options
 
 | Option | Supported values | Default | Description |
 |---|---|---|---|
-| `-o, --out <path>` | any path | original filename in the current directory (never overwrites — falls back to `<name>.restored<ext>`, then `.restored-2`, `.restored-3`, …) | Where to write the file (a directory for archive payloads) |
-| `-p, --password <pw>` | any string | — | Password for encrypted payloads (clear error if missing or wrong) |
+| `-o, --out <path>` | any path | original filename in the current directory (never overwrites — falls back to `<name>.restored<ext>`, then `.restored-2`, `.restored-3`, …) | Where to write the file (a directory for archive payloads). Single files are staged and verified before atomic publication; an archive destination must be absent or empty |
+| `-p, --password <pw>` | any string | — | Password for encrypted payloads. A wrong password fails without publishing plaintext, but lengths, image counts, and other cleartext shard metadata remain visible. Command-line values may appear in shell history/process listings |
 | `--session <file>` | any path | off | Accumulate shards across sittings: incomplete sets persist (exit 3) with a missing-image report; the next run resumes from the union; deleted on success. Applies to decoding **images**; a recording is re-read from the start each time, so passing it there is rejected rather than silently ignored |
 | `--watch` | flag | off | Keep watching the folder: decode captures as they land, assemble the moment the set completes; Ctrl+C persists to the session |
 | `--clipboard` | flag | off | (Windows) decode the bitmap on the clipboard — snip a displayed shard with Win+Shift+S, no file saving; accumulates with `--session` |
-| `--fps <n>` | > 0 | 8 | Frame extraction rate when decoding a video recording. If not pinned, an incomplete file recording is automatically re-extracted at 2× then 4× until the set completes |
+| `--fps <n>` | finite, >0 | 8 | Frame extraction rate when decoding a video recording. If not pinned, an incomplete file recording is automatically re-extracted at 2× then 4× until the set completes |
 | `--json` | flag | off | Emit the result as JSON on stdout instead of the human log — the restored files with their **resolved output paths** and lengths, or the per-file completeness status when the set is incomplete |
 
 A plain `decode` of an incomplete folder prints the same per-file status `verify` shows, names
 the missing images, points you at `--session`/`--watch`, and exits **3** (distinct from a hard
 error) — nothing already collected is lost.
+
+Successful outputs are never streamed into their final pathname. A single file is written to an
+unpredictable sibling, length- and SHA-256-verified, then atomically moved into place; replacing an
+explicit existing `-o` copies the limited access metadata described below. Archives are verified
+as tar bytes first, extracted into a private sibling directory, and published only after every
+entry succeeds. An explicit archive destination is refused unless it is absent or empty, so decode
+never merges an archive into an existing tree.
+
+An atomic replacement necessarily creates a new filesystem object. For an explicit existing
+single-file `-o`, QrShard carries forward Unix rwx mode bits, or the Windows DACL and basic file
+attributes, but not ownership, timestamps, ACL details beyond that DACL, extended attributes,
+alternate streams, sparse state, or hard-link identity. Use a fresh output path when those details
+matter. A newly created single-file destination deliberately keeps the private staging security:
+requested mode 0600 on Unix (or stricter after the process umask) or a protected owner-only DACL on
+Windows. A newly created archive root similarly requests mode 0700 or uses an owner-only DACL; tar
+file modes beneath it are still applied as described above. If an explicit archive destination is
+an existing empty directory, its root instead carries forward the caller's full Unix directory
+mode, including setgid/sticky policy bits, or its Windows DACL and basic attributes. This preserves
+destination-root policy, not directory modes from the archive. Publishing the complete tree is
+non-merging, but replacement of the empty directory is not promised as one atomic filesystem
+operation.
+
+### `receive` options
+
+| Option | Supported values | Default | Description |
+|---|---|---|---|
+| `--device <d>` | ffmpeg device name/spec | Windows: required unless `--screen`; Linux: `/dev/video0`; macOS: `0` | Camera or capture-card input |
+| `--format <fmt>` | ffmpeg input format | Windows: `dshow`; Linux: `v4l2`; macOS: `avfoundation` | Override the platform capture framework |
+| `--screen` | flag | off | Capture this machine's display instead of a camera; takes precedence over `--device` |
+| `--region <x,y,w,h>` | integer x/y; positive w/h | whole screen | With `--screen`, restrict capture to a rectangle |
+| `--fps <n>` | finite, >0–120 | 10 (or `ReceiveFps`) | Capture sampling rate |
+| `-o, --out <path>` | any path | decoded-name rules above | Output file or archive directory |
+| `-p, --password <pw>` | any string | — | Password for an encrypted transfer; command-line exposure warning above applies |
 
 ### Scripting: exit codes and `--json`
 
@@ -230,20 +337,23 @@ $ qrshard decode captures/ --json; echo "exit $?"
 exit 3
 ```
 
-There is deliberately no `restored` key on that shape: a folder mixing one complete file with one
-incomplete file writes the complete one before stopping, and which files landed is not tracked on
-that path — so listing them would be a guess.
+There is deliberately no `restored` key on that shape: when `-o` is omitted, a folder mixing one
+complete file with one incomplete file writes the complete one before stopping, and which files
+landed is not tracked on that path — so listing them would be a guess. An explicit `-o` cannot
+name multiple outputs, so a mixed-FileId folder must instead be decoded without it or split up.
 
 ## Workflow tools: sessions, watch, verify, heatmap, calibrate
 
 - **Sessions** (`--session s`): capture in as many sittings as you like; every decoded shard
-  persists to a CRC-guarded session file and each run reports exactly what's still missing.
+  persists to a CRC-guarded session file and each run reports exactly what's still missing. The
+  file is atomically replaced with private permissions (requested Unix 0600, or stricter after
+  umask / protected owner-only Windows DACL), but it contains raw shard payloads — plaintext for
+  an unencrypted transfer — so protect it like the source.
 - **Watch mode** (`decode incoming/ --watch --session s`): leave the receiver running and just
   keep dropping captures in — it decodes each as it lands and assembles automatically.
 - **`verify`**: is this set complete/recoverable? Per-file data/parity counts, missing indices,
   parity-coverage status; exit 0 only when fully reassemblable, 3 when images are still missing
-  (1 is reserved for images that are unusable — the one answer capturing more cannot fix).
-  `--json` for scripts.
+  (1 covers hard errors such as no decodable shards, corruption, or I/O). `--json` for scripts.
 - **`info --heatmap out.png`**: a per-cell ECC damage map — green (clean) through red (heavily
   corrected) to dark red (beyond correction) — showing exactly where the glare blob or cursor
   landed. When a capture fails so badly there is no correction data to map, it falls back to the
@@ -280,9 +390,9 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 | `ShardFolderSuffix` | filename-safe suffix | `.shards` | Output-folder suffix when `-o` isn't given |
 | `PngCompressionLevel` | `Optimal`, `Fastest`, `SmallestSize`, `NoCompression` | `Optimal` | Deflate level for the built-in PNG writer where compression pays off (cells ≥ 2 px). 1 px cells bypass deflate entirely (stored blocks — their noise-like content is incompressible by construction) |
 | `PayloadCompressionLevel` | same four values | `Optimal` | Brotli level for compressing the file payload |
-| `EncodeMemoryBudgetMB` | 64–1000000 | 2000 | Pixel-buffer budget capping parallel encode workers. Encode workers are additionally hard-capped at the logical core count, so raising this past what the cores can use changes nothing |
-| `DecodeMaxParallelism` | 0–1024 | 0 (auto: cores, capped at 24) | Max parallel image decodes. The cap trades throughput for memory rather than marking a plateau — at 4K, 24 workers decode ~20% faster than 16 for ~1.5 GB more peak working set, and 32 adds a further ~8% for ~0.45 GB. Raise it if you have memory to spare; lower it on memory-constrained machines |
-| `DecodeMemoryBudgetMB` | 64–1000000 | 8000 | Scratch budget for parallel decoding — the counterpart to `EncodeMemoryBudgetMB`. Workers are the lower of `DecodeMaxParallelism` and what this affords against the largest image in the set (read from its header first). A 4K frame costs ~199 MB of scratch and a 48 MP photo ~1.15 GB — dominated by the binarizer's two 8-byte-per-pixel integral images — so the default admits the full 24 workers at 4K and ~6 on phone-sized photos. It is a declared ceiling, **not** a reading of free memory: a full pool on 48 MP input reaches ~6.9 GB, so lower it on a machine with less RAM to spare |
+| `EncodeMemoryBudgetMB` | 64–1000000 | 2000 | Planning budget for resident compressed/encrypted payload bytes, retained parity/FEC buffers, and image canvases. Compression is skipped when its conservative transient peak would exceed the budget; password encryption or a payload/parity plan that cannot fit one canvas is refused with an actionable error. Remaining capacity caps parallel workers, also hard-capped at the logical core count |
+| `DecodeMaxParallelism` | 0–1024 | 0 (auto: cores, capped at 24) | Upper bound on parallel image decodes. The memory planner and image count can reduce the actual pool further |
+| `DecodeMemoryBudgetMB` | 64–1000000 | 4000 | Worker-planning budget based on the largest identified source image at ~40 bytes/pixel. That is ~332 MB per 4K frame and ~1.92 GB per 48 MP photo, so the default plans about 12 and 2 workers respectively. It is not a hard process-memory ceiling or a reading of free RAM. A separate one-image admission gate charges ~6 bytes/pixel before load |
 | `ReceiveFps` | >0–120 | 10 | Default frame rate for the live `receive` capture |
 | `WatchPollMs` | 50–60000 | 250 | Folder poll interval (ms) for `decode --watch` |
 | `ReceiveDecodeWorkers` | 0–64 | 0 (auto) | Parallel frame-decode workers for the live receiver |
@@ -290,32 +400,35 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 
 ### Tuning for a large machine
 
-**The memory budgets only ever lower the worker count; neither can raise it.** Both are
-`Clamp(budget / per-worker-bytes, 1, someCap)`, so a bigger budget removes a constraint that may
-not have been binding in the first place. On a machine with plenty of RAM the budgets are almost
-never what limits you — the worker caps are:
+The encode budget first governs compression/encryption and fixed payload/FEC admission as described
+above. Once that fixed plan and one render canvas fit, its remaining capacity can only lower the
+render-worker count; raising it never takes encode above the logical core count. Decode uses the
+lower of the image count, `DecodeMaxParallelism` (auto is `min(cores, 24)`), and
+`floor(DecodeMemoryBudgetMB / largest-image-planning-cost)`, clamped to at least one worker. The
+decode planning cost is deliberately conservative at roughly **40 bytes per source pixel**: it
+includes the loaded RGB image, pooled pixels, visited/luminance/dark maps, two 8-byte-per-pixel
+integral images, camera fallback, and measured overhead. It controls concurrency; allocator pools,
+codec internals, GC overlap, and other process memory mean it is not a hard working-set limit.
 
 | | Worker cap | Raisable? |
 |---|---|---|
 | **Encode** | the logical core count | **No.** No setting exceeds it — more workers than cores does not help CPU-bound work |
-| **Decode** | `DecodeMaxParallelism`, default auto = `min(cores, 24)` | **Yes**, up to 1024 |
+| **Decode** | `DecodeMaxParallelism`, default auto = `min(cores, 24)`, then reduced by the memory planner | **Yes**, up to 1024, but the budget must also afford it |
 
-So on a 32-thread machine the encoder already uses all 32 whenever memory allows, while the
-decoder stops at 24 and leaves 8 threads idle. The knob that helps is the parallelism cap, not
-the budget:
+At the 4000 MB default, a 3840×2160 input plans at ~332 MB per worker, so even a 32-thread
+machine runs about 12 batch-decode workers. A 48 MP photo plans at ~1.92 GB, so it runs about two.
+To request 32 workers for 4K input you must deliberately raise both constraints; for example,
+roughly 10.7 GB is required by the planning formula:
 
 ```json
-{ "DecodeMaxParallelism": 32 }
+{ "DecodeMaxParallelism": 32, "DecodeMemoryBudgetMB": 11000 }
 ```
 
-Worth about **+8.4% median decode throughput** at 4K on a 16-core/32-thread part (measured idle,
-24 vs 32 workers) for roughly 0.45 GB more peak working set.
-
-Raising `DecodeMemoryBudgetMB` only matters if you decode images far larger than a camera
-produces — at the 500-megapixel per-image ceiling a worker holds ~2 GB, so a full pool would need
-tens of GB. That is a reasonable setting for very high-resolution scans **you produced yourself**.
-Be aware it also removes the bound for a *hostile* set: the image dimensions come from whoever
-made the shards, and that ceiling is what the budget exists to enforce.
+There is also a **separate single-image gate** before pixels are loaded: approximately two RGB24
+surfaces, or 6 bytes/pixel, must fit the same `DecodeMemoryBudgetMB`. It avoids charging a clean,
+axis-aligned shard for the full camera fallback while still bounding one hostile image. Raising the
+setting therefore increases both concurrency and the largest individually admitted image; do it
+only when the machine has the headroom and the input is trusted.
 
 Deliberately *not* configurable: anything both sides of a transfer must agree on — frame
 geometry, metadata-strip layout, magic numbers, Reed-Solomon/GF(2⁸) parameters — plus the
@@ -336,8 +449,9 @@ silently produces the wrong bytes. So:
 > **Upgrade the receiver first, or upgrade both ends together.** A sender on 1.6.0 **or newer**
 > talking to a receiver on 1.5.x produces images the receiver cannot read.
 
-Header *flags* extend compatibly by contrast — unknown bits are rejected without a version
-change, which is why new features usually cost nothing here.
+Header *flags* are a separate extensibility mechanism: a new feature need not change the metadata
+layout version, but an older reader still rejects a set that uses a flag it does not know. That is
+fail-safe feature negotiation, not reverse compatibility.
 
 ## Capacity and throughput
 
@@ -352,19 +466,21 @@ Per image (with the default ECC): `bytes ≈ grid cells × bits/cell / 8 × 239/
 | 4096²       | 1 px | 8    | ~14.1 MB      | pixel-perfect; needs a >4K display to show at 100% |
 
 **Can you transfer a 300 MB zip? Yes.** At 4K density it is ~65 images; with `-R 10` you also
-get 7 parity images so any 7 can be lost. The codec itself is never the bottleneck (about a
-second for 300 MB) — end-to-end time is dominated by *capture cadence*: at a manual ~3 s per
-screenshot, ~72 images ≈ **3-4 minutes** (~1 MB/s effective); an automated capture loop pushes
-that several-fold. Not sure what density your setup survives? `qrshard calibrate`. Hard limits:
-≤ 1.5 GB per file; display size caps per-image resolution.
+get 7 parity images in its stripe, so any 7 images in that stripe can be lost. End-to-end time is
+usually dominated by *capture cadence*: at a manual ~3 s per screenshot, ~72 images is about
+3–4 minutes; automated capture is faster. Treat the generated benchmark table below as the
+performance source of record rather than extrapolating a fixed codec rate. Not sure what density
+your setup survives? `qrshard calibrate`. Hard limits: ≤1.5 GB per single-file payload or prepared
+archive; ≤100,000 archive entries; ≤128 path segments per archive entry; and ≤200,000
+distinct archive path nodes on decode. Display size caps per-image resolution.
 
 ### Decode frame rate
 
-How fast the *receiver* turns captured images back into data — the number that decides whether
-the decoder can keep up with a slideshow or a video. Two figures per density: **one core** (the
-portable per-frame cost) and **parallel** (the default decoder, up to 24 image workers). Payload
-rate is the parallel frame rate times the payload each frame carries; the 250 MB column is decode
-time alone at that rate.
+How fast the *receiver* turns captured images back into data. Two figures per density: **one core**
+(the portable per-frame cost) and a benchmark-machine **parallel probe**. Payload rate is the
+parallel frame rate times the payload each frame carries; the 250 MB column is decode time alone
+at that measured rate. These are controlled probe results, not a promise that every decode mode
+uses that worker count.
 
 | Resolution / density | Payload / image | Frames/s, 1 core | Frames/s, parallel* | Payload rate* | 250 MB, decode only* |
 |---|---:|---:|---:|---:|---:|
@@ -373,24 +489,22 @@ time alone at that rate.
 | 3840×2160 · 1 px · 6-bit *(Max4K)* | ~4.9 MB | ~14 (70 ms) | ~81 | ~397 MB/s | ~0.6 s |
 | 3840×2160 · 1 px · 8-bit | ~6.5 MB | ~13 (77 ms) | ~76 | ~498 MB/s | ~0.5 s |
 
-\*Parallel figures are on the [benchmark machine](#benchmark-snapshot) (32 logical cores) and
-scale down on fewer cores; the one-core column does not. The worker cap is a **memory** ceiling,
-not a bandwidth one — each worker holds a full-resolution pixel buffer, while PNG read is only
-~6.5% of a 4K image's decode. Raise `DecodeMaxParallelism` if you have memory to spare. Work is
-handed out one image at a time rather than in pre-assigned ranges, so the rate does not depend on
-whether the image count divides evenly by the worker count. Reproduce with `dotnet run -c Release
--- --fps-probe` in `tests/QrShard.Benchmarks`.
+\*Parallel figures are from the [benchmark machine](#benchmark-snapshot) (32 logical cores) and
+scale down on fewer cores. Batch folder decode is capped by cores, `DecodeMaxParallelism`, image
+count, and the ~40-byte/pixel memory planner; with the current 4000 MB default it plans about 12
+workers for 4K input, not the auto cap of 24. File-recording decode is sequential so that early
+stop and frame ordering stay deterministic. Live receive defaults to 2–4 workers depending on
+core count (or `ReceiveDecodeWorkers`). Reproduce the probe in `tests/QrShard.Benchmarks` with
+`dotnet run -c Release -- --fps-probe`. These persisted measurements are from v1.6.1; they are a
+baseline, not timings asserted for an unmeasured later revision.
 
 Notice the frame rate *falls* with density while the payload rate *rises*: a 4K frame decodes
-about 4x slower than a 2160² one but carries ~23x more data, so denser images move more bytes
-per second and a fixed transfer needs fewer of them — the same reason Max4K wins the
-[transfer charts](#charts). It also means **decode is never the limit in practice**: the default
-slideshow runs at 2 frames/second (500 ms/image), and even the slowest one-core rate here (~13
-fps at 4K) clears that ~6x over, while every parallel rate clears a 60 Hz display. The parallel
-250 MB decode times — well under a second at 4K — sit far below the capture-bound reality of the
-same transfer: the benchmark table puts 250 MB at Max4K around **28 s** even with a scripted
-0.5 s/image loop, and minutes by hand. The decoder spends almost all of a real transfer waiting
-for the next frame.
+more slowly but carries much more data, so dense, clean captures can still move more bytes per
+second and need fewer images — the same reason Max4K wins the [transfer charts](#charts). On the
+benchmark machine the default 2 fps slideshow cadence sits below the measured one-core clean-frame
+rates. Decode can nevertheless become the limit on slower machines, camera/rectification paths,
+very large photos, aggressive slideshow intervals, or memory-throttled pools, so measure the real
+capture chain rather than treating the table as a universal ceiling.
 
 ## Sample output
 
@@ -430,13 +544,14 @@ derived views are committed: a filled Max4K shard is ~25 MB of essentially incom
 at full resolution. The payload comes from a fixed seed, so the data field is stable between
 runs — but the images are not byte-identical, because every encode stamps a random 64-bit file
 id (that is what lets shards of *different* files share a folder without being confused), and
-that id lives in the metadata strip.
+that id lives in each shard's data-cell header.
 
 ## Image formats
 
 Shards can be written in any of six lossless container formats (`-f`); the container is
-transport-only — decoding, ECC, and recovery are identical through all of them. Measured on a
-100 MB transfer at the default density:
+transport-only — decoding, ECC, and recovery are identical through all of them. The following is
+a historical benchmark-machine snapshot for a 100 MB transfer at the default density, useful for
+relative format trade-offs rather than as a current-checkout performance guarantee:
 
 | Format | Encode | Decode | Disk | Notes |
 |---|---:|---:|---:|---|
@@ -447,9 +562,10 @@ transport-only — decoding, ECC, and recovery are identical through all of them
 | `tiff` | 6.2 s | 2.9 s | 973 MB | deflate level 1 |
 | `webp` | 21 s | 5.2 s | 194 MB | lossless mode; smallest, slowest |
 
-GIF is deliberately unsupported: its 256-color palette cannot hold the 8-bit cell palette plus
-the frame and strip colors. JPEG and other lossy formats are rejected outright — the format
-requires bit-exact pixels (though mild JPEG *re-encoding of a capture* is absorbed by ECC).
+GIF is deliberately unsupported as a **shard output format**: its 256-color palette cannot hold
+the 8-bit cell palette plus the frame and strip colors. Animated GIF is accepted as a recording
+input. JPEG and other lossy formats are not shard outputs — the format requires bit-exact source
+pixels — though captured JPEG images can decode when their damage remains within the ECC budget.
 
 ## Resilience
 
@@ -493,14 +609,21 @@ Six independent layers, from within-cell to whole-transfer:
    images are rebuilt without recapture. Parity is a systematic Cauchy erasure code — any *S*
    of the stripe's *S+P* images reconstruct it. Fountain frames are random linear combinations
    with header-derivable coefficients — any full-rank subset of captured frames solves the
-   stripe, with no ceiling on how many distinct frames the sender can cycle.
+   stripe, without Cauchy's 255-row ceiling; the configured `-F` percentage determines how many
+   coded frames this encoder emits.
 5. **Detection**: CRC-32 per payload, CRC-32-protected headers, and a SHA-256 of the whole file
-   carried in every image and verified after reassembly — a successful decode is a
-   cryptographic guarantee of a bit-identical file. Encrypted payloads are additionally
+   carried in every image and verified after reassembly — a successful decode strongly checks
+   that the output matches the content declared by that shard set. This is content integrity,
+   not sender authentication: an attacker who can replace the whole set can supply a new hash.
+   Encrypted payloads are additionally
    authenticated by AES-GCM, which also **binds the cleartext identity fields** (original size,
    SHA-256, filename) as associated data: because the header CRC is an integrity check, not a MAC,
    an attacker could recompute it — but a tampered filename/size on an encrypted shard now fails
-   decryption up front rather than silently mis-routing a write.
+   decryption up front rather than silently mis-routing a write. No other header field is AAD:
+   archive/transform/recovery flags remain CRC-only and can affect processing or availability.
+   In particular, flipping the Archive flag on authenticated bytes that already form a valid tar
+   can switch between restoring that tar as one file and extracting it; the safe archive-output
+   rules above remain the containment backstop.
 6. **Structural redundancy**: the self-describing metadata strip and the palette calibration
    strip are duplicated top and bottom, so an overlay across either edge cannot brick an image.
    When both palette strips are healthy but differ (vertical illumination gradients — screen
@@ -509,13 +632,13 @@ Six independent layers, from within-cell to whole-transfer:
    narrow vertical mark can reach the same place in both — which is why neither strip relies on
    the duplication alone. The metadata strip carries Reed-Solomon parity of its own (metadata
    version 4), correcting a burst across two of its sixteen symbols. The palette strips are
-   protected from both directions: a mark across **one** copy is rejected as damage rather than
-   mistaken for illumination — a shadow displaces one entry, where lighting moves them all
-   together — so the healthy copy is used alone instead of being averaged with the bad one; and
-   if the **better-scoring** copy still has entries collapsed onto each other — which is only
-   possible when both are damaged, since the better one is chosen first — the decoder falls back
-   to the theoretical palette, which SPEC §3 derives from the bit depth without reading anything
-   from the image.
+   protected from both directions: selection excludes a copy whose colors have collapsed onto
+   each other before comparing distance to the theoretical palette, so one damaged copy cannot
+   displace a healthy but strongly gain-shifted one. A mark across **one** copy is also rejected
+   from gradient interpolation rather than mistaken for illumination — a shadow displaces one
+   entry, where lighting moves them all together. If neither copy provides separable colors, the
+   decoder falls back to the theoretical palette, which SPEC §3 derives from the bit depth without
+   reading anything from the image.
 
 Parity/fountain images are self-labelling and carry the stripe geometry in every header, so the
 decoder discovers the recovery layout from any surviving image. Shards are order-independent,
@@ -554,6 +677,10 @@ handheld photos remain the honest acceptance test.
 
 ## Benchmark snapshot
 
+This persisted snapshot was measured on the **v1.6.1** code. It remains useful as a
+hardware-specific baseline, not a claim that an unmeasured later revision has identical timings;
+use the reproduction commands below for the current checkout and target machine.
+
 Measured on this machine (BenchmarkDotNet means, Monitoring strategy, 3 iterations per case;
 decoded output SHA-verified every iteration):
 
@@ -568,28 +695,10 @@ decoded output SHA-verified every iteration):
 | .NET | 10.0.10 (win-x64) |
 
 Presets: **Default** = 2160², 3 px cells, 4 bits (robust); **Dense** = 2160², 2 px, 6 bits;
-**Max4K** = 3840x2160, 1 px, 6 bits; **Max4K-R10** = Max4K + 10% parity images.
-
-| Size | Default enc / dec | Dense | Max4K | Max4K-R10 |
-|---:|---:|---:|---:|---:|
-| 1 KB | 11 / 50 ms | 17 / 54 ms | 64 / 110 ms | 81 / 124 ms |
-| 1 MB | 73 / 44 ms | 130 / 60 ms | 79 / 122 ms | 96 / 126 ms |
-| 10 MB | 267 / 161 ms | 213 / 97 ms | 100 / 137 ms | 99 / 141 ms |
-| 100 MB | 2.47 / 1.06 s | 1.34 / 0.46 s | **0.28 / 0.28 s** | 0.35 / 0.37 s |
-| 1 GB | 16.57 / 9.37 s | 10.93 / 4.29 s | **2.24 / 2.42 s** | 2.71 / 2.58 s |
-
-One full-matrix run: all 40 cases (10 sizes x 4 presets) measured back to back on the same build,
-so nothing here is stitched together from different sittings. BenchmarkDotNet v0.15.8 means,
-Monitoring strategy, 3 iterations per case, .NET 10.0.10, decoded output SHA-verified every
-iteration. Macro IO benchmarks are noisy at this iteration count — some small cases carry wide
-error bars — so treat sub-20 ms differences as noise. A relative **perf gate** runs on every PR:
-base and head builds race the same 30 MB round trip, failing on a >30% median regression.
-
-The crossover: below ~1 MB every preset needs one image, so the smaller Default canvas wins on
-fixed cost; at scale, Max4K packs ~13x more payload per pixel, so 100 MB is 22 images instead
-of 495 — which dominates end-to-end time too, since every image is a capture. At 1 GB it is 220
-images against 5,068, and Max4K also finishes the codec work ~5.5x faster (4.7 s vs 25.9 s
-round trip).
+**Max4K** = 3840x2160, 1 px, 6 bits; **Max4K-R10** = Max4K + 10% parity images. The generated
+[All measurements](#all-measurements) table is the single source of benchmark values; the charts
+are exported from the same persisted result set. A relative **perf gate** also races base and head
+on the same 30 MB round trip and fails a >30% median regression.
 
 ### Charts
 
@@ -748,14 +857,15 @@ charts are emitted with every presentation attribute inlined — GitHub's SVG sa
   the render buffer (row-blit rendering, Up filter — or raw *stored* deflate blocks for
   incompressible 1 px cells); the reader handles the truecolor subset every screenshot tool
   emits, ~2x faster than a general decoder, falling back to ImageSharp for anything else.
-- **Streaming both ways**: incompressible inputs are memory-mapped and read per-chunk by the
-  encode workers; reassembly streams chunks → decrypt/decompress → disk with an incremental
-  SHA-256, so neither side materializes the file twice. Encryption is the one exception, because
-  AES-GCM authenticates the whole message before releasing any of it and therefore needs the
-  payload contiguous: the encoder reads the file straight into the cipher blob, and the decoder
-  gathers the shard chunks into one. Both then **encrypt/decrypt that blob in place** rather than
-  pairing it with a second full-size buffer — so encoding an encrypted payload peaks at one copy
-  of it, and decoding at the shard chunks plus one.
+- **Bounded copies where the transform permits**: large incompressible inputs are memory-mapped
+  and read per chunk by encode workers; reassembly streams chunks through decompression to a
+  staged file with incremental SHA-256. Compressible encoding materializes the Brotli input,
+  growing output stream, and final result transiently, so it is attempted only when a conservative
+  four-input-length peak fits `EncodeMemoryBudgetMB`; otherwise compression is safely skipped.
+  Encryption needs a contiguous whole-message buffer because AES-GCM authenticates before releasing
+  plaintext; QrShard encrypts/decrypts that blob in place and refuses a password-protected payload
+  that cannot fit the configured budget. Retained payload and parity bytes are subtracted before
+  choosing image-worker parallelism.
 - **Table-driven Reed-Solomon with SIMD on both paths**: 16 codewords per `Vector128` lane for
   the decode-side syndrome scan *and* the encode-side LFSR (nibble-shuffle product tables);
   clean codewords skip the scalar decoder entirely. Cross-shard parity and fountain coding use
@@ -767,8 +877,8 @@ charts are emitted with every presentation attribute inlined — GitHub's SVG sa
 ### Image library choice
 
 Decode must parse arbitrary screenshots from unknown tools — that needs a mature fallback:
-**ImageSharp** (pure managed, cross-platform; v4, used under a Six Labors community license —
-see below). The hot paths (PNG in both directions) are hand-rolled; everything else goes
+**ImageSharp** (pure managed, cross-platform; pinned to v4.0.0 under Apache-2.0 for this
+MIT-licensed open-source project). The hot paths (PNG in both directions) are hand-rolled; everything else goes
 through ImageSharp with lossless speed-tuned settings.
 
 ## Capture tips
@@ -786,39 +896,135 @@ through ImageSharp with lossless speed-tuned settings.
 
 ## Building and testing
 
-Requires the .NET 10 SDK. `dotnet build -c Release` at the solution root; `./publish.ps1` for
-standalone binaries.
+Requires the exact .NET SDK **10.0.302** enforced by `global.json`. Run `dotnet build -c Release`
+at the solution root. `./publish.ps1` and `bash ./publish.sh` create self-contained JIT single-file
+builds; tagged Native-AOT assets are built by the release workflow instead.
 
-Three workflows run on every push and pull request (CI, Interop, Package), a fourth on pull
-requests only (Perf gate), and a fifth on a weekly schedule (Fuzz):
+Three workflows run on pushes to `main` and on every pull request (CI, Interop, Package), a fourth
+on pull requests only (Perf gate), and a fifth weekly or on manual dispatch (Fuzz):
 
 | Workflow | What it guards |
 |---|---|
-| **CI** | Build + the full suite on windows-latest, ubuntu-latest, ubuntu-24.04-arm and macos-latest — every platform a release binary is published for. Each job renders totals, a per-class breakdown and the slowest tests into the run summary |
+| **CI** | Build + the full suite on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and macos-15 — every platform a release binary is published for. Each job renders totals, a per-class breakdown and the slowest tests into the run summary |
 | **Interop** | Four encoders x four decoders: shards encoded on each OS/arch must decode on every other, forcing parity reconstruction (where the x64 and arm64 GF(2⁸) paths could disagree) and covering the encrypted path |
 | **Package** | Packs both NuGet packages and consumes them from *outside* the repo — compiles the readme's own code sample against the packed package, round-trips through the public API, and installs the dotnet tool |
 | **Perf gate** | Base and head builds race the same 30 MB round trip; a >30% median regression fails |
-| **Fuzz** | Weekly, 20 000 iterations of structure-aware fuzzing over every parser that consumes untrusted bytes |
+| **Fuzz** | Weekly, 20 000-seed deep run of the structure-aware fuzz suite: PNG/image decode, metadata/header parsing, crafted recovery geometry, sessions, encrypted blobs, and clipboard DIBs (the image-sized noise target uses a bounded subset) |
 
-Tagged releases additionally build the Native-AOT binaries, **run** each one (version, self-test
-and a real round trip with a deleted image rebuilt from parity) before attaching it, and only
-publish to nuget.org once all four have passed — publication is the one irreversible step, so it
-waits on everything else.
+The ImageSharp package runs a compile-time license-validation target. GitHub does not expose
+ordinary Actions secrets to fork or Dependabot pull requests, so the CI key is stored separately as
+an encrypted Dependabot secret as well as an Actions secret; it is never committed. Dependabot
+alerts, security updates, and weekly NuGet/GitHub-Actions update proposals are enabled. Bot PRs are
+not auto-merged. Fork changes are not merged directly: a maintainer must reproduce them on a trusted
+repository branch and all required checks must pass. A red no-secret fork run is not evidence that
+the code itself failed.
 
-ImageSharp 4.x validates a license at build time. License keys are personal and **not
-committed**: obtain your own (free community licenses for qualifying open-source use at
-https://sixlabors.com/pricing/) and either drop `sixlabors.lic` at the solution root
-(gitignored) or set the `SixLaborsLicenseKey` environment variable (CI uses the
-`SIXLABORS_LICENSE_KEY` repository secret). The license is build-time only; published binaries
-and end users need nothing.
+`main` is covered by an active repository ruleset: changes require a pull request, open review
+threads must be resolved, and branch deletion and non-fast-forward updates are blocked. The rule
+requires all 15 CI, dependency-audit, interop, package-consumer, and performance contexts from the
+GitHub Actions app to pass against the latest `main`. It requires no approving review because this
+is presently a sole-maintainer repository, and it has no bypass actor. A separate active tag
+ruleset blocks update or deletion of every `v*` release tag, also without a bypass actor, while
+still allowing a new tag to be created. Repository Actions policy permits GitHub-owned actions plus
+the explicitly used
+`NuGet/login` and `dorny/test-reporter`, and requires every `uses:` reference to be a full commit
+SHA. These controls, the protected release environment, and release immutability are GitHub-side
+state rather than immutable files; re-verify them after a repository transfer or settings change.
 
-- `dotnet test` — the xUnit suite, 732 tests in ~20 s. Covers the codec math (CRC vectors, GF(2⁸) field
+Tagged releases are stable-only: preflight requires canonical `vMAJOR.MINOR.PATCH` tags (so NuGet
+normalization cannot disguise an occupied version), requires the tag commit to be on `main`,
+requires the tag version to match both project versions, refuses the run if either package
+ID/version already exists on nuget.org, and fails closed unless the live `release` environment has
+a required reviewer and exactly one `v*` deployment tag policy, and the repository has the exact
+tag update/deletion rules and ref pattern described above. GitHub deliberately hides a ruleset's
+bypass actors from the read-only workflow token, so the current no-bypass setting remains a
+GitHub-side governance check to re-verify manually; the workflow does not pretend otherwise. The
+remote tag is peeled and compared with the event commit again before attestation, draft creation,
+and publication. Runs for the same tag are serialized without cancelling the earlier run.
+
+Four read-only matrix jobs on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and macos-15 use the exact
+.NET SDK 10.0.302 to test and Native-AOT publish win-x64, linux-x64, linux-arm64 and osx-arm64, add
+redistribution notices, and smoke-test the **exact** `QrShard[.exe]` bytes (tagged version,
+self-test, and a real parity-recovery round trip). Each of those same-host matrix jobs then pins
+Microsoft.Sbom.DotNetTool 4.1.5 and generates the archive's SPDX 2.2 document from the exact
+RID-aware publish graph. A separate read-only job packs each NuGet package once and consumer-tests
+those exact packages; a clean package-SBOM job generates the two ordinary framework-dependent
+graphs. All six SBOMs validate the staged artifact hash and reject stale, test, benchmark, and
+SBOM-tool components. The four binary manifests also reject wrong-RID graphs; the package
+manifests reject Native-AOT contamination.
+
+Only after those jobs pass does `create-draft` wait at the protected `release` environment. Its
+configured reviewer must explicitly approve the run; self-review is permitted because the
+repository currently has one maintainer, while administrator bypass is disabled. That
+artifact-only, no-checkout job creates signed SLSA provenance for every release file, attaches each
+of the six artifact-specific signed SBOM predicates, and creates one complete draft containing the
+four archives, both packages, six SBOM documents, and `SHA256SUMS`. A downstream no-checkout NuGet
+OIDC job publishes and mirrors the tested package bytes, then a final no-checkout job makes the
+draft public and immutable. No repository code is checked out or built in a write-enabled job.
+
+### Release recovery: partial NuGet publication
+
+If a package source accepts one package and a later push fails, neither rerunning the failed
+publication job nor starting a new/all-jobs run is safe: the former resubmits both packages,
+while the latter stops at preflight when it sees the occupied version. Adding `--skip-duplicate`
+would not prove that a remote duplicate contains this run's tested bytes. Use the reviewed manual
+recovery below; do not rebuild or retag the same version.
+
+Draft creation has one ambiguous failure mode: GitHub may create the release but the `gh release
+create` response may be lost, so the workflow records no owned draft and a rerun refuses the
+already-existing release. Do **not** automate deletion of that foreign-looking state. Inspect it
+manually first:
+
+```sh
+gh release view "$tag" --json isDraft,author,assets,targetCommitish,url
+```
+
+Only if it is the expected workflow-owned draft, targets the intended commit, and contains no
+unexpected assets, delete the **release only** (`gh release delete "$tag" --yes`, without
+`--cleanup-tag`) and then use **Re-run failed jobs** on the same workflow run. Leave any uncertain
+or externally created release untouched and investigate instead.
+
+Recover the partial package publication as follows:
+
+1. Leave the tag and complete GitHub release **draft** in place. Inventory `QrShard.Tool` and
+   `QrShard.Core` separately on nuget.org and the GitHub Packages mirror.
+2. Retrieve the original run's retained `nuget-packages` artifact (seven-day retention), or the
+   matching nupkg assets already attached to the draft, and verify those local bytes against the
+   draft's `SHA256SUMS`. Never repack the same version.
+3. In a reviewed, no-checkout/no-build recovery job, use NuGet OIDC trusted publishing to push only
+   the missing original nupkg; mirror only missing package IDs to GitHub Packages. Inventory the
+   sources first rather than using a glob to hide which publication already succeeded.
+4. Consumer-test both package IDs at the released version, recheck the draft inventory, then
+   publish that existing draft and record the recovery in its notes. If the original bytes are no
+   longer available or fail their recorded hash, unlist the partial package, leave that version
+   occupied, and release a new version instead.
+
+For releases produced by this workflow beginning with v1.6.2, GitHub stores signed SLSA provenance
+for every exact GitHub Release file (including `SHA256SUMS`) and an artifact-specific signed
+SPDX 2.2 predicate for each archive and package. Release immutability then prevents
+publication-time assets or the tag from being replaced. These controls authenticate GitHub
+workflow provenance, not operating-system publisher identity: Windows remains unsigned by
+Authenticode, and the workflow does not verify a Developer ID signature or notarization for macOS.
+The plaintext `SHA256SUMS` file is not itself a detached platform signature; verify its attestation
+rather than trusting the file in isolation.
+
+ImageSharp is pinned to **4.0.0** and is used by this MIT-licensed open-source project under
+**Apache-2.0**; copyright (c) Six Labors. The Apache-2.0 text ships in release archives and the
+global-tool package. Repository/CI build-validation keys are never committed; when the package's
+build target requests one, use your own gitignored `sixlabors.lic` or the `SixLaborsLicenseKey`
+environment variable. This is a technical notice, not legal advice.
+
+- `dotnet test` — the xUnit suite. Covers the codec math (CRC vectors, GF(2⁸) field
   laws, Reed-Solomon incl. errors-and-erasures, interleaving, Cauchy and fountain erasure
   codes), round trips across every density/ECC/format/flag combination, simulated screenshots
   and camera photos, non-truecolor capture shapes, video recordings (duplicates, torn frames,
   early stop, camera video with pose drift), encryption, archives, sessions, watch mode,
-  fusion, calibration, randomized robustness fuzzing of every untrusted-input parser, and the
-  CLI.
+  fusion, calibration, randomized robustness fuzzing of the parser surfaces listed above, and
+  the CLI. `EnvironmentAssumptionTests` additionally exercises Turkish-I command dispatch,
+  invariant settings/resolution parsing under hostile ambient cultures, Unicode filenames through
+  the real filesystem encode/decode chain, and a forced single-worker decoder. The named-culture
+  theories require normal globalization data; invariant-globalization Native-AOT binaries are
+  exercised separately by release smoke tests.
 - **Cross-version interop**: `tests/QrShard.Tests/golden/` holds frozen shard fixtures encoded by
   the tagged binaries themselves; the suite asserts the current decoder still reconstructs every
   one byte-for-byte, so a shard encoded with an old release always decodes.

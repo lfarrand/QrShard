@@ -58,45 +58,93 @@ internal sealed class PayloadPreparer(PayloadCipher cipher) : IPayloadPreparer
         var mapped = new MappedPayloadSource(filePath);
         sha = PayloadSource.ComputeSha256(mapped);
 
-        byte[]? material = null;
-        if (compress && LooksCompressible(mapped))
+        try
         {
-            var original = new byte[length];
-            mapped.Read(0, original);
-            byte[] compressed = Compress(original, cfg.PayloadCompressionLevel);
-            if (compressed.Length < original.Length)
+            byte[]? material = null;
+            if (compress && CompressionMaterializationFitsBudget(length, cfg.EncodeMemoryBudgetMB) &&
+                LooksCompressible(mapped))
             {
-                material = compressed;
-                flags |= ShardHeader.FlagCompressed | ShardHeader.FlagBrotli;
+                var original = new byte[length];
+                mapped.Read(0, original);
+                byte[] compressed = Compress(original, cfg.PayloadCompressionLevel);
+                if (compressed.Length < original.Length)
+                {
+                    material = compressed;
+                    flags |= ShardHeader.FlagCompressed | ShardHeader.FlagBrotli;
+                }
             }
-        }
 
-        if (password is not null)
-        {
-            var aad = PayloadCipher.BuildAad(length, sha, Path.GetFileName(filePath));
-            if (material is null)
+            if (password is not null)
             {
-                // Read the file straight into the blob's body and seal it there: the plaintext and
-                // the ciphertext are the same bytes, so an incompressible input is materialized
-                // once rather than twice.
-                byte[] blob = PayloadCipher.AllocateBlob(length);
-                mapped.Read(0, PayloadCipher.Body(blob));
-                cipher.SealInPlace(blob, password, aad);
-                material = blob;
+                var aad = PayloadCipher.BuildAad(length, sha, Path.GetFileName(filePath));
+                if (material is null)
+                {
+                    EnsureEncryptionFitsBudget(length, cfg.EncodeMemoryBudgetMB);
+                    // Read the file straight into the blob's body and seal it there: the plaintext and
+                    // the ciphertext are the same bytes, so an incompressible input is materialized
+                    // once rather than twice.
+                    byte[] blob = PayloadCipher.AllocateBlob(length);
+                    mapped.Read(0, PayloadCipher.Body(blob));
+                    cipher.SealInPlace(blob, password, aad);
+                    material = blob;
+                }
+                else
+                {
+                    EnsureEncryptionCopyFitsBudget(material.LongLength, cfg.EncodeMemoryBudgetMB);
+                    material = cipher.Encrypt(material, password, aad);
+                }
+                flags |= ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta;
             }
-            else
-            {
-                material = cipher.Encrypt(material, password, aad);
-            }
-            flags |= ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta;
-        }
 
-        if (material is not null)
+            if (material is not null)
+            {
+                mapped.Dispose();
+                return new PayloadHandle(new BytePayloadSource(material));
+            }
+            return new PayloadHandle(mapped);
+        }
+        catch
         {
             mapped.Dispose();
-            return new PayloadHandle(new BytePayloadSource(material));
+            throw;
         }
-        return new PayloadHandle(mapped);
+    }
+
+    /// <summary>
+    /// Brotli currently needs the original array, a growing MemoryStream (less than twice input
+    /// in the worst useful case), and ToArray's result at once. Four input lengths is the safe
+    /// upper bound; if it does not fit, compression is an optional optimization and is skipped.
+    /// </summary>
+    internal static bool CompressionMaterializationFitsBudget(long length, int budgetMB)
+    {
+        try
+        {
+            return checked(length * 4) <= checked(budgetMB * 1_000_000L);
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
+
+    internal static void EnsureEncryptionFitsBudget(long length, int budgetMB)
+    {
+        long needed = checked(length + PayloadCipher.Overhead);
+        long budget = checked(budgetMB * 1_000_000L);
+        if (needed > budget)
+            throw new InvalidOperationException(
+                $"Password encryption needs ~{needed / 1_000_000:N0} MB for its authenticated payload, " +
+                $"above EncodeMemoryBudgetMB={budgetMB:N0}. Raise the budget deliberately or split the input.");
+    }
+
+    private static void EnsureEncryptionCopyFitsBudget(long length, int budgetMB)
+    {
+        long needed = checked(length * 2 + PayloadCipher.Overhead);
+        long budget = checked(budgetMB * 1_000_000L);
+        if (needed > budget)
+            throw new InvalidOperationException(
+                $"Encrypting the compressed payload needs ~{needed / 1_000_000:N0} MB transiently, " +
+                $"above EncodeMemoryBudgetMB={budgetMB:N0}. Raise the budget deliberately or use --no-compress.");
     }
 
     /// <summary>

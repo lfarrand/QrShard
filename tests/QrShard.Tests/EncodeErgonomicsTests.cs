@@ -1,5 +1,7 @@
 using QrShard;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
+using SixLabors.ImageSharp.Formats.Gif;
 using SixLabors.ImageSharp.PixelFormats;
 
 namespace QrShard.Tests;
@@ -54,6 +56,29 @@ public class EncodeErgonomicsTests
         Assert.Equal(0, code);
         Assert.Contains("Restored", text);
         Assert.Equal(content, File.ReadAllBytes(output));
+    }
+
+    [Fact]
+    public void AnimatedGif_IsRoutedThroughTheRecordingDecoder()
+    {
+        // GIF is not a shard OUTPUT format (its 256-colour palette cannot represent every
+        // 8-bit-cell shard), but it is a documented recording INPUT format. Omitting ".gif" from
+        // Cli.IsImageFile made this bypass the animated-image route: the ordinary image decoder
+        // silently read frame 1 only. Keep this test about dispatch, not GIF quantization: the
+        // recording contains two unmistakably different frames and need not contain a shard.
+        using var tmp = new TempDir();
+        string gif = tmp.File("recording.gif");
+        using (var animation = new Image<Rgb24>(32, 32, new Rgb24(255, 0, 0)))
+        {
+            using var second = new Image<Rgb24>(32, 32, new Rgb24(0, 0, 255));
+            animation.Frames.AddFrame(second.Frames.RootFrame);
+            animation.SaveAsGif(gif, new GifEncoder { ColorTableMode = FrameColorTableMode.Local });
+        }
+
+        var (code, text) = Run("decode", gif);
+        Assert.NotEqual(0, code); // deliberately not a shard
+        Assert.Contains("Decoding video", text);
+        Assert.DoesNotContain("Decoding 1 image(s)", text);
     }
 
     [Fact]

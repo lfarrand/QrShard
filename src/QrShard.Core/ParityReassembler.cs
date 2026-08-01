@@ -40,7 +40,10 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
 
         foreach (var group in shards.GroupBy(s => s.Header.FileId))
         {
-            var first = group.First().Header;
+            List<DecodedShard> groupList = [.. group];
+            var first = groupList[0].Header;
+            if (groupList.Any(s => !first.HasSameFamilyAs(s.Header)))
+                return false;
             int count = first.Count, s = first.StripeData, p = first.StripeParity;
 
             // Defense in depth: ShardHeader.Deserialize already bounds the geometry, but a
@@ -50,30 +53,54 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
             if (!StripeGeometryUsable(count, s, p))
                 return false;
 
-            var dataPresent = new bool[count];
-            foreach (var x in group)
-                if (!x.Header.IsParity && x.Header.Index < count)
-                    dataPresent[x.Header.Index] = true;
+            var dataByIndex = new Dictionary<int, DecodedShard>();
+            foreach (var x in groupList)
+                if (!x.Header.IsParity && (uint)x.Header.Index < (uint)count)
+                    dataByIndex.TryAdd(x.Header.Index, x);
+            bool allDataPresent = dataByIndex.Count == count;
 
-            if (p == 0)
+            // This is the exact fast path used by ShardAssembler: optional malformed parity does
+            // not poison a complete data set, but the selected data chunks must concatenate to
+            // the declared length before video/live capture is allowed to stop early.
+            if (allDataPresent)
             {
-                if (Array.IndexOf(dataPresent, false) >= 0)
+                if (dataByIndex.Values.Sum(shard => (long)shard.Payload.Length) != first.TotalLength)
                     return false;
                 continue;
+            }
+            if (p == 0)
+                return false;
+
+            int stripes = (count + s - 1) / s;
+            var parityOrdinals = groupList
+                .Where(x => x.Header.IsParity && x.Header.Index >= 0 &&
+                    ((first.Flags & ShardHeader.FlagFountain) != 0 || x.Header.Index < stripes * p))
+                .Select(x => x.Header.Index)
+                .ToHashSet();
+            // Every usable shard contributes at most one equation. Reject a clearly incomplete
+            // set before any Count/stripe-sized structure or O(Count) walk; Count is untrusted and
+            // video/live invokes this after each newly accepted frame.
+            if ((long)dataByIndex.Count + parityOrdinals.Count < count)
+                return false;
+            try
+            {
+                // Mirror recovery admission before the count/rank calculation. This performs no
+                // Count x capacity allocation, but rejects poisoned ordinals and inconsistent
+                // payload sizes that assembly would reject after an erroneous early stop.
+                ValidateChunkCapacity(groupList, first,
+                    (first.Flags & ShardHeader.FlagFountain) != 0 ? null : stripes * p, out _);
+            }
+            catch (ShardDecodeException)
+            {
+                return false;
             }
 
             if ((first.Flags & ShardHeader.FlagFountain) != 0)
             {
-                if (!IsFountainSetComplete(group, first, dataPresent))
+                if (!IsFountainSetComplete(groupList, first, dataByIndex.Keys.ToHashSet()))
                     return false;
                 continue;
             }
-
-            int stripes = (count + s - 1) / s;
-            var parityPresent = new bool[stripes * p]; // by ordinal, so duplicates don't double-count
-            foreach (var x in group)
-                if (x.Header.IsParity && x.Header.Index < parityPresent.Length)
-                    parityPresent[x.Header.Index] = true;
 
             for (int g = 0; g < stripes; g++)
             {
@@ -81,10 +108,10 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
                 int stripeData = Math.Min(s, count - firstIndex);
                 int have = 0;
                 for (int pi = 0; pi < p; pi++)
-                    if (parityPresent[g * p + pi])
+                    if (parityOrdinals.Contains(g * p + pi))
                         have++;
                 for (int t = 0; t < stripeData; t++)
-                    if (dataPresent[firstIndex + t])
+                    if (dataByIndex.ContainsKey(firstIndex + t))
                         have++;
                 if (have < stripeData)
                     return false;
@@ -95,7 +122,8 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
 
     /// <summary>Fountain stripes solve when the available equations (identity rows for present
     /// data images + the coded frames' coefficient rows) reach full rank.</summary>
-    private bool IsFountainSetComplete(IEnumerable<DecodedShard> group, ShardHeader first, bool[] dataPresent)
+    private bool IsFountainSetComplete(IEnumerable<DecodedShard> group, ShardHeader first,
+        HashSet<int> dataPresent)
     {
         int count = first.Count, s = first.StripeData;
         int stripes = (count + s - 1) / s;
@@ -114,7 +142,7 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
             var rows = new List<byte[]>();
             for (int t = 0; t < stripeData; t++)
             {
-                if (!dataPresent[firstIndex + t])
+                if (!dataPresent.Contains(firstIndex + t))
                     continue;
                 var unit = new byte[stripeData];
                 unit[t] = 1;
@@ -136,13 +164,16 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
     public byte[][] ReassembleWithParity(List<DecodedShard> shards, ShardHeader first, Action<string> log,
         out int chunkCapacity)
     {
+        if (shards.Any(s => !first.HasSameFamilyAs(s.Header)))
+            throw new ShardDecodeException(
+                $"Inconsistent shard set for '{ShardHeader.Display(first.FileName)}': repeated file metadata differs.");
         if ((first.Flags & ShardHeader.FlagFountain) != 0)
             return ReassembleFountain(shards, first, log, out chunkCapacity);
         int count = first.Count, s = first.StripeData, p = first.StripeParity;
         if (!StripeGeometryUsable(count, s, p))
             throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': shard header declares invalid stripe geometry.");
         int stripes = (count + s - 1) / s;
-        int cap = shards.Max(x => x.Payload.Length); // full per-image capacity (parity images are always full)
+        int cap = ValidateChunkCapacity(shards, first, stripes * p, out _);
 
         var dataByIndex = new DecodedShard?[count];
         var parityByOrdinal = new DecodedShard?[stripes * p];
@@ -238,7 +269,10 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
         if (!StripeGeometryUsable(count, s, first.StripeParity))
             throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': shard header declares invalid stripe geometry.");
         int stripes = (count + s - 1) / s;
-        int cap = shards.Max(x => x.Payload.Length); // coded frames are always full capacity
+        // Fountain sequence ordinals are intentionally unbounded by the originally emitted frame
+        // count: a sender may mint additional equations later. They still must be non-negative
+        // and use the same full payload capacity.
+        int cap = ValidateChunkCapacity(shards, first, parityOrdinalCount: null, out _);
 
         var dataByIndex = new DecodedShard?[count];
         var codedByStripe = new List<(int Seq, byte[] Payload)>[stripes];
@@ -321,6 +355,65 @@ internal sealed class ParityReassembler(CrossShardFec crossShardFec, FountainFec
 
         chunkCapacity = cap;
         return chunks;
+    }
+
+    /// <summary>
+    /// Derives the full chunk capacity only from shards that must carry a full chunk, then
+    /// validates every present length and the implied final length before Pad/recovery arrays are
+    /// allocated. Taking Max(payload.Length) let one oversized crafted parity shard amplify
+    /// Count x cap allocations before the old late length check.
+    /// </summary>
+    private static int ValidateChunkCapacity(List<DecodedShard> shards, ShardHeader first,
+        int? parityOrdinalCount, out int lastLength)
+    {
+        int? capacity = null;
+        foreach (DecodedShard shard in shards)
+        {
+            bool fullChunk = shard.Header.IsParity
+                ? shard.Header.Index >= 0 &&
+                  (parityOrdinalCount is null || shard.Header.Index < parityOrdinalCount.Value)
+                : (uint)shard.Header.Index < (uint)Math.Max(0, first.Count - 1);
+            if (!fullChunk)
+                continue;
+            if (capacity is null)
+                capacity = shard.Payload.Length;
+            else if (capacity.Value != shard.Payload.Length)
+                throw new ShardDecodeException(
+                    $"'{ShardHeader.Display(first.FileName)}': shard payload capacities are inconsistent.");
+        }
+
+        if (capacity is null || capacity < 1)
+            throw new ShardDecodeException(
+                $"'{ShardHeader.Display(first.FileName)}': no valid full-size shard is available to establish recovery geometry.");
+        int cap = capacity.Value;
+        long impliedLast = first.TotalLength - (long)(first.Count - 1) * cap;
+        if (impliedLast < (first.Count == 1 ? 0 : 1) || impliedLast > cap)
+            throw new ShardDecodeException(
+                $"'{ShardHeader.Display(first.FileName)}': shard capacity is inconsistent with the declared total length.");
+        lastLength = (int)impliedLast;
+
+        foreach (DecodedShard shard in shards)
+        {
+            if (shard.Header.IsParity)
+            {
+                bool validOrdinal = shard.Header.Index >= 0 &&
+                    (parityOrdinalCount is null || shard.Header.Index < parityOrdinalCount.Value);
+                if (!validOrdinal || shard.Payload.Length != cap)
+                    throw new ShardDecodeException(
+                        $"'{ShardHeader.Display(first.FileName)}': parity shard ordinal or payload length is invalid.");
+            }
+            else
+            {
+                if ((uint)shard.Header.Index >= (uint)first.Count)
+                    throw new ShardDecodeException(
+                        $"'{ShardHeader.Display(first.FileName)}': data shard ordinal is invalid.");
+                int expected = shard.Header.Index == first.Count - 1 ? lastLength : cap;
+                if (shard.Payload.Length != expected)
+                    throw new ShardDecodeException(
+                        $"'{ShardHeader.Display(first.FileName)}': data shard payload length is inconsistent with its ordinal.");
+            }
+        }
+        return cap;
     }
 
     private static byte[] Pad(byte[] src, int length)

@@ -165,6 +165,52 @@ public class VideoDecodeTests
         Assert.Contains("missing image(s) 1", ex.Message);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void UnexpectedExceptionInOneUntrustedFrame_IsIsolated(int workers)
+    {
+        var decoder = new VideoDecoder(new UnexpectedFrameDecoder(), new OneFrameSource(),
+            new ShardAssembler(), new ParityReassembler(), new CameraRectifier());
+
+        var ex = Assert.Throws<ShardDecodeException>(() =>
+            decoder.Decode("ignored", null, 8, _ => { }, out _, decodeWorkers: workers));
+
+        Assert.Contains("No decodable shard images", ex.Message);
+    }
+
+    [Fact]
+    public async Task ParallelLiveDecode_CancelsAProducerBlockedAfterTheCompletingFrame()
+    {
+        using var tmp = new TempDir();
+        var (content, files) = Encode(tmp, size: 100);
+        Assert.Single(files);
+        var scratch = new DecodeScratch();
+        Assert.True(new FastPngReader().TryRead(files[0], scratch, out Bitmap completingFrame));
+        var source = new BlockingAfterFramesSource([completingFrame]);
+        var decoder = new VideoDecoder(new ShardDecoder(), source,
+            new ShardAssembler(), new ParityReassembler(), new CameraRectifier());
+        string output = tmp.File("cancelled-live-out.bin");
+
+        Task<VideoDecodeStats> receive = Task.Run(() =>
+        {
+            decoder.Decode("live-device", output, 8, _ => { }, out VideoDecodeStats stats,
+                decodeWorkers: 2);
+            return stats;
+        });
+
+        Assert.True(source.ProducerBlocked.Wait(TimeSpan.FromSeconds(5)),
+            "producer never reached the simulated stalled camera read");
+        Task completed = await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(5)));
+        if (completed != receive)
+            source.EmergencyRelease.Set(); // avoid leaking a blocked worker if the assertion fails
+        Assert.Same(receive, completed);
+
+        VideoDecodeStats stats = await receive;
+        Assert.True(stats.StoppedEarly);
+        Assert.Equal(content, File.ReadAllBytes(output));
+    }
+
     [Fact]
     public void SingleFrameImage_IsNotTreatedAsVideo()
     {
@@ -196,17 +242,18 @@ public class VideoDecodeTests
     // ---------- Slideshow generation ----------
 
     [Fact]
-    public void Slideshow_EmbedsAllImagesAndInterval()
+    public void Slideshow_ReferencesAllImagesWithoutEmbeddingTheirBytes()
     {
         using var tmp = new TempDir();
         var (_, files) = Encode(tmp, size: 30_000);
         string path = new SlideshowWriter().Write(Path.GetDirectoryName(files[0])!, files, 350);
 
         string html = File.ReadAllText(path);
-        Assert.Equal(files.Count, html.Split("data:image/png;base64,").Length - 1);
+        Assert.All(files, file => Assert.Contains(Path.GetFileName(file), html));
         Assert.Contains("const interval = 350", html);
-        // Embedded payloads must be the actual files.
-        Assert.Contains(Convert.ToBase64String(File.ReadAllBytes(files[0]))[..64], html);
+        Assert.DoesNotContain(";base64,", html);
+        Assert.True(new FileInfo(path).Length < 64 * 1024,
+            "the manifest should stay small regardless of the shard bytes beside it");
     }
 
     [Fact]
@@ -281,5 +328,43 @@ public class VideoDecodeTests
         new VideoDecoder().Decode(mp4, output, 8, _ => { }, out var stats);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.True(stats.FramesDecoded < stats.FramesExamined); // dedupe active at 8 fps vs 2 img/s
+    }
+
+    private sealed class OneFrameSource : IFrameSource
+    {
+        public IEnumerable<Bitmap> Frames(string path, double fps,
+            CancellationToken cancellationToken = default)
+        {
+            yield return new Bitmap(new Rgb24[128 * 128], 128, 128);
+        }
+    }
+
+    private sealed class BlockingAfterFramesSource(IReadOnlyList<Bitmap> frames) : IFrameSource
+    {
+        internal ManualResetEventSlim ProducerBlocked { get; } = new(false);
+        internal ManualResetEventSlim EmergencyRelease { get; } = new(false);
+
+        public IEnumerable<Bitmap> Frames(string path, double fps,
+            CancellationToken cancellationToken = default)
+        {
+            foreach (Bitmap frame in frames)
+                yield return frame;
+            ProducerBlocked.Set();
+            WaitHandle.WaitAny([cancellationToken.WaitHandle, EmergencyRelease.WaitHandle]);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+    }
+
+    private sealed class UnexpectedFrameDecoder : IShardDecoder
+    {
+        public DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path) =>
+            throw new InvalidOperationException("crafted frame reached an unexpected decoder edge");
+
+        public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath,
+            Action<string> log, string? password = null) => throw new NotSupportedException();
+        public List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log) =>
+            throw new NotSupportedException();
+        public DecodedShard DecodeImage(string path, DecodeScratch scratch) => throw new NotSupportedException();
+        public DecodeDiagnostics Diagnose(string path) => throw new NotSupportedException();
     }
 }

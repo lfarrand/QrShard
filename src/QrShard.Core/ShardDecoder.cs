@@ -1,4 +1,5 @@
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
 using SixLabors.ImageSharp.PixelFormats;
 
 namespace QrShard;
@@ -14,6 +15,19 @@ internal sealed class ShardDecoder(
     IStripReader stripReader, IGridSampler gridSampler, IShardAssembler assembler,
     Fec fec, Crc crc, FastPngReader pngReader, IPhotoFusion photoFusion, Interleaver2 interleaver) : IShardDecoder
 {
+    /// <summary>
+    /// A path supplied to the shard decoder represents one captured image, even when its container
+    /// happens to support animation. Without MaxFrames, ImageSharp materializes every frame before
+    /// this class copies only the root frame; a tiny many-frame WebP/TIFF can therefore bypass the
+    /// per-worker memory estimate by orders of magnitude. RecordingFrameSource intentionally uses
+    /// different options because its contract is to enumerate every frame of a recording.
+    /// </summary>
+    internal static DecoderOptions NewShardImageDecoderOptions() => new()
+    {
+        MaxFrames = 1,
+        SkipMetadata = true,
+    };
+
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
     public ShardDecoder() : this(
         AppSettings.Current, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
@@ -103,7 +117,8 @@ internal sealed class ShardDecoder(
         // MaxDegreeOfParallelism, recycling ranges across more threads than it runs at once.
         // Peak working set is a wash — it ranged from -22% to +8% across these counts with no
         // trend, which is GC timing rather than a property of either scheme.
-        int workers = BudgetedWorkers(ordered, parallelism, settings.DecodeMemoryBudgetMB, log);
+        int workers = BudgetedWorkers(ordered, parallelism, settings.DecodeMemoryBudgetMB, log,
+            out long plannedMaxPixels);
         int next = -1;
 
         void Worker()
@@ -115,7 +130,7 @@ internal sealed class ShardDecoder(
                 var diagnostics = new DecodeDiagnostics();
                 try
                 {
-                    results[i] = (DecodeImage(ordered[i], scratch, diagnostics), null);
+                    results[i] = (DecodeImage(ordered[i], scratch, diagnostics, plannedMaxPixels), null);
                 }
                 catch (ShardDecodeException ex)
                 {
@@ -254,7 +269,9 @@ internal sealed class ShardDecoder(
         Image<Rgb24> image;
         try
         {
-            image = Image.Load<Rgb24>(imageBytes);
+            var info = Image.Identify(NewShardImageDecoderOptions(), imageBytes);
+            ValidateImageDimensions(info.Width, info.Height, settings.DecodeMemoryBudgetMB);
+            image = Image.Load<Rgb24>(NewShardImageDecoderOptions(), imageBytes);
         }
         // Everything except the conditions that belong to the whole run, and ShardDecodeException
         // which is already the typed failure. Enumerating types was wrong here for the same reason
@@ -323,9 +340,10 @@ internal sealed class ShardDecoder(
         }
     }
 
-    private DecodedShard DecodeImage(string path, DecodeScratch scratch, DecodeDiagnostics? diagnostics)
+    private DecodedShard DecodeImage(string path, DecodeScratch scratch, DecodeDiagnostics? diagnostics,
+        long plannedMaxPixels = 0)
     {
-        Bitmap bmp = LoadBitmap(path, scratch);
+        Bitmap bmp = LoadBitmap(path, scratch, plannedMaxPixels);
 
         try
         {
@@ -377,13 +395,30 @@ internal sealed class ShardDecoder(
 
     /// <summary>Reads a bitmap into the scratch's pooled pixel buffer, preferring the fast PNG
     /// reader and falling back to ImageSharp for anything outside its truecolor subset.</summary>
-    private Bitmap LoadBitmap(string path, DecodeScratch scratch)
+    private Bitmap LoadBitmap(string path, DecodeScratch scratch, long plannedMaxPixels = 0)
     {
         try
         {
-            if (pngReader.TryRead(path, scratch, out Bitmap bmp))
+            // Hold one file object from identification through decode. Reopening the pathname for
+            // the fast PNG reader or ImageSharp fallback created a check/use race: a producer in a
+            // watched/shared directory could replace a small identified file with a huge one and
+            // bypass this admission check. On Unix a renamed/replaced path does not alter the open
+            // handle; on Windows FileShare.Read also refuses rename/delete while it is open.
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16,
+                FileOptions.SequentialScan);
+            var options = NewShardImageDecoderOptions();
+            var info = Image.Identify(options, stream);
+            long pixels = checked((long)info.Width * info.Height);
+            if (plannedMaxPixels > 0 && pixels > plannedMaxPixels)
+                throw new ShardDecodeException(
+                    $"Image dimensions changed after parallel memory planning ({info.Width:N0}x{info.Height:N0}, " +
+                    $"larger than the planned {plannedMaxPixels:N0} pixels). Retry after the input files stop changing.");
+            ValidateImageDimensions(info.Width, info.Height, settings.DecodeMemoryBudgetMB);
+            stream.Position = 0;
+            if (pngReader.TryRead(stream, scratch, out Bitmap bmp))
                 return bmp;
-            using var image = Image.Load<Rgb24>(path);
+            stream.Position = 0;
+            using var image = Image.Load<Rgb24>(options, stream);
             return ToBitmap(image, scratch);
         }
         // A missing/deleted file, a directory path, a permission error, or a recognized-but-
@@ -406,9 +441,8 @@ internal sealed class ShardDecoder(
     }
 
     /// <summary>
-    /// Scratch bytes a worker holds per pixel of the largest image it handles: Rgb24 pixels (3)
-    /// plus the flood-fill visited map (1). The grid-sized buffers are smaller by the cell size
-    /// and are not the term that matters.
+    /// Planning estimate for the peak bytes a worker holds per pixel of its source image. The
+    /// grid-sized buffers are smaller by the cell size and are not the term that matters.
     /// </summary>
     // Counted, not guessed. 4 was an undercount by roughly 6x, which matters because the whole
     // point of this budget is to stop 24 workers deciding together that they can afford an image
@@ -421,15 +455,45 @@ internal sealed class ShardDecoder(
     //    16   AdaptiveBinarizer integral + integralSq (two long[], 8 bytes each)
     //     1   AdaptiveBinarizer dark (bool)
     //    ---
-    //    25   and the camera path adds another Rgb24 canvas on top of this
+    //    25   common-path managed arrays
+    //     3   camera rectification canvas when the axis-aligned path does not decode
     //
-    // The two Sauvola integral images dominate and were simply never in the estimate. 24 is one
-    // shy of the count above because ImageSharp's copy is released before the binarizer allocates
-    // in the common path; it is a floor, not a ceiling, and the camera path exceeds it. The exact
-    // peak is worth measuring on an idle machine — this project does not quote unmeasured numbers
-    // — but no measurement is needed to know 4 was wrong: Pixels alone is 3 and never travels
-    // alone.
-    private const int ScratchBytesPerPixel = 24;
+    // The two Sauvola integral images dominate and were simply never in the old 4-byte estimate.
+    // Allocator pools, row structures, temporary candidates, GC overlap, and the camera path mean
+    // the sum above is not a process-memory ceiling. Six 48 MP rotated camera-profile inputs were
+    // measured at roughly 38 bytes/source-pixel of private memory, so use 40 for worker planning.
+    // This is deliberately described as an estimate: the setting throttles concurrency; it cannot
+    // promise an exact working-set limit across codecs, allocators, and runtimes.
+    internal const int ScratchBytesPerPixel = 40;
+
+    // The concurrency estimate above includes the camera fallback's large integral-image arrays.
+    // It must not also be used as the single-image admission price: clean shards take the fast,
+    // axis-aligned path and peak at roughly two RGB24 surfaces (the decoder plus DecodeScratch),
+    // and QrShard can legitimately render the full 16,384 x 16,384 supported canvas. Charging
+    // those files for a fallback they never use made the default 4 GB budget reject QrShard's own
+    // output above about 100 MP. The fallback itself refuses inputs above 80 MP before allocating
+    // its integral images, so six bytes/pixel is the relevant pre-load safety gate.
+    private const int SingleImageBytesPerPixel = 6;
+
+    /// <summary>
+    /// Enforces a conservative pre-load budget for one image. Worker concurrency is planned with
+    /// the larger full-pipeline estimate separately; this gate covers the two RGB24 surfaces that
+    /// may coexist while an image is loaded without rejecting the tool's own largest canvas.
+    /// </summary>
+    internal static void ValidateImageDimensions(int width, int height, int budgetMB)
+    {
+        if (width < 1 || height < 1)
+            throw new ShardDecodeException($"Image declares invalid dimensions {width}x{height}.");
+        long pixels = checked((long)width * height);
+        long planned = pixels > long.MaxValue / SingleImageBytesPerPixel
+            ? long.MaxValue
+            : pixels * SingleImageBytesPerPixel;
+        long budget = checked(budgetMB * 1_000_000L);
+        if (pixels > MaxDecodablePixels || planned > budget)
+            throw new ShardDecodeException(
+                $"Image is {width:N0}x{height:N0} (~{planned / 1_000_000:N0} MB planned decode memory), " +
+                $"above the {budgetMB:N0} MB DecodeMemoryBudgetMB. Resize/crop it or raise that setting deliberately.");
+    }
 
     /// <summary>
     /// Worker count for a decode, capped by a memory budget as well as by parallelism.
@@ -437,30 +501,36 @@ internal sealed class ShardDecoder(
     /// ShardEncoder has always derived its degree from EncodeMemoryBudgetMB, because it knows the
     /// canvas size it chose. The decode side had no counterpart: it took min(parallelism, images)
     /// and each worker then sized its scratch from the largest image IT happened to see. With a
-    /// per-image ceiling of 500M pixels that is ~2 GB of scratch per worker, times up to 24 —
+    /// per-image ceiling of 500M pixels that is ~20 GB of planned memory per worker, times up to 24 —
     /// and the dimensions are the sender's choice, not the receiver's.
     ///
     /// The sizes are knowable before any decoding: Image.Identify reads a header without touching
-    /// pixel data, for every format the decoder accepts. The cost is one header read per file
-    /// against a full decode of each afterwards.
+    /// pixel data, for every format the decoder accepts. It receives the same one-frame,
+    /// metadata-free options as the subsequent load, so neither the estimate nor the load expands
+    /// an animation that arrived through the ordinary image path. The cost is one header read per
+    /// file against a full decode of each afterwards.
     ///
     /// Unreadable files are skipped rather than guessed at — they will fail to decode on their own
     /// merits, and letting a corrupt header influence the pool size would hand the attacker the
-    /// very knob this is closing. If none can be identified the budget cannot bind and the
-    /// parallelism limit stands alone, which is the previous behaviour.
+    /// very knob this is closing. If none can be identified the safe fallback is one worker.
+    /// The largest planned pixel count is also enforced on the same open handle used for the
+    /// actual load, so a watched/shared-directory path cannot be replaced or renamed to a larger
+    /// image after planning. On Unix this does not prevent a separately authorised writer from
+    /// modifying the same inode in place during the narrow identify/load window.
     /// </summary>
-    private static int BudgetedWorkers(List<string> images, int parallelism, int budgetMB, Action<string> log)
+    private static int BudgetedWorkers(List<string> images, int parallelism, int budgetMB, Action<string> log,
+        out long largestPixels)
     {
         int ceiling = Math.Min(parallelism, images.Count);
+        largestPixels = 0;
         if (ceiling <= 1)
             return Math.Max(ceiling, 0);
 
-        long largestPixels = 0;
         foreach (string path in images)
         {
             try
             {
-                var info = Image.Identify(path);
+                var info = Image.Identify(NewShardImageDecoderOptions(), path);
                 largestPixels = Math.Max(largestPixels, (long)info.Width * info.Height);
             }
             // Deliberately everything except the two conditions that belong to the whole run. An
@@ -481,13 +551,22 @@ internal sealed class ShardDecoder(
             }
         }
         if (largestPixels <= 0)
-            return ceiling;
+        {
+            // There is no trustworthy size with which to divide the budget. One worker is the
+            // fail-safe choice; each actual file will still be identified and admission-checked
+            // on its stable handle. This also closes a replace-after-probe attack where every path
+            // is initially unreadable and then becomes a large valid image.
+            log("  using 1 decode worker: no input image could be identified for memory planning.");
+            return 1;
+        }
 
-        long perWorker = largestPixels * ScratchBytesPerPixel;
+        long perWorker = largestPixels > long.MaxValue / ScratchBytesPerPixel
+            ? long.MaxValue
+            : largestPixels * ScratchBytesPerPixel;
         int affordable = (int)Math.Clamp(budgetMB * 1_000_000L / perWorker, 1, ceiling);
         if (affordable < ceiling)
             log($"  using {affordable} decode worker(s) instead of {ceiling}: the largest image is " +
-                $"{largestPixels:N0} pixels (~{perWorker / 1_000_000:N0} MB of scratch each) against a " +
+                $"{largestPixels:N0} pixels (~{perWorker / 1_000_000:N0} MB planned each) against a " +
                 $"{budgetMB:N0} MB budget (appsettings.json DecodeMemoryBudgetMB).");
         return affordable;
     }
@@ -511,6 +590,7 @@ internal sealed class ShardDecoder(
 
     private DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path, DecodeDiagnostics? diagnostics)
     {
+        ValidateImageDimensions(bmp.Width, bmp.Height, settings.DecodeMemoryBudgetMB);
         var (layout, inner) = frameLocator.Locate(bmp, scratch);
         // BEFORE anything is sized from it. This check used to live only in ReadDataGrid, three
         // statements further on, so the diagnostics allocation below and every heatmap downstream
@@ -537,20 +617,21 @@ internal sealed class ShardDecoder(
         if (layout.Interleave2 && layout.EccParity > 0)
         {
             var gathered = scratch.GatheredCells(protectedLength);
-            interleaver.Gather(cells, gathered, protectedLength);
             work = gathered;
+            bool[]? flags = null;
             if (suspectBytes is not null)
             {
-                var flags = scratch.GatheredFlags(protectedLength);
-                interleaver.GatherFlags(suspectBytes, flags, protectedLength);
+                flags = scratch.GatheredFlags(protectedLength);
                 workSuspects = flags;
             }
+            byte[]? second = null;
             if (secondChoiceBytes is not null)
             {
-                var second = scratch.GatheredSecond(protectedLength);
-                interleaver.Gather(secondChoiceBytes, second, protectedLength);
+                second = scratch.GatheredSecond(protectedLength);
                 workSecond = second;
             }
+            interleaver.GatherStreams(cells, gathered, suspectBytes, flags,
+                secondChoiceBytes, second, protectedLength);
         }
 
         // Copy the (classic-order) cells into the diagnostics on failure — the raw material
@@ -587,15 +668,22 @@ internal sealed class ShardDecoder(
             stream = cells;
         }
 
+        // Preserve the actionable upgrade diagnostic even though the shared deserializer also
+        // refuses unknown bits for session/fusion callers. Byte 5 is the flags field after QRS1
+        // magic + version; only interpret it when the magic is present.
+        byte unknownFlags = stream.Length > 5 && stream.AsSpan(0, 4).SequenceEqual(ShardHeader.Magic)
+            ? (byte)(stream[5] & ~ShardHeader.KnownFlags)
+            : (byte)0;
+        if (unknownFlags != 0)
+            throw new ShardDecodeException(
+                $"This shard uses features from a newer QrShard (unknown flags 0x{unknownFlags:X2}). Update QrShard to decode it.");
+
         var header = ShardHeader.Deserialize(stream, out int headerLen);
         if (header is null)
         {
             Salvage();
             throw new ShardDecodeException("Shard header is corrupt. Recapture this image.");
         }
-        if ((header.Flags & ~ShardHeader.KnownFlags) != 0)
-            throw new ShardDecodeException(
-                $"This shard uses features from a newer QrShard (unknown flags 0x{header.Flags & ~ShardHeader.KnownFlags:X2}). Update QrShard to decode it.");
         if ((long)headerLen + header.PayloadLength > stream.Length) // long: never overflow on a crafted length
         {
             Salvage();

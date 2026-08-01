@@ -92,8 +92,14 @@ internal sealed class Cli(AppSettings? settings = null)
                 if (positional.Count == 0)
                     return Help(@out, err, "encode requires one or more input files or folders.");
                 foreach (string p in positional)
+                {
                     if (!File.Exists(p) && !Directory.Exists(p))
                         return Help(@out, err, $"not found: {p}");
+                    if ((File.GetAttributes(p) & FileAttributes.ReparsePoint) != 0)
+                        return Help(@out, err,
+                            $"symbolic links and junctions are not accepted as top-level inputs: {p}. " +
+                            "Select the link target explicitly.");
+                }
                 bool json = flags.Contains("--json");
                 Action<string> preLog = json ? _ => { } : @out.WriteLine; // keep stdout clean for --json
 
@@ -105,15 +111,16 @@ internal sealed class Cli(AppSettings? settings = null)
                     ? "bundle"
                     : Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(input)));
                 string file = input;
-                string? tempTarDir = positional.Count > 1 || Directory.Exists(positional[0])
-                    ? Path.Combine(Path.GetTempPath(), "qrshard-tar-" + Guid.NewGuid().ToString("N")[..8])
-                    : null;
+                ShardAssembler.TemporaryDirectoryLease? tempTar = null;
                 try
                 {
                 if (isArchive)
                 {
-                    Directory.CreateDirectory(tempTarDir!);
-                    file = Path.Combine(tempTarDir!, inputName + ".tar");
+                    // This tar is the complete plaintext bundle even when -p will encrypt the
+                    // payload. Its temporary root has an unpredictable name and requests 0700 on
+                    // Unix or a protected owner-only DACL on Windows.
+                    tempTar = CreatePrivateTempDirectory();
+                    file = Path.Combine(tempTar.Path, inputName + ".tar");
                     preLog(positional.Count > 1
                         ? $"Archiving {positional.Count} inputs..."
                         : $"Archiving folder '{input}'...");
@@ -183,8 +190,7 @@ internal sealed class Cli(AppSettings? settings = null)
                 }
                 finally
                 {
-                    if (tempTarDir is not null && Directory.Exists(tempTarDir))
-                        Directory.Delete(tempTarDir, recursive: true);
+                    tempTar?.Dispose();
                 }
             }
 
@@ -224,7 +230,7 @@ internal sealed class Cli(AppSettings? settings = null)
                             "re-read from the start each time, so there is no partial state to carry. " +
                             "Extract frames to images first if you need to resume.");
 
-                    double fps = GetDouble(named, "--fps", 8.0);
+                    double fps = GetValidatedFps(named, 8.0);
                     decLog($"Decoding video '{positional[0]}' (extracting at {fps} fps)...");
                     // Escalate fps automatically for file recordings unless the user pinned --fps.
                     bool userSetFps = Get(named, "--fps") is not null;
@@ -434,13 +440,15 @@ internal sealed class Cli(AppSettings? settings = null)
             case "receive":
             {
                 var (_, named, rflags) = ParseArgs(args[1..]);
+                double fps = GetValidatedFps(named, settings.ReceiveFps, max: 120);
                 IFrameSource source;
                 string sourceLabel;
                 if (rflags.Contains("--screen"))
                 {
                     // Self-capture: decode this machine's own screen — put the sender's
                     // slideshow anywhere visible, including inside an RDP/VM window.
-                    source = new ScreenFrameSource(ScreenFrameSource.ParseRegion(Get(named, "--region")));
+                    source = new ScreenFrameSource(ScreenFrameSource.ParseRegion(Get(named, "--region")),
+                        settings.DecodeMemoryBudgetMB);
                     sourceLabel = "screen";
                     @out.WriteLine("Receiving from this machine's screen — put the sender's slideshow somewhere visible (an RDP or VM window works).");
                 }
@@ -450,18 +458,17 @@ internal sealed class Cli(AppSettings? settings = null)
                     if (device is null)
                         return Help(@out, err,
                             "receive on Windows needs --device \"<webcam name>\" or --screen (list devices with: ffmpeg -list_devices true -f dshow -i dummy)");
-                    source = new LiveFrameSource(Get(named, "--format"));
+                    source = new LiveFrameSource(Get(named, "--format"), settings.DecodeMemoryBudgetMB);
                     sourceLabel = device;
                     @out.WriteLine($"Receiving from '{device}' — point the camera at the sender's slideshow.");
                 }
-                double fps = GetDouble(named, "--fps", settings.ReceiveFps);
                 int workers = settings.ReceiveDecodeWorkers > 0
                     ? settings.ReceiveDecodeWorkers
                     : Math.Clamp(Environment.ProcessorCount / 4, 2, 4);
                 @out.WriteLine($"Decoding at {fps} fps with {workers} worker(s); stops automatically when the transfer completes.");
 
                 var live = new VideoDecoder(services.Decoder, source,
-                    services.Assembler, services.Parity, new CameraRectifier());
+                    services.Assembler, services.Parity, new CameraRectifier(), settings);
                 var received = live.Decode(sourceLabel, Get(named, "-o", "--out"), fps, @out.WriteLine, out var liveStats,
                     Get(named, "-p", "--password"), workers);
                 @out.WriteLine($"Restored {received.Count} file(s) after examining {liveStats.FramesExamined} frame(s).");
@@ -600,39 +607,113 @@ internal sealed class Cli(AppSettings? settings = null)
     /// same name from different folders) are refused rather than silently overwritten — this is
     /// an integrity tool; losing a file without a word is the one thing it must never do.
     /// </summary>
-    private static void WriteTar(IReadOnlyList<string> inputs, string tarPath)
+    internal static void WriteTar(IReadOnlyList<string> inputs, string tarPath)
     {
         bool prefixFolders = inputs.Count > 1;
-        var entries = new List<(string Source, string Name)>();
+        var entries = new List<(string Source, string Name, bool IsDirectory)>();
+        void AddEntry(string source, string name, bool isDirectory)
+        {
+            if (entries.Count >= ShardAssembler.MaxArchiveEntries)
+                throw new ArgumentException(
+                    $"Folder contains more than {ShardAssembler.MaxArchiveEntries:N0} files/directories; split it into smaller transfers.");
+            if (name.Split('/').Length > ShardAssembler.MaxArchiveDepth)
+                throw new ArgumentException(
+                    $"Input path '{name}' exceeds the maximum archive depth of {ShardAssembler.MaxArchiveDepth}.");
+            entries.Add((source, name, isDirectory));
+        }
         foreach (string input in inputs)
         {
             if (Directory.Exists(input))
             {
                 string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(input));
                 string prefix = prefixFolders ? Path.GetFileName(root) + "/" : "";
-                foreach (string f in Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories))
+                if (prefixFolders)
+                    AddEntry(root, prefix.TrimEnd('/'), true);
+                foreach (string directory in EnumerateArchiveDirectories(input))
+                {
+                    string rel = Path.GetRelativePath(root, directory).Replace(Path.DirectorySeparatorChar, '/');
+                    AddEntry(directory, prefix + rel, true);
+                }
+                foreach (string f in EnumerateArchiveFiles(input))
                 {
                     string rel = Path.GetRelativePath(root, f).Replace(Path.DirectorySeparatorChar, '/');
-                    entries.Add((f, prefix + rel));
+                    AddEntry(f, prefix + rel, false);
                 }
             }
             else
             {
-                entries.Add((input, Path.GetFileName(input)));
+                AddEntry(input, Path.GetFileName(input), false);
             }
         }
 
-        var collision = entries.GroupBy(e => e.Name, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        foreach (var entry in entries)
+            if (entry.Name.Split('/').Any(segment => !ShardAssembler.IsSafePathSegment(segment)))
+                throw new ArgumentException(
+                    $"Input maps to non-portable archive path '{entry.Name}'. Rename it before encoding.");
+
+        // The archive must restore on case-insensitive and Unicode-normalizing filesystems too.
+        // Refuse aliases at encode time rather than creating an archive our decoder must reject.
+        var collision = entries
+            .GroupBy(e => string.Join('/', e.Name.Split('/').Select(s => s.Normalize().ToUpperInvariant())),
+                StringComparer.Ordinal)
+            .FirstOrDefault(g => g.Count() > 1);
         if (collision is not null)
             throw new ArgumentException(
-                $"Two inputs map to the same archive path '{collision.Key}'; rename one or place them in separate folders " +
+                $"Two inputs map to the same archive path under portable comparison '{collision.First().Name}'; rename one or place them in separate folders " +
                 "(a folder input keeps its subtree, so files with the same name in different subfolders are fine).");
 
-        using var fs = new FileStream(tarPath, FileMode.Create, FileAccess.Write, FileShare.None);
+        // The intermediate tar is plaintext even when the transfer will subsequently be encrypted.
+        // Create it atomically with owner-only permissions inside the random temporary directory.
+        using var fs = ShardAssembler.CreatePrivateStagingFile(tarPath);
         using var writer = new System.Formats.Tar.TarWriter(fs, System.Formats.Tar.TarEntryFormat.Pax);
-        foreach (var (source, name) in entries)
-            writer.WriteEntry(source, name);
+        foreach (var (source, name, isDirectory) in entries.OrderBy(e => e.Name, StringComparer.Ordinal))
+        {
+            if (isDirectory)
+                writer.WriteEntry(new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.Directory, name));
+            else
+            {
+                // TarWriter.WriteEntry(path, name) preserves hard-link identity: the second path
+                // becomes a HardLink entry. QrShard intentionally accepts only regular files and
+                // directories on extraction, so such an archive could not round-trip. Supplying a
+                // regular entry and stream explicitly copies each selected path's bytes instead.
+                using var data = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    1 << 16, FileOptions.SequentialScan);
+                var entry = new System.Formats.Tar.PaxTarEntry(
+                    System.Formats.Tar.TarEntryType.RegularFile, name)
+                {
+                    DataStream = data,
+                    ModificationTime = File.GetLastWriteTimeUtc(source),
+                };
+                if (!OperatingSystem.IsWindows())
+                    entry.Mode = File.GetUnixFileMode(source) & ShardAssembler.PortableUnixFileModeMask;
+                writer.WriteEntry(entry);
+            }
+        }
     }
+
+    internal static ShardAssembler.TemporaryDirectoryLease CreatePrivateTempDirectory() =>
+        ShardAssembler.CreatePrivateTemporaryDirectory("qrshard-tar-");
+
+    /// <summary>
+    /// Enumerates a selected folder without following reparse points. SearchOption.AllDirectories
+    /// follows directory symlinks/junctions: a folder encode could therefore disclose files
+    /// outside the selected tree or recurse forever through a link loop. Skip only reparse points
+    /// so ordinary hidden/system files remain part of the archive.
+    /// </summary>
+    internal static IEnumerable<string> EnumerateArchiveFiles(string root) =>
+        Directory.EnumerateFiles(root, "*", ArchiveEnumerationOptions());
+
+    internal static IEnumerable<string> EnumerateArchiveDirectories(string root) =>
+        Directory.EnumerateDirectories(root, "*", ArchiveEnumerationOptions());
+
+    private static EnumerationOptions ArchiveEnumerationOptions() =>
+        new()
+        {
+            RecurseSubdirectories = true,
+            AttributesToSkip = FileAttributes.ReparsePoint,
+            IgnoreInaccessible = false,
+            ReturnSpecialDirectories = false,
+        };
 
     /// <summary>Opens the slideshow in the platform's default browser (suppressed by the
     /// QRSHARD_NO_LAUNCH environment variable, e.g. in tests and scripts).</summary>
@@ -648,9 +729,17 @@ internal sealed class Cli(AppSettings? settings = null)
             if (OperatingSystem.IsWindows())
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
             else if (OperatingSystem.IsMacOS())
-                System.Diagnostics.Process.Start("open", path);
+            {
+                var start = new System.Diagnostics.ProcessStartInfo("open") { UseShellExecute = false };
+                start.ArgumentList.Add(path);
+                System.Diagnostics.Process.Start(start);
+            }
             else
-                System.Diagnostics.Process.Start("xdg-open", path);
+            {
+                var start = new System.Diagnostics.ProcessStartInfo("xdg-open") { UseShellExecute = false };
+                start.ArgumentList.Add(path);
+                System.Diagnostics.Process.Start(start);
+            }
             @out.WriteLine("  Opened the slideshow in your default browser — press F11 for fullscreen.");
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or FileNotFoundException)
@@ -830,7 +919,7 @@ internal sealed class Cli(AppSettings? settings = null)
 
     private static bool IsImageFile(string path) =>
         Path.GetExtension(path).ToLowerInvariant()
-            is ".png" or ".apng" or ".bmp" or ".jpg" or ".jpeg" or ".webp" or ".tga" or ".qoi" or ".tif" or ".tiff";
+            is ".png" or ".apng" or ".gif" or ".bmp" or ".jpg" or ".jpeg" or ".webp" or ".tga" or ".qoi" or ".tif" or ".tiff";
 
     private static (List<string> Positional, Dictionary<string, string> Named, HashSet<string> Flags) ParseArgs(string[] args)
     {
@@ -862,6 +951,17 @@ internal sealed class Cli(AppSettings? settings = null)
     {
         string? v = Get(named, key);
         return v is null ? fallback : double.Parse(v, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static double GetValidatedFps(Dictionary<string, string> named, double fallback,
+        double max = double.MaxValue)
+    {
+        double fps = GetDouble(named, "--fps", fallback);
+        if (!double.IsFinite(fps) || fps <= 0 || fps > max)
+            throw new ArgumentException(max == double.MaxValue
+                ? "--fps must be a finite number greater than 0."
+                : $"--fps must be a finite number greater than 0 and at most {max}.");
+        return fps;
     }
 
     /// <summary>Recognized options (take a value) and flags (boolean) per subcommand. The single
@@ -1024,7 +1124,7 @@ internal sealed class Cli(AppSettings? settings = null)
             : $"{plan.DataImages} data image(s)";
         @out.WriteLine($"  {plan.ImageCount} image(s) of {plan.Width}x{plan.Height}px ({split}), up to {plan.BytesPerImage:N0} payload bytes each, format {plan.Format}.");
         if (plan.ImageCount > DryRunImageWarnThreshold)
-            @out.WriteLine($"  note: {plan.ImageCount} images is a lot to capture — raise density with a larger --resolution, bigger --cell, or more --bits, or lower --recovery.");
+            @out.WriteLine($"  note: {plan.ImageCount} images is a lot to capture — raise density with a larger --resolution, smaller --cell, or more --bits, or lower --recovery.");
         return 0;
     }
 
@@ -1055,9 +1155,11 @@ internal sealed class Cli(AppSettings? settings = null)
             QrShard — encode any file into dense QR-style images and back.
 
             usage:
-              qrshard encode <file|folder> [options]   Split a file (or a folder, tar-ed
-                                         automatically and extracted on decode) into shard images.
-                -o, --out <dir>          Output folder (default: <file>.shards next to the input)
+              qrshard encode <file|folder>... [options]
+                                         Split one file directly, or tar one or more files/folders
+                                         into an archive that is extracted on decode.
+                -o, --out <dir>          Output folder (default: <name>.shards next to the first
+                                         input; multiple inputs use bundle.shards)
                 -r, --resolution <px>    Image size: "auto" (the default) uses the primary
                                          monitor's native resolution so shards fill the screen
                                          they'll be captured from; or one number (square) or
@@ -1068,14 +1170,18 @@ internal sealed class Cli(AppSettings? settings = null)
                 -e, --ecc <n>            Reed-Solomon parity per 255-byte block, even, 0-64
                                          (default: 16 ≈ 6% overhead, fixes 8 bad bytes per block)
                 -R, --recovery <pct>     Add parity IMAGES so whole missing/damaged images can be
-                                         rebuilt without recapture; pct% extra images, 0-100
-                                         (default: 0; e.g. 15 tolerates losing ~15% of the images)
-                -F, --fountain <pct>     Fountain coding for video mode: pct% extra CODED frames
-                                         (random linear combinations); ANY enough captured frames
-                                         per stripe reconstruct the data — ideal with --video,
-                                         where torn/glared frames simply don't count
+                                         rebuilt without recapture; pct% of DATA images, allocated
+                                         per stripe, 0-100 (R15 is about 15 parity per 100 data,
+                                         or 13% of the resulting set; tolerance is per stripe)
+                -F, --fountain <pct>     Fountain coding for video mode: 0-1000% extra CODED frames
+                                         (random linear combinations); a full-rank set of roughly
+                                         stripeData captured frames per stripe reconstructs it —
+                                         duplicate/dependent/torn/glared frames don't count;
+                                         mutually exclusive with -R
                 -p, --password <pw>      AES-256-GCM encrypt the payload; decode needs the same
-                                         password (wrong password fails cleanly, nothing leaks)
+                                         password. Failure publishes no plaintext, but shard
+                                         metadata stays visible. WARNING: argv may be exposed in
+                                         shell history and process listings
                 -f, --format <fmt>       Lossless image format: png, bmp, tga, qoi, webp, tiff
                                          (default: png, written by the built-in fast PNG writer)
                 --camera                 Camera profile: adds finder patterns so images decode
@@ -1083,12 +1189,14 @@ internal sealed class Cli(AppSettings? settings = null)
                                          just screenshots; shifts defaults to cell 8, 2 bits,
                                          ECC 32 (explicit flags still win). Far lower density —
                                          use for small/medium payloads
-                --video                  Also write slideshow.html: one self-contained page that
-                                         cycles the images forever — record the screen for a
-                                         full cycle instead of screenshotting by hand
+                --video                  Also write slideshow.html: a relative manifest cycling
+                                         the adjacent shard/sidecar files forever. Keep the page
+                                         beside those files; record at least one full cycle
                 -i, --interval <ms>      Slideshow interval per image (default: 500, min 100)
                 --slideshow <kind>       With --video: "html" (default) or "apng" (a single
-                                         animated PNG cycling the shards)
+                                         animated PNG cycling the shards). APNG refuses more than
+                                         256 MiB of decoded RGB frames; HTML scales further
+                --open                   With --video, open the slideshow after encoding
                 --interleave2            v2 permuted interleave: spreads VERTICAL damage as well
                                          as horizontal (needs ECC; older decoders reject it)
                 --profile <name>         Apply a named encode preset from appsettings.json
@@ -1098,18 +1206,29 @@ internal sealed class Cli(AppSettings? settings = null)
                                          images (preview before a folder emits hundreds of PNGs)
                 --no-compress            Skip compression of the payload
                 Multiple inputs (files and/or folders) are bundled into one archive and
-                extracted on decode: qrshard encode a.bin b.bin docs/ -o out.shards
-              qrshard send <file|folder...> [encode options]
+                extracted on decode: qrshard encode a.bin b.bin docs/ -o out.shards.
+                Top-level links are refused and folder reparse links skipped; hard links are
+                copied as regular files; non-portable path names/aliases are refused. Archives
+                are limited to 100,000 entries and 128 path segments per entry; decode caps its
+                path index at 200,000 nodes. Single-file/prepared-archive payloads are capped at
+                1.5 GB.
+              qrshard send <file|folder>... [encode options]
                                          One-step sender: encode with a slideshow and open it
                                          in the default browser
 
-              qrshard decode <folder|images...|recording> [-o <file>]
+              qrshard decode <folder|images...|recording> [-o <path>]
                                          Reconstitute the original file from captured images, or
                                          from a screen/phone RECORDING of the slideshow
                                          (mp4/webm/mkv/mov/avi need ffmpeg on PATH; animated
                                          png/gif/webp decode natively)
-                --fps <n>                Frame extraction rate for video files (default: 8)
-                -p, --password <pw>      Password for encrypted payloads
+                -o, --out <path>         Output file, or directory for an archive. A single file is
+                                         staged and verified before atomic publication. An archive
+                                         is staged and published complete; its destination must be
+                                         absent or empty and is never merged
+                --fps <n>                Finite frame extraction rate > 0 for video files
+                                         (default: 8)
+                -p, --password <pw>      Password for encrypted payloads. WARNING: argv may be
+                                         exposed in shell history and process listings
                 --session <file>         Accumulate shards across capture sittings: incomplete
                                          sets persist to the session file (exit code 3) and the
                                          next run resumes from the union; deleted on success.
@@ -1124,14 +1243,24 @@ internal sealed class Cli(AppSettings? settings = null)
                                          with their resolved paths and lengths, or — when the set
                                          is incomplete (exit 3) — the same per-file status verify
                                          reports
-              qrshard receive [--device d] [--screen] [--region x,y,w,h] [--fps n] [-o f] [-p pw]
+              qrshard receive [--device d] [--format fmt] [--screen] [--region x,y,w,h]
+                              [--fps n] [-o f] [-p pw]
                                          LIVE receiver: decode a webcam pointed at the sender's
                                          slideshow — or, with --screen, THIS machine's own
                                          screen (put the slideshow in an RDP/VM window and
                                          transfer out of locked-down remotes). Stops
                                          automatically when the transfer completes.
-                                         (Windows webcams: --device "<name>"; list with
-                                         ffmpeg -list_devices true -f dshow -i dummy)
+                --device <d>             Camera/capture device. Windows requires a name (list with
+                                         ffmpeg -list_devices true -f dshow -i dummy); defaults:
+                                         Linux /dev/video0, macOS 0
+                --format <fmt>           ffmpeg input format (defaults: Windows dshow, Linux v4l2,
+                                         macOS avfoundation)
+                --screen                 Capture this machine's display instead of a camera
+                --region <x,y,w,h>       With --screen: x/y are integers; w/h must be positive
+                --fps <n>                Finite sampling rate > 0 and <= 120 (default: 10 or
+                                         appsettings ReceiveFps)
+                -o, --out <path>         Output file or archive directory
+                -p, --password <pw>      Password for encrypted payloads (argv warning above)
               qrshard calibrate [-o dir] [-r res] [--camera]
                                          Write a ladder of density probes (--camera for the
                                          photo-capture ladder); capture them like a real
@@ -1142,7 +1271,7 @@ internal sealed class Cli(AppSettings? settings = null)
                                          coverage) without writing output; exit 0 when complete,
                                          3 when images are still missing
                                          (--json for machine-readable output, also on info)
-              qrshard info <image> [--heatmap <out.png>] [--quality-heatmap <out.png>]
+              qrshard info <image> [--heatmap <out.png>] [--quality-heatmap <out.png>] [--json]
                                          Show and validate a single shard image. --heatmap renders
                                          a per-cell ECC damage map (green=clean, red=corrected,
                                          dark red=beyond correction), falling back to the quality
@@ -1150,6 +1279,7 @@ internal sealed class Cli(AppSettings? settings = null)
                                          always renders the capture-QUALITY map (per-cell
                                          classification confidence) — works even when a capture
                                          fails to decode, so you can see WHERE glare/blur hit
+                --json                   Emit shard information as JSON on stdout
               qrshard test [<file> [encode opts]]
                                          With no file: built-in round-trip self-test. With a file:
                                          encode YOUR file at YOUR settings (-c/-b/-e/--camera/...),
@@ -1163,7 +1293,7 @@ internal sealed class Cli(AppSettings? settings = null)
             images and run again; 1 anything else (unusable images, corruption, I/O).
 
             Density guide (per image, after default ECC): bytes ≈ cells x bits/cell / 8 x 0.94.
-              Robust default (2160px, cell 3, 4 bits) ≈ 216 KB/image.
+              Robust default (2160px, cell 3, 4 bits) ≈ 212 KB/image.
               Pixel-perfect captures can push cell 1-2 and 6-8 bits for multi-MB images.
             Capture tips: screenshot the image displayed at 100% zoom; include the full black
             frame with some white margin; avoid fractional display scaling for cell sizes < 3.

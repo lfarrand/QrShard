@@ -15,6 +15,10 @@ namespace QrShard;
 /// </summary>
 internal sealed class ShardHeader
 {
+    private static readonly UTF8Encoding StrictUtf8 = new(
+        encoderShouldEmitUTF8Identifier: false,
+        throwOnInvalidBytes: true);
+
     public static readonly byte[] Magic = "QRS1"u8.ToArray();
     public const byte FlagCompressed = 0x01;  // payload is compressed (deflate unless FlagBrotli)
     public const byte FlagParity = 0x02;      // this image is cross-shard parity, not data
@@ -47,6 +51,23 @@ internal sealed class ShardHeader
     public int StripeParity { get; init; }               // parity images per stripe
 
     public bool IsParity => (Flags & FlagParity) != 0;
+
+    /// <summary>
+    /// Whether two shards repeat the same file identity and recovery geometry. Every shard in a
+    /// family carries these fields; only the parity marker, ordinal, payload length and CRC are
+    /// expected to differ. Checking them prevents one colliding/poisoned shard from selecting a
+    /// different transform, output name, hash, length, or FEC layout for otherwise valid chunks.
+    /// </summary>
+    internal bool HasSameFamilyAs(ShardHeader other) =>
+        FileId == other.FileId &&
+        Count == other.Count &&
+        TotalLength == other.TotalLength &&
+        OriginalLength == other.OriginalLength &&
+        ((Flags ^ other.Flags) & ~FlagParity) == 0 &&
+        Sha256.AsSpan().SequenceEqual(other.Sha256) &&
+        string.Equals(FileName, other.FileName, StringComparison.Ordinal) &&
+        StripeData == other.StripeData &&
+        StripeParity == other.StripeParity;
 
     public static int Size(string fileName) => 92 + Encoding.UTF8.GetByteCount(fileName);
 
@@ -125,6 +146,16 @@ internal sealed class ShardHeader
             if (version != HeaderVersion)
                 return null;
             byte flags = r.ReadByte();
+            // Enforce the normative flag mask here, not only in the bitmap decoder. Session files
+            // and multi-capture fusion deserialize headers directly and must not silently accept a
+            // future feature that the assembler will ignore.
+            if ((flags & ~KnownFlags) != 0)
+                return null;
+            // AuthMeta changes AES-GCM verification and is meaningless without encryption. The
+            // wire specification requires this combination to be refused rather than silently
+            // treating a malformed/forged flag as harmless decoration.
+            if ((flags & FlagAuthMeta) != 0 && (flags & FlagEncrypted) == 0)
+                return null;
             ulong fileId = r.ReadUInt64();
             int index = r.ReadInt32();
             int count = r.ReadInt32();
@@ -138,7 +169,10 @@ internal sealed class ShardHeader
             int nameLen = r.ReadUInt16();
             if (nameLen > 4096 || ms.Position + nameLen + 4 > stream.Length)
                 return null;
-            string name = Encoding.UTF8.GetString(r.ReadBytes(nameLen));
+            // The filename bytes are also part of encrypted shards' AAD. Replacement-fallback
+            // decoding is not canonical: distinct malformed byte strings can decode to U+FFFD
+            // and then authenticate after BuildAad re-encodes a different byte sequence.
+            string name = StrictUtf8.GetString(r.ReadBytes(nameLen));
             int bodyLen = (int)ms.Position;
             uint headerCrc = r.ReadUInt32();
             if (headerCrc != new Crc().Crc32(stream.AsSpan(0, bodyLen)))
@@ -207,7 +241,7 @@ internal sealed class ShardHeader
                 StripeParity = stripeParity,
             };
         }
-        catch (EndOfStreamException)
+        catch (Exception ex) when (ex is EndOfStreamException or DecoderFallbackException)
         {
             return null;
         }

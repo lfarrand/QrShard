@@ -43,18 +43,21 @@ internal sealed class SessionStore(Crc crc) : ISessionStore
             for (int i = 0; i < count && i < 1_000_000; i++)
             {
                 int headerLen = r.ReadInt32();
-                if (headerLen is < 0 or > 1_000_000)
+                if (headerLen is < 0 or > 1_000_000 || headerLen > fs.Length - fs.Position - sizeof(int))
                     return shards;
                 byte[] headerBytes = r.ReadBytes(headerLen);
+                var header = ShardHeader.Deserialize(headerBytes, out _);
                 int payloadLen = r.ReadInt32();
-                if (payloadLen is < 0 or > int.MaxValue / 2)
+                // Never allocate from the declared length before proving those bytes exist. A
+                // nine-byte session used to request a ~1 GiB array here and OOM the process.
+                if (payloadLen < 0 || payloadLen > fs.Length - fs.Position ||
+                    header is null || payloadLen != header.PayloadLength)
                     return shards;
                 byte[] payload = r.ReadBytes(payloadLen);
                 if (headerBytes.Length != headerLen || payload.Length != payloadLen)
                     return shards;
 
-                var header = ShardHeader.Deserialize(headerBytes, out _);
-                if (header is null || payload.Length != header.PayloadLength || crc.Crc32(payload) != header.PayloadCrc32)
+                if (crc.Crc32(payload) != header.PayloadCrc32)
                     continue; // damaged entry — drop it, keep the rest
                 shards.Add(new DecodedShard(header, payload, path, 0, 0));
             }
@@ -68,22 +71,39 @@ internal sealed class SessionStore(Crc crc) : ISessionStore
 
     public void Save(string path, IReadOnlyCollection<DecodedShard> shards)
     {
-        string temp = path + ".tmp";
-        using (var fs = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
-        using (var w = new BinaryWriter(fs))
+        string full = Path.GetFullPath(path);
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        string temp = Path.Combine(Path.GetDirectoryName(full)!,
+            $".{Path.GetFileName(full)}.qrshard-{Guid.NewGuid():N}.tmp");
+        try
         {
-            w.Write(Magic);
-            w.Write(Version);
-            w.Write(shards.Count);
-            foreach (var shard in shards)
+            // A session can contain raw payload bytes (or encrypted payload when the transfer is
+            // encrypted), so every save tightens it to owner-only rather than carrying forward a
+            // permissive DACL from an older session file.
+            using (var fs = ShardAssembler.CreatePrivateStagingFile(temp))
+            using (var w = new BinaryWriter(fs))
             {
-                byte[] headerBytes = shard.Header.Serialize();
-                w.Write(headerBytes.Length);
-                w.Write(headerBytes);
-                w.Write(shard.Payload.Length);
-                w.Write(shard.Payload);
+                w.Write(Magic);
+                w.Write(Version);
+                w.Write(shards.Count);
+                foreach (var shard in shards)
+                {
+                    byte[] headerBytes = shard.Header.Serialize();
+                    w.Write(headerBytes.Length);
+                    w.Write(headerBytes);
+                    w.Write(shard.Payload.Length);
+                    w.Write(shard.Payload);
+                }
+                w.Flush();
+                fs.Flush(flushToDisk: true);
             }
+            File.Move(temp, full, overwrite: true);
         }
-        File.Move(temp, path, overwrite: true); // atomic-ish: never leave a half-written session
+        finally
+        {
+            try { File.Delete(temp); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 }

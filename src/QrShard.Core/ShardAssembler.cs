@@ -1,6 +1,14 @@
 using System.Formats.Tar;
+using System.Buffers.Binary;
 using System.IO.Compression;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Runtime.Versioning;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace QrShard;
 
@@ -14,6 +22,14 @@ namespace QrShard;
 /// </summary>
 internal sealed class ShardAssembler(IParityReassembler parityReassembler, PayloadCipher cipher) : IShardAssembler
 {
+    internal const int MaxArchiveEntries = 100_000;
+    internal const int MaxArchiveDepth = 128;
+    internal const int MaxArchivePathNodes = 200_000;
+    internal const UnixFileMode PortableUnixFileModeMask =
+        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+        UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+        UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+
     public ShardAssembler() : this(new ParityReassembler(), new PayloadCipher())
     {
     }
@@ -45,6 +61,15 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             {
                 failure ??= ex;
             }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                // A malformed archive or one destination's filesystem failure belongs to that
+                // file, not to unrelated FileIds in the same capture folder/session. Preserve the
+                // best-effort multi-file contract while keeping process-wide failures such as OOM
+                // and cancellation fatal.
+                failure ??= new ShardDecodeException(
+                    $"'{ShardHeader.Display(group.First().Header.FileName)}': restore failed ({ex.Message}).");
+            }
         }
         // Reassemble writes each file as it goes, so everything recoverable is already on disk by
         // the time this throws; the caller reports the failure and the user keeps the good files.
@@ -58,8 +83,9 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         var first = shards[0].Header;
         int count = first.Count;
         foreach (var s in shards)
-            if (s.Header.Count != count)
-                throw new ShardDecodeException($"Inconsistent shard set for '{ShardHeader.Display(first.FileName)}': image counts differ.");
+            if (!first.HasSameFamilyAs(s.Header))
+                throw new ShardDecodeException(
+                    $"Inconsistent shard set for '{ShardHeader.Display(first.FileName)}': repeated file identity or recovery metadata differs.");
 
         // Both reassembly paths bound their buffers by the declared sizes, so sanity-check first.
         if (first.TotalLength is < 0 or > ShardEncoder.MaxFileBytes || first.OriginalLength is < 0 or > ShardEncoder.MaxFileBytes)
@@ -72,7 +98,12 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
 
         byte[][] chunks;
         long[] chunkLengths;
-        if (first.StripeParity > 0)
+        bool allDataPresent = shards.Where(s => !s.Header.IsParity)
+            .Select(s => s.Header.Index)
+            .Where(i => (uint)i < (uint)count)
+            .Distinct()
+            .Count() == count;
+        if (first.StripeParity > 0 && !allDataPresent)
         {
             chunks = parityReassembler.ReassembleWithParity(shards, first, log, out int cap);
             chunkLengths = new long[chunks.Length];
@@ -122,72 +153,548 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         // distribution model of this tool — knows the filename before the victim decodes. On Unix
         // that root is typically /tmp, mode 1777, and FileStream creates with 0666 & ~umask and no
         // O_EXCL, so a pre-planted file or symlink of that exact name is opened rather than
-        // refused. A private directory removes both the predictability and the shared-root
-        // exposure: CreateTempSubdirectory makes it 0700 on Unix and its name is random.
-        string tempDir = archive ? Directory.CreateTempSubdirectory("qrshard-").FullName : "";
-        string outPath = archive
+        // refused. A random private directory removes both the predictability and the shared-root
+        // exposure: it requests 0700 on Unix and has a protected owner-only DACL on Windows.
+        TemporaryDirectoryLease? archiveTemp = archive ? CreatePrivateTemporaryDirectory("qrshard-") : null;
+        string tempDir = archiveTemp?.Path ?? "";
+        string finalPath = archive ? "" : ResolveOutputPath(first, outputPath);
+        // Never stream unverified bytes into the final pathname. In particular, an explicit -o
+        // may already contain the user's only good copy: FileMode.Create used to truncate it
+        // before decompression, length, or SHA-256 verification had succeeded. A random sibling
+        // keeps the final move on one filesystem and FileMode.CreateNew prevents link/race reuse.
+        string payloadPath = archive
             ? Path.Combine(tempDir, "payload.tar")
-            : ResolveOutputPath(first, outputPath);
+            : SiblingStagingPath(finalPath);
 
         long written = 0;
         byte[] sha;
         try
         {
-            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            using (var output = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
+            try
             {
-                var buffer = new byte[1 << 20];
-                int n;
-                while (written <= first.OriginalLength && (n = source.Read(buffer, 0, buffer.Length)) > 0)
+                using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                using (var output = CreatePrivateStagingFile(payloadPath))
                 {
-                    output.Write(buffer, 0, n);
-                    hash.AppendData(buffer, 0, n);
-                    written += n;
+                    var buffer = new byte[1 << 20];
+                    int n;
+                    while (written <= first.OriginalLength && (n = source.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        output.Write(buffer, 0, n);
+                        hash.AppendData(buffer, 0, n);
+                        written += n;
+                    }
                 }
+                sha = hash.GetHashAndReset();
             }
-            sha = hash.GetHashAndReset();
-        }
-        catch (InvalidDataException)
-        {
-            TryDelete(outPath);
-            TryDeleteDirectory(tempDir);
-            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': the reassembled stream failed to decompress. A shard is corrupt beyond recovery.");
+            catch (InvalidDataException)
+            {
+                throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': the reassembled stream failed to decompress. A shard is corrupt beyond recovery.");
+            }
+
+            if (written != first.OriginalLength || !sha.AsSpan().SequenceEqual(first.Sha256))
+                throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': SHA-256 of the reassembled file does not match the original. A shard was corrupted.");
+
+            if (archive)
+            {
+                // Extract into a private sibling and publish only after every tar entry has passed
+                // containment validation. A late ../ entry or I/O failure therefore cannot leave
+                // a half-restored tree or overwrite files already present in an explicit -o.
+                string destDir = outputPath ?? FreeDirectory(SafeDirectoryName(first.FileName));
+                ExtractTarAtomically(payloadPath, destDir);
+                log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → extracted to {destDir}");
+                return new RestoredFile(first.FileName, destDir, written);
+            }
+
+            // Preserve the documented explicit-output behaviour, but delay replacement until the
+            // staged file is complete and verified. Without -o, overwrite:false also closes the
+            // check/use race after ResolveOutputPath selected an unused name.
+            if (outputPath is not null && File.Exists(finalPath))
+                PublishVerifiedReplacement(payloadPath, finalPath);
+            else
+                File.Move(payloadPath, finalPath, overwrite: outputPath is not null);
+            log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → {finalPath} ({written:N0} bytes)");
+            return new RestoredFile(first.FileName, finalPath, written);
         }
         finally
         {
             source.Dispose();
+            TryDelete(payloadPath);
+            archiveTemp?.Dispose();
         }
+    }
 
-        if (written != first.OriginalLength || !sha.AsSpan().SequenceEqual(first.Sha256))
-        {
-            TryDelete(outPath);
-            TryDeleteDirectory(tempDir);
-            throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': SHA-256 of the reassembled file does not match the original. A shard was corrupted.");
-        }
+    /// <summary>Returns an unpredictable, same-directory pathname for an atomic final move.</summary>
+    private static string SiblingStagingPath(string destination)
+    {
+        string full = Path.GetFullPath(destination);
+        string parent = Path.GetDirectoryName(full)!;
+        string name = Path.GetFileName(full);
+        return Path.Combine(parent, $".{name}.qrshard-{Guid.NewGuid():N}.tmp");
+    }
 
-        if (archive)
+    /// <summary>
+    /// Extracts a verified tar into a private sibling directory, then publishes the complete tree.
+    /// Existing non-empty destinations are refused even for explicit -o: merging would make a
+    /// failed restore irreversible and would retain files that are not part of the archive.
+    /// </summary>
+    private static void ExtractTarAtomically(string tarPath, string destDir)
+    {
+        string destination = Path.TrimEndingDirectorySeparator(Path.GetFullPath(destDir));
+        string? parent = Path.GetDirectoryName(destination);
+        if (parent is null || destination == Path.GetPathRoot(destination))
+            throw new ShardDecodeException("Refusing to extract an archive directly into a filesystem root.");
+        if (File.Exists(destination))
+            throw new ShardDecodeException($"Cannot extract archive: '{destDir}' is a file.");
+        if (Directory.Exists(destination) && Directory.EnumerateFileSystemEntries(destination).Any())
+            throw new ShardDecodeException($"Cannot extract archive: destination '{destDir}' is not empty.");
+
+        Directory.CreateDirectory(parent);
+        string staging = Path.Combine(parent, $".qrshard-{Guid.NewGuid():N}.tmp");
+        using TemporaryDirectoryLease stagingLease = CreatePrivateDirectoryLease(staging);
+        bool destinationExisted = Directory.Exists(destination);
+        DirectoryMetadata? destinationMetadata = destinationExisted
+            ? CaptureDirectoryMetadata(destination)
+            : null;
+        try
         {
-            // Collision avoidance was added to the single-file path and stopped two lines short of
-            // this one. The archive branch extracts with overwrite: true, so two groups sharing a
-            // header FileName landed in the identical directory and the later one silently
-            // replaced the earlier one's files. Not exotic: every multi-input encode is named
-            // "bundle", so any two `qrshard encode a b c` sets decoded together collide by default.
-            string destDir = outputPath ?? FreeDirectory(SafeDirectoryName(first.FileName));
+            ExtractTar(tarPath, staging);
+
+            // Recheck immediately before publishing so a concurrent writer is never overwritten.
+            if (File.Exists(destination) ||
+                (Directory.Exists(destination) && Directory.EnumerateFileSystemEntries(destination).Any()))
+                throw new ShardDecodeException($"Cannot extract archive: destination '{destDir}' changed and is no longer empty.");
+
+            // Keep the staging root private until the exact leased object has been published.
+            // Applying an existing 0777 mode/permissive ACL before publication would expose the
+            // plaintext; applying 0555/read-only would also make a valid move fail.
+            if (Directory.Exists(destination))
+                Directory.Delete(destination);
             try
             {
-                ExtractTar(outPath, destDir);
+                stagingLease.MoveTo(destination);
+                if (destinationMetadata is not null)
+                    ApplyDirectoryMetadata(destination, destinationMetadata);
             }
-            finally
+            catch
             {
-                TryDelete(outPath);
-                TryDeleteDirectory(tempDir);
+                // Re-create an empty directory the caller supplied if publication itself failed.
+                if (destinationExisted && !Directory.Exists(destination) && !File.Exists(destination))
+                {
+                    CreatePrivateDirectoryExclusive(destination);
+                    ApplyDirectoryMetadata(destination, destinationMetadata!);
+                }
+                throw;
             }
-            log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → extracted to {destDir}");
-            return new RestoredFile(first.FileName, destDir, written);
+        }
+        finally
+        {
+            // The lease owns best-effort cleanup. If publication succeeded its old path no longer
+            // exists; if anything failed it removes the private incomplete tree.
+        }
+    }
+
+    /// <summary>
+    /// Exclusively creates a directory with restrictive permissions in the create syscall. The
+    /// managed CreateDirectory overloads succeed when the path already exists, which is unsafe for
+    /// staging: a raced directory could otherwise be silently adopted.
+    /// </summary>
+    internal static void CreatePrivateDirectoryExclusive(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            CreatePrivateWindowsDirectory(path);
+        else
+            CreatePrivateUnixDirectory(path);
+    }
+
+    private static TemporaryDirectoryLease CreatePrivateDirectoryLease(string path)
+    {
+        CreatePrivateDirectoryExclusive(path);
+        if (!OperatingSystem.IsWindows())
+            return new TemporaryDirectoryLease(path, null);
+
+        SafeFileHandle handle = OpenWindowsDirectoryLease(path);
+        if (!IsVerifiedPrivateWindowsDirectory(path))
+        {
+            handle.Dispose();
+            throw new IOException($"Private staging directory '{path}' changed before it could be leased.");
+        }
+        return new TemporaryDirectoryLease(path, handle);
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static void CreatePrivateWindowsDirectory(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Windows ACL creation is only available on Windows.");
+
+        DirectorySecurity security = PrivateDirectorySecurity();
+        byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+        GCHandle pinned = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+        try
+        {
+            var attributes = new NativeSecurityAttributes
+            {
+                Length = (uint)Marshal.SizeOf<NativeSecurityAttributes>(),
+                SecurityDescriptor = pinned.AddrOfPinnedObject(),
+                InheritHandle = 0,
+            };
+            if (!NativeCreateDirectory(path, ref attributes))
+            {
+                int error = Marshal.GetLastPInvokeError();
+                throw new IOException($"Could not exclusively create private directory '{path}'.",
+                    new Win32Exception(error));
+            }
+        }
+        finally
+        {
+            pinned.Free();
+        }
+    }
+
+    private static void CreatePrivateUnixDirectory(string path)
+    {
+        const uint OwnerRwx = 0x1C0; // 0700; the process umask may make this stricter
+        if (NativeMkdir(path, OwnerRwx) != 0)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            throw new IOException($"Could not exclusively create private directory '{path}'.",
+                new Win32Exception(error));
+        }
+    }
+
+    /// <summary>
+    /// Creates an unpredictable plaintext-work directory. On Windows, an open directory handle
+    /// deliberately omits FILE_SHARE_DELETE for the whole operation; a permissive redirected TEMP
+    /// parent therefore cannot rename/delete and replace the root after its ACL is verified.
+    /// </summary>
+    internal static TemporaryDirectoryLease CreatePrivateTemporaryDirectory(string prefix)
+    {
+        if (!OperatingSystem.IsWindows())
+            return new TemporaryDirectoryLease(Directory.CreateTempSubdirectory(prefix).FullName, null);
+
+        string tempRoot = Path.GetFullPath(Path.GetTempPath());
+        for (int attempt = 0; attempt < 32; attempt++)
+        {
+            string candidate = Path.Combine(tempRoot, prefix + Guid.NewGuid().ToString("N"));
+            try
+            {
+                CreatePrivateWindowsDirectory(candidate);
+            }
+            catch (IOException) when (File.Exists(candidate) || Directory.Exists(candidate))
+            {
+                continue; // exclusive native create proved this name was already occupied
+            }
+
+            SafeFileHandle handle;
+            try
+            {
+                handle = OpenWindowsDirectoryLease(candidate);
+            }
+            catch (IOException) when (!Directory.Exists(candidate))
+            {
+                continue; // deleted in the create/open window; never adopt a replacement
+            }
+
+            if (!IsVerifiedPrivateWindowsDirectory(candidate))
+            {
+                handle.Dispose();
+                continue; // replaced before the lease opened, or otherwise not the object created
+            }
+            return new TemporaryDirectoryLease(candidate, handle);
+        }
+        throw new IOException("Could not create and lease a private QrShard temporary directory after 32 attempts.");
+    }
+
+    internal sealed class TemporaryDirectoryLease(string path, SafeFileHandle? windowsHandle) : IDisposable
+    {
+        private SafeFileHandle? handle = windowsHandle;
+        private int published;
+        public string Path { get; } = path;
+
+        internal void MoveTo(string destination)
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                Directory.Move(Path, destination);
+                Volatile.Write(ref published, 1);
+                return;
+            }
+
+            SafeFileHandle leased = Volatile.Read(ref handle) ??
+                throw new ObjectDisposedException(nameof(TemporaryDirectoryLease));
+            RenameWindowsDirectory(leased, destination);
+            Volatile.Write(ref published, 1);
         }
 
-        log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → {outPath} ({written:N0} bytes)");
-        return new RestoredFile(first.FileName, outPath, written);
+        public void Dispose()
+        {
+            SafeFileHandle? leased = Interlocked.Exchange(ref handle, null);
+            if (Volatile.Read(ref published) != 0)
+            {
+                // Path is now a free old staging name, while the Windows handle follows the
+                // published destination. Never traverse that pathname: another parent writer may
+                // already have created an unrelated object there.
+                leased?.Dispose();
+                return;
+            }
+            if (leased is not null)
+            {
+                // Delete children while the no-delete-sharing root handle still pins this exact
+                // directory object. Closing first would let a permissive TEMP parent swap the
+                // pathname and turn recursive cleanup into deletion of an attacker's replacement.
+                TryDeleteDirectoryContents(Path);
+                leased.Dispose();
+                TryDeleteEmptyDirectory(Path);
+                return;
+            }
+
+            if (OperatingSystem.IsWindows())
+                TryCleanupVerifiedWindowsDirectory(Path);
+            else
+                TryDeleteDirectory(Path); // normal Unix temp is sticky; output parents are trusted
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static SafeFileHandle OpenWindowsDirectoryLease(string path)
+    {
+        const uint FileFlagBackupSemantics = 0x02000000;
+        const uint GenericRead = 0x80000000;
+        const uint Delete = 0x00010000;
+        SafeFileHandle handle = NativeCreateFile(path, GenericRead | Delete,
+            FileShare.Read | FileShare.Write, IntPtr.Zero, FileMode.Open,
+            FileFlagBackupSemantics, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            throw new IOException($"Could not lease private directory '{path}'.", new Win32Exception(error));
+        }
+        return handle;
+    }
+
+    /// <summary>
+    /// Renames the exact directory object held by the lease. A path-based move would require
+    /// closing the no-delete-sharing handle first, reopening a swap window in a writable parent.
+    /// FILE_RENAME_INFO accepts an absolute UTF-16 target and requires DELETE access on the
+    /// source handle; the handle remains open on the renamed object until publication completes.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static void RenameWindowsDirectory(SafeFileHandle handle, string destination)
+    {
+        byte[] targetName = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+        int rootDirectoryOffset = IntPtr.Size; // BOOLEAN plus native pointer-alignment padding
+        int fileNameLengthOffset = checked(rootDirectoryOffset + IntPtr.Size);
+        int fileNameOffset = checked(fileNameLengthOffset + sizeof(uint));
+        int nativeMinimumSize = IntPtr.Size == 8 ? 24 : 16;
+        byte[] info = new byte[Math.Max(nativeMinimumSize, checked(fileNameOffset + targetName.Length))];
+        // ReplaceIfExists and RootDirectory remain zero. The destination was rechecked and any
+        // caller-supplied empty directory was removed immediately before this call.
+        BinaryPrimitives.WriteUInt32LittleEndian(info.AsSpan(fileNameLengthOffset, sizeof(uint)),
+            checked((uint)targetName.Length));
+        targetName.CopyTo(info, fileNameOffset);
+
+        GCHandle pinned = GCHandle.Alloc(info, GCHandleType.Pinned);
+        try
+        {
+            const int FileRenameInfo = 3;
+            if (!NativeSetFileInformationByHandle(handle, FileRenameInfo, pinned.AddrOfPinnedObject(),
+                    checked((uint)info.Length)))
+            {
+                int error = Marshal.GetLastPInvokeError();
+                throw new IOException($"Could not atomically publish archive directory to '{destination}'.",
+                    new Win32Exception(error));
+            }
+        }
+        finally
+        {
+            pinned.Free();
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool IsVerifiedPrivateWindowsDirectory(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            return false;
+        DirectorySecurity acl = new DirectoryInfo(path)
+            .GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+        SecurityIdentifier current = CurrentWindowsUserSid();
+        if (!acl.AreAccessRulesProtected || !current.Equals(acl.GetOwner(typeof(SecurityIdentifier))))
+            return false;
+        var rules = acl.GetAccessRules(includeExplicit: true, includeInherited: true,
+                targetType: typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToList();
+        return rules.Count > 0 && rules.All(rule => !rule.IsInherited &&
+            rule.AccessControlType == AccessControlType.Allow && current.Equals(rule.IdentityReference));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static DirectorySecurity PrivateDirectorySecurity()
+    {
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(
+            CurrentWindowsUserSid(),
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        return security;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeSecurityAttributes
+    {
+        public uint Length;
+        public IntPtr SecurityDescriptor;
+        public int InheritHandle;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateDirectoryW", CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool NativeCreateDirectory(string path, ref NativeSecurityAttributes securityAttributes);
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern SafeFileHandle NativeCreateFile(string path, uint desiredAccess,
+        FileShare shareMode, IntPtr securityAttributes, FileMode creationDisposition,
+        uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", EntryPoint = "SetFileInformationByHandle", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool NativeSetFileInformationByHandle(SafeFileHandle file, int informationClass,
+        IntPtr information, uint bufferSize);
+
+    [DllImport("libc", EntryPoint = "mkdir", SetLastError = true)]
+    private static extern int NativeMkdir([MarshalAs(UnmanagedType.LPUTF8Str)] string path, uint mode);
+
+    /// <summary>
+    /// Creates plaintext staging with restrictive security in the create syscall. Existing-output
+    /// metadata is captured separately and applied only after the verified private object moves;
+    /// a restrictive destination DACL must not block publication or expose staging plaintext.
+    /// </summary>
+    internal static FileStream CreatePrivateStagingFile(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return new FileInfo(path).Create(
+                FileMode.CreateNew,
+                FileSystemRights.Write,
+                FileShare.None,
+                1 << 16,
+                FileOptions.SequentialScan,
+                PrivateFileSecurity());
+        }
+
+        return new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+            BufferSize = 1 << 16,
+            Options = FileOptions.SequentialScan,
+            UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+        });
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static FileSecurity PrivateFileSecurity()
+    {
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(
+            CurrentWindowsUserSid(),
+            FileSystemRights.FullControl,
+            AccessControlType.Allow));
+        return security;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static SecurityIdentifier CurrentWindowsUserSid()
+    {
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        return identity.User ??
+            throw new InvalidOperationException("The current Windows identity has no user SID.");
+    }
+
+    private sealed record DirectoryMetadata(FileAttributes Attributes,
+        byte[]? WindowsDacl, UnixFileMode? UnixMode);
+
+    private static DirectoryMetadata CaptureDirectoryMetadata(string path)
+    {
+        FileAttributes attributes = File.GetAttributes(path);
+        if (OperatingSystem.IsWindows())
+        {
+            DirectorySecurity security = new DirectoryInfo(path)
+                .GetAccessControl(AccessControlSections.Access);
+            return new DirectoryMetadata(attributes, security.GetSecurityDescriptorBinaryForm(), null);
+        }
+        return new DirectoryMetadata(attributes, null, File.GetUnixFileMode(path));
+    }
+
+    private static void ApplyDirectoryMetadata(string path, DirectoryMetadata metadata)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            // DACL last: a valid caller policy may deny this identity WriteAttributes. The object
+            // is still protected by the staging DACL while attributes are restored.
+            File.SetAttributes(path, metadata.Attributes);
+            var security = new DirectorySecurity();
+            security.SetSecurityDescriptorBinaryForm(metadata.WindowsDacl!, AccessControlSections.Access);
+            new DirectoryInfo(path).SetAccessControl(security);
+            return;
+        }
+        File.SetUnixFileMode(path, metadata.UnixMode!.Value);
+        File.SetAttributes(path, metadata.Attributes);
+    }
+
+    /// <summary>
+    /// Publishes a fully verified file over an explicit destination while retaining its portable
+    /// attributes. Windows refuses to replace a ReadOnly destination, so clear only that bit for
+    /// the move, restore it on failure, and apply the complete original attribute set on success.
+    /// The staging file itself remains writable until it has moved, making cleanup reliable.
+    /// </summary>
+    private static void PublishVerifiedReplacement(string staging, string destination)
+    {
+        FileAttributes attributes = File.GetAttributes(destination);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            UnixFileMode mode = File.GetUnixFileMode(destination) & PortableUnixFileModeMask;
+            File.SetUnixFileMode(staging, mode);
+            File.SetAttributes(staging, attributes);
+            File.Move(staging, destination, overwrite: true);
+            return;
+        }
+
+        byte[] dacl = new FileInfo(destination)
+            .GetAccessControl(AccessControlSections.Access)
+            .GetSecurityDescriptorBinaryForm();
+
+        bool clearedReadOnly = (attributes & FileAttributes.ReadOnly) != 0;
+        if (clearedReadOnly)
+            File.SetAttributes(destination, attributes & ~FileAttributes.ReadOnly);
+        try
+        {
+            File.Move(staging, destination, overwrite: true);
+        }
+        catch
+        {
+            if (clearedReadOnly && File.Exists(destination))
+                File.SetAttributes(destination, attributes);
+            throw;
+        }
+
+        // The moved private staging DACL gives this process the rights needed to finish. Restore
+        // attributes first, then install the caller's DACL as the final metadata operation; that
+        // policy may deliberately deny WriteAttributes or WriteDac afterwards.
+        File.SetAttributes(destination, attributes);
+        var security = new FileSecurity();
+        security.SetSecurityDescriptorBinaryForm(dacl, AccessControlSections.Access);
+        new FileInfo(destination).SetAccessControl(security);
     }
 
     /// <summary>
@@ -209,27 +716,114 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         // one separator whichever form arrived, and compare the bare form for the root itself.
         string destBare = Path.TrimEndingDirectorySeparator(destRoot);
         string destPrefix = destBare + Path.DirectorySeparatorChar;
+        var pathRoot = new ArchivePathNode("");
+        int entryCount = 0, pathNodeCount = 0;
         using var fs = new FileStream(tarPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
         using var reader = new TarReader(fs);
         while (reader.GetNextEntry() is { } entry)
         {
-            string target = Path.GetFullPath(Path.Combine(destBare, entry.Name));
-            if (!target.StartsWith(destPrefix, StringComparison.Ordinal) && target != destBare)
-                throw new ShardDecodeException($"Archive entry '{entry.Name}' escapes the destination directory.");
+            EnsureArchiveEntryCount(++entryCount);
+            string entryDisplay = ShardHeader.Display(entry.Name);
+            bool isDirectory = entry.EntryType == TarEntryType.Directory;
+            bool isFile = entry.EntryType is TarEntryType.RegularFile or TarEntryType.V7RegularFile;
+            if (!isDirectory && !isFile)
+                throw new ShardDecodeException(
+                    $"Archive entry '{entryDisplay}' has unsupported type {entry.EntryType}; only files and directories are accepted.");
 
-            switch (entry.EntryType)
+            if (entry.Name.Contains('\\'))
+                throw new ShardDecodeException(
+                    $"Archive entry '{entryDisplay}' uses a non-portable path separator.");
+            string archivePath = entry.Name;
+            if (isDirectory)
+                archivePath = archivePath.TrimEnd('/');
+            if (archivePath.Length == 0 || archivePath.StartsWith('/'))
+                throw new ShardDecodeException($"Archive entry '{entryDisplay}' is not a safe relative path.");
+            string[] segments = archivePath.Split('/');
+            if (segments.Length > MaxArchiveDepth)
+                throw new ShardDecodeException(
+                    $"Archive entry '{entryDisplay}' exceeds the maximum path depth of {MaxArchiveDepth}.");
+            if (segments.Any(segment => !IsSafePathSegment(segment)))
+                throw new ShardDecodeException($"Archive entry '{entryDisplay}' is not a portable, safe path.");
+
+            // Reject exact duplicates and case/Unicode-normalization aliases. An archive is a
+            // cross-platform transfer: A.txt/a.txt or composed/decomposed spellings would silently
+            // overwrite or merge on common Windows/macOS filesystems even when decoding on Linux.
+            ArchivePathNode pathNode = pathRoot;
+            for (int segmentIndex = 0; segmentIndex < segments.Length; segmentIndex++)
             {
-                case TarEntryType.Directory:
-                    Directory.CreateDirectory(target);
-                    break;
-                case TarEntryType.RegularFile or TarEntryType.V7RegularFile:
-                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                    entry.ExtractToFile(target, overwrite: true);
-                    break;
-                default:
-                    break; // links, fifos, pax metadata — our own encoder never writes them
+                string segment = segments[segmentIndex];
+                string spelling = segment.Normalize(NormalizationForm.FormC);
+                string canonical = spelling.ToUpperInvariant();
+                if (!pathNode.Children.TryGetValue(canonical, out ArchivePathNode? child))
+                {
+                    EnsureArchivePathNodeCount(++pathNodeCount);
+                    child = new ArchivePathNode(spelling);
+                    pathNode.Children.Add(canonical, child);
+                }
+                else if (child.Spelling != spelling)
+                {
+                    throw new ShardDecodeException(
+                        $"Archive path segment spellings '{ShardHeader.Display(child.Spelling)}' and " +
+                        $"'{ShardHeader.Display(spelling)}' collide on a case-insensitive or " +
+                        $"Unicode-normalizing filesystem (entry '{entryDisplay}').");
+                }
+
+                if (child.IsFile && segmentIndex < segments.Length - 1)
+                    throw new ShardDecodeException(
+                        $"Archive entry '{entryDisplay}' places content below an existing file path.");
+                pathNode = child;
+            }
+            if (pathNode.IsExplicitEntry)
+                throw new ShardDecodeException($"Archive contains duplicate entry '{entryDisplay}'.");
+            if (isFile && pathNode.Children.Count > 0)
+                throw new ShardDecodeException(
+                    $"Archive entry '{entryDisplay}' replaces a directory path with a file.");
+            pathNode.IsExplicitEntry = true;
+            pathNode.IsFile = isFile;
+
+            string target = Path.GetFullPath(Path.Combine(destBare, Path.Combine(segments)));
+            if (!target.StartsWith(destPrefix, StringComparison.Ordinal) && target != destBare)
+                throw new ShardDecodeException($"Archive entry '{entryDisplay}' escapes the destination directory.");
+
+            if (isDirectory)
+            {
+                Directory.CreateDirectory(target);
+            }
+            else
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                entry.ExtractToFile(target, overwrite: false);
             }
         }
+    }
+
+    internal static void EnsureArchiveEntryCount(int count)
+    {
+        if (count > MaxArchiveEntries)
+            throw new ShardDecodeException(
+                $"Archive contains more than {MaxArchiveEntries:N0} entries; refusing an unbounded inode/memory workload.");
+    }
+
+    internal static void EnsureArchivePathNodeCount(int count)
+    {
+        if (count > MaxArchivePathNodes)
+            throw new ShardDecodeException(
+                $"Archive contains more than {MaxArchivePathNodes:N0} distinct path components; " +
+                "refusing an unbounded directory/in-memory index workload.");
+    }
+
+    /// <summary>
+    /// Segment trie for portable collision checks. The previous implementation retained and
+    /// rebuilt every full prefix with string.Join at every depth, turning a legal 100k-entry,
+    /// 128-deep archive into hundreds of gigabytes of temporary strings. One normalized segment
+    /// per distinct node makes both retained memory and work linear in actual path bytes.
+    /// </summary>
+    private sealed class ArchivePathNode(string spelling)
+    {
+        public string Spelling { get; } = spelling;
+        public Dictionary<string, ArchivePathNode> Children { get; } = new(StringComparer.Ordinal);
+        public bool IsExplicitEntry { get; set; }
+        public bool IsFile { get; set; }
     }
 
     /// <summary>
@@ -249,17 +843,6 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         int cut = fileName.LastIndexOfAny(['/', '\\']);
         string name = cut >= 0 ? fileName[(cut + 1)..] : fileName;
 
-        // Stripping directories leaves "." and ".." intact, and both still traverse.
-        if (name.Length == 0 || name is "." or "..")
-            return FallbackFileName;
-
-        // Invalid-character sets are also platform-dependent, so reject the union: a name is
-        // only accepted if it is a plain file name on every platform. ':' additionally guards
-        // the Windows drive-relative form ("C:x") and NTFS alternate data streams.
-        foreach (char c in name)
-            if (c is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' || c < ' ')
-                return FallbackFileName;
-
         // Win32 DOS device names are not files. Opening "<dir>\NUL" with FileMode.Create SUCCEEDS,
         // every byte written is discarded, and no file appears — while File.Exists is false, so
         // the collision check below never diverts, and the SHA-256 still matches because it is
@@ -269,21 +852,19 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         // verify-don't-assume design exists to prevent. The check is unconditional rather than
         // OS-gated so a name is only accepted if it is a plain file on every platform, matching
         // the character rule above.
-        if (IsDosDeviceName(name))
-            return FallbackFileName;
-
-        // Windows silently strips trailing dots and spaces, so "evil. " and "evil" name the same
-        // file. Left through, two distinct headers collide and the collision check cannot see it.
-        if (name[^1] is '.' or ' ')
+        if (!IsSafePathSegment(name))
             return FallbackFileName;
 
         return name;
     }
 
     private static readonly string[] DosDevices =
-        ["CON", "PRN", "AUX", "NUL", "CLOCK$",
-         "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-         "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+        ["CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$",
+          "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+          "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+          // Win32 explicitly treats the ISO-8859-1 superscript digits as device-number
+          // suffixes too: COM¹.txt is a console device, not an ordinary Unicode filename.
+          "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"];
 
     /// <summary>
     /// Windows resolves a device name with OR without an extension — "NUL", "NUL.txt" and
@@ -297,6 +878,17 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             if (stem.Equals(device, StringComparison.OrdinalIgnoreCase))
                 return true;
         return false;
+    }
+
+    internal static bool IsSafePathSegment(string name)
+    {
+        if (name.Length == 0 || name is "." or ".." || name.Length > 255 ||
+            Encoding.UTF8.GetByteCount(name) > 255 || name[^1] is '.' or ' ' || IsDosDeviceName(name))
+            return false;
+        foreach (char c in name)
+            if (c is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' || c < ' ')
+                return false;
+        return true;
     }
 
     private const string FallbackFileName = "restored.bin";
@@ -328,7 +920,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
 
         string safe = SafeFileName(first.FileName);
         string outPath = Path.Combine(Environment.CurrentDirectory, safe);
-        if (!File.Exists(outPath))
+        if (!PathOccupied(outPath))
             return outPath;
 
         // The fallback used to be returned without a check of its own, so it protected the
@@ -343,7 +935,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         {
             string candidate = Path.Combine(Environment.CurrentDirectory,
                 n == 1 ? $"{stem}.restored{ext}" : $"{stem}.restored-{n}{ext}");
-            if (!File.Exists(candidate))
+            if (!PathOccupied(candidate))
                 return candidate;
         }
         throw new ShardDecodeException(
@@ -359,17 +951,105 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     private static string FreeDirectory(string stem)
     {
         string first = Path.Combine(Environment.CurrentDirectory, stem);
-        if (!Directory.Exists(first) || !Directory.EnumerateFileSystemEntries(first).Any())
+        if (!File.Exists(first) &&
+            (!Directory.Exists(first) || !Directory.EnumerateFileSystemEntries(first).Any()))
             return first;
         for (int n = 1; n < 10_000; n++)
         {
             string candidate = Path.Combine(Environment.CurrentDirectory,
                 n == 1 ? $"{stem}.restored" : $"{stem}.restored-{n}");
-            if (!Directory.Exists(candidate) || !Directory.EnumerateFileSystemEntries(candidate).Any())
+            if (!File.Exists(candidate) &&
+                (!Directory.Exists(candidate) || !Directory.EnumerateFileSystemEntries(candidate).Any()))
                 return candidate;
         }
         throw new ShardDecodeException(
             $"Cannot find a free extraction directory for '{stem}' — 10,000 variants are already in use. Pass -o explicitly.");
+    }
+
+    private static bool PathOccupied(string path) => File.Exists(path) || Directory.Exists(path);
+
+    /// <summary>
+    /// Best-effort removal of a directory's children without deleting the directory itself. On
+    /// Windows this is used while a no-delete-sharing handle still pins the exact private root;
+    /// the root is only removed non-recursively after that handle is closed.
+    /// </summary>
+    private static void TryDeleteDirectoryContents(string path)
+    {
+        try
+        {
+            foreach (string entry in Directory.EnumerateFileSystemEntries(path))
+            {
+                try
+                {
+                    FileAttributes attributes = File.GetAttributes(entry);
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        if ((attributes & FileAttributes.ReparsePoint) == 0)
+                            TryDeleteDirectoryContents(entry);
+                        TryDeleteEmptyDirectory(entry);
+                    }
+                    else
+                    {
+                        if (OperatingSystem.IsWindows() &&
+                            (attributes & FileAttributes.ReadOnly) != 0)
+                            File.SetAttributes(entry, attributes & ~FileAttributes.ReadOnly);
+                        File.Delete(entry);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                                                 DirectoryNotFoundException or FileNotFoundException)
+                {
+                    // Best effort. The root remains leased, so failure cannot redirect cleanup to
+                    // a replacement path; a private leftover is safer than an over-broad delete.
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                                         DirectoryNotFoundException)
+        {
+            // The root may already have been published or removed.
+        }
+    }
+
+    private static void TryDeleteEmptyDirectory(string path)
+    {
+        try
+        {
+            Directory.Delete(path, recursive: false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                                         DirectoryNotFoundException)
+        {
+            // Never fall back to recursive deletion after a Windows lease is closed: another
+            // process could replace the pathname in that window.
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void TryCleanupVerifiedWindowsDirectory(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return;
+
+        SafeFileHandle? cleanupLease = null;
+        try
+        {
+            cleanupLease = OpenWindowsDirectoryLease(path);
+            if (!IsVerifiedPrivateWindowsDirectory(path))
+                return;
+            TryDeleteDirectoryContents(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                                         DirectoryNotFoundException)
+        {
+            return;
+        }
+        finally
+        {
+            cleanupLease?.Dispose();
+        }
+
+        TryDeleteEmptyDirectory(path);
     }
 
     private static void TryDeleteDirectory(string path)
@@ -391,9 +1071,15 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     {
         try
         {
+            if (OperatingSystem.IsWindows() && File.Exists(path))
+            {
+                FileAttributes attributes = File.GetAttributes(path);
+                if ((attributes & FileAttributes.ReadOnly) != 0)
+                    File.SetAttributes(path, attributes & ~FileAttributes.ReadOnly);
+            }
             File.Delete(path);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // best effort — verification already failed louder
         }

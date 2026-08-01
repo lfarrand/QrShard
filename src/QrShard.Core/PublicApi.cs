@@ -58,6 +58,8 @@ public sealed class QrShardCodec
     /// <summary>
     /// Encodes a file into shard images in <paramref name="outputDirectory"/>.
     /// Throws <see cref="ArgumentException"/> for invalid settings and
+    /// <see cref="InvalidOperationException"/> when the input exceeds 1.5 GB or the selected
+    /// geometry cannot hold a shard header, and
     /// <see cref="IOException"/>-family exceptions for file-system failures.
     /// </summary>
     public QrShardEncodeReport EncodeFile(string inputPath, string outputDirectory,
@@ -84,7 +86,12 @@ public sealed class QrShardCodec
 
     /// <summary>
     /// Decodes captured shard images (any order, duplicates fine, damaged captures repaired or
-    /// rebuilt from parity) and writes the restored file(s). Throws
+    /// rebuilt from parity) and writes the restored file(s). Output is staged, exact-length and
+    /// SHA-256 verified before publication. A single-file result is atomically moved into place.
+    /// An archive output directory must be absent or empty and is never merged into an existing
+    /// tree; replacing an existing empty directory is not guaranteed to be one atomic operation.
+    /// Replacing an existing file preserves only Unix rwx mode, or the Windows DACL and basic
+    /// attributes; use a fresh path for extended metadata or hard-link fidelity. Throws
     /// <see cref="QrShardDecodeException"/> with an actionable message when the set cannot be
     /// fully reassembled.
     /// </summary>
@@ -159,6 +166,10 @@ public sealed class QrShardDecodeSession(string? password = null)
 
     private QrShardAddResult Add(DecodedShard shard)
     {
+        ShardHeader? family = _shards.FirstOrDefault(s => s.Header.FileId == shard.Header.FileId)?.Header;
+        if (family is not null && !family.HasSameFamilyAs(shard.Header))
+            return new QrShardAddResult(false, false,
+                $"Inconsistent shard family for '{ShardHeader.Display(family.FileName)}': repeated file metadata differs.");
         bool isNew = _seen.Add((shard.Header.FileId, shard.Header.Index, shard.Header.IsParity));
         if (isNew)
             _shards.Add(shard);
@@ -187,7 +198,11 @@ public sealed class QrShardDecodeSession(string? password = null)
     /// <summary>
     /// Assembles the collected shards into the restored file(s). Throws
     /// <see cref="QrShardDecodeException"/> if the set is not yet complete (check
-    /// <see cref="IsComplete"/> first) or if verification fails.
+    /// <see cref="IsComplete"/> first) or if verification fails. Output is staged and published
+    /// only after exact-length and SHA-256 verification. A single-file result is atomically moved
+    /// into place; an archive destination must be absent or empty and is never merged, but replacing
+    /// an existing empty directory is not guaranteed to be one atomic operation. Replacing an
+    /// existing file preserves only Unix rwx mode, or the Windows DACL and basic attributes.
     /// </summary>
     public IReadOnlyList<QrShardDecodedFile> Assemble(string? outputPath = null, Action<string>? progress = null)
     {

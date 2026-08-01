@@ -16,24 +16,25 @@ jobs:
         # Every platform the release matrix publishes a binary for must also run the suite here,
         # so a platform-specific failure is caught on the PR, not at release time. (linux-arm64
         # was release-only until an arm64-timing test failure blocked its v1.3.0 binary.)
-        os: [windows-latest, ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [windows-2025, ubuntu-22.04, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.os }}
     env:
-      # ImageSharp 4.x validates a license at build time. Add your Six Labors license key
-      # (the contents of sixlabors.lic) as the SIXLABORS_LICENSE_KEY repository secret.
-      # Free community licenses: https://sixlabors.com/pricing/
-      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.302
 
       - name: Build
-        run: dotnet build -c Release
+        env:
+          # Scoped to compilation: third-party report/checkout actions never receive it.
+          SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+        run: dotnet build -c Release -warnaserror
 
       - name: Test
         run: >
@@ -53,7 +54,7 @@ jobs:
       # would need `checks: write` and would fail outright on a pull request from a fork.
       - name: Test report
         if: always()
-        uses: dorny/test-reporter@a6ddd83ac95ff4586f5d3aceeb314d9a1841db95 # v3.0.0
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
         with:
           name: Tests (${{ matrix.os }})
           path: TestResults/${{ matrix.os }}.trx
@@ -101,3 +102,18 @@ jobs:
 
       - name: Round-trip self-test
         run: dotnet run --project src/QrShard -c Release --no-build -- test
+
+  dependency-audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.302
+      - name: Fail on known vulnerable transitive packages
+        run: >
+          dotnet restore QrShard.slnx
+          -p:NuGetAudit=true -p:NuGetAuditMode=all -p:NuGetAuditLevel=low
+          "-p:WarningsAsErrors=NU1901%3BNU1902%3BNU1903%3BNU1904"

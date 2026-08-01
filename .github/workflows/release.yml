@@ -4,119 +4,211 @@ on:
   push:
     tags: ['v*']
 
+# Build/test jobs are read-only. Write/OIDC permissions exist only in the small promotion jobs
+# that consume already-tested workflow artifacts; no repository code is built with a write token.
 permissions:
-  contents: write
+  contents: read
+
+# Serialise retries for the same tag. Without this, two runs can both pass preflight and one
+# failed creator can race with or clean up the other run's draft release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
 
 jobs:
-  binaries:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            rid: win-x64
-            asset: qrshard-win-x64.zip
-          - os: ubuntu-latest
-            rid: linux-x64
-            asset: qrshard-linux-x64.tar.gz
-          - os: ubuntu-24.04-arm
-            rid: linux-arm64
-            asset: qrshard-linux-arm64.tar.gz
-          - os: macos-latest
-            rid: osx-arm64
-            asset: qrshard-osx-arm64.tar.gz
-    runs-on: ${{ matrix.os }}
-    env:
-      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
-      DOTNET_NOLOGO: true
-      DOTNET_CLI_TELEMETRY_OPTOUT: true
+  preflight:
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
     steps:
-      # Actions are pinned to commit SHAs rather than tags throughout. A tag is mutable: whoever
-      # controls the action's repository can repoint it at new code, which then runs here with
-      # whatever the job holds — in the nuget job below, that is the OIDC token that publishes to
-      # nuget.org. The trailing comment records the version each SHA corresponds to.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          fetch-depth: 0 # need main's history to check what the tag points at
-
-      # A tag can be pushed onto ANY commit, and this workflow publishes to nuget.org, which is
-      # irreversible. Requiring the tagged commit to be contained in main means a release can only
-      # ship code that went through review and CI, rather than whatever someone tagged.
-      - name: Tag must point at a commit on main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate tag ancestry, version, and package availability before secrets
         shell: bash
         run: |
           set -euo pipefail
           git fetch --quiet origin main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main — refusing to release"
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"
             exit 1
           fi
-          echo "$GITHUB_REF_NAME is on main"
+          version="${GITHUB_REF_NAME#v}"
+          # NuGet normalizes leading zeroes, drops build metadata and a zero fourth component,
+          # and considers 1 / 1.0 / 1.0.0 / 1.0.0.0 equal. Requiring one canonical stable form
+          # makes the raw flat-container collision check below exact rather than normalization-
+          # dependent (and excludes prerelease/build-metadata tags).
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::release tags must use canonical stable vMAJOR.MINOR.PATCH form"
+            exit 1
+          fi
+          for project in src/QrShard/QrShard.csproj src/QrShard.Core/QrShard.Core.csproj; do
+            project_version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' "$project" | head -1)"
+            [ "$version" = "$project_version" ] || {
+              echo "::error::tag version $version does not match $project version $project_version"; exit 1;
+            }
+          done
+          for package in qrshard.tool qrshard.core; do
+            versions="$(curl --fail --silent --show-error "https://api.nuget.org/v3-flatcontainer/$package/index.json")"
+            if jq -e --arg version "$version" '.versions | index($version) != null' <<< "$versions" >/dev/null; then
+              echo "::error::$package $version already exists on nuget.org; refusing an ambiguous retry"
+              exit 1
+            fi
+          done
+
+      - name: Protected release gate must exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          environment="$(gh api "repos/$GH_REPO/environments/release")"
+          jq -e '
+            .can_admins_bypass == false and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            any(.protection_rules[]?;
+              .type == "required_reviewers" and
+              .prevent_self_review == false and
+              (.reviewers | length) > 0)
+          ' <<< "$environment" >/dev/null || {
+            echo "::error::release environment must require a self-approving reviewer, disable admin bypass, and use only custom tag policies"
+            exit 1
+          }
+          policies="$(gh api "repos/$GH_REPO/environments/release/deployment-branch-policies")"
+          jq -e '
+            .total_count == 1 and
+            (.branch_policies | length) == 1 and
+            .branch_policies[0].name == "v*" and
+            .branch_policies[0].type == "tag"
+          ' <<< "$policies" >/dev/null || {
+            echo "::error::release environment must allow only the v* tag policy"
+            exit 1
+          }
+          mapfile -t tag_rulesets < <(gh api "repos/$GH_REPO/rulesets" --paginate --jq \
+            '.[] | select(.name == "Protect release tags" and .target == "tag" and .enforcement == "active") | .id')
+          [ "${#tag_rulesets[@]}" -eq 1 ] || {
+            echo "::error::expected one active Protect release tags ruleset"; exit 1;
+          }
+          tag_ruleset="$(gh api "repos/$GH_REPO/rulesets/${tag_rulesets[0]}")"
+          jq -e '
+            .conditions.ref_name.include == ["refs/tags/v*"] and
+            .conditions.ref_name.exclude == [] and
+            ([.rules[].type] | sort) == ["deletion", "update"]
+          ' <<< "$tag_ruleset" >/dev/null || {
+            echo "::error::release tag ruleset must block update/deletion of refs/tags/v*"
+            exit 1
+          }
+
+  binaries:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            rid: win-x64
+            asset: qrshard-win-x64.zip
+          # Native-AOT Linux binaries require the glibc of the build host or newer. Build x64 on
+          # Ubuntu 22.04 deliberately (glibc 2.35), rather than a moving ubuntu-latest floor.
+          - os: ubuntu-22.04
+            rid: linux-x64
+            asset: qrshard-linux-x64.tar.gz
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+            asset: qrshard-linux-arm64.tar.gz
+          - os: macos-15
+            rid: osx-arm64
+            asset: qrshard-osx-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      # Actions are pinned to immutable commit SHAs throughout.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.302
+
+      - name: Record toolchain
+        run: dotnet --info
 
       - name: Test
-        run: dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release
+        env:
+          SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+        run: dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release -warnaserror
 
-      # Native AOT: single self-contained binary, ~20ms startup. The runners carry the
-      # platform C++ toolchains; the trimmed IL analysis is warning-clean.
       - name: Publish (Native AOT)
-        run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false
+        env:
+          SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
+        run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false -p:InvariantGlobalization=true -warnaserror
 
-      # `dotnet test` above exercises the JIT build. Native AOT is a different compilation model:
-      # trimming and reflection fail here and nowhere else, so the binary that users actually
-      # download was the least-tested artifact in the release — compiled, zipped and attached
-      # without ever being executed. Run it before it is archived, so a broken one cannot ship.
-      # Every RID is native to its runner (x64 on windows/ubuntu-latest, arm64 on
-      # ubuntu-24.04-arm/macos-latest), so this really runs rather than merely linking.
-      - name: Smoke-test the binary
+      - name: Include redistribution notices
         shell: bash
         run: |
           set -euo pipefail
           pub="src/QrShard/bin/Release/net10.0/${{ matrix.rid }}/publish"
-          # The AOT output is named after the ASSEMBLY (QrShard), not the tool command (qrshard).
-          # Windows and macOS have case-insensitive filesystems, so the lowercase form resolved
-          # there and only Linux failed — which is exactly how this shipped green on two platforms.
+          cp LICENSE "$pub/LICENSE"
+          cp THIRD-PARTY-NOTICES.md "$pub/THIRD-PARTY-NOTICES.md"
+          cp licenses/Apache-2.0.txt "$pub/IMAGESHARP-APACHE-2.0.txt"
+          runtime="$HOME/.nuget/packages/microsoft.netcore.app.runtime.nativeaot.${{ matrix.rid }}/10.0.10"
+          cp "$runtime/LICENSE.TXT" "$pub/DOTNET-LICENSE.txt"
+          cp "$runtime/THIRD-PARTY-NOTICES.TXT" "$pub/DOTNET-THIRD-PARTY-NOTICES.txt"
+          aot="$HOME/.nuget/packages/microsoft.dotnet.ilcompiler/10.0.10"
+          cmp "$runtime/THIRD-PARTY-NOTICES.TXT" "$aot/THIRD-PARTY-NOTICES.TXT" || {
+            cp "$aot/THIRD-PARTY-NOTICES.TXT" "$pub/DOTNET-AOT-THIRD-PARTY-NOTICES.txt";
+          }
+
+      - name: Smoke-test the exact binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          pub="src/QrShard/bin/Release/net10.0/${{ matrix.rid }}/publish"
           bin="$pub/QrShard"
           [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
           if [ ! -f "$bin" ]; then
-            echo "::error::no binary at $bin — publish layout changed?"
+            echo "::error::no binary at $bin"
             ls -la "$pub" || true
             exit 1
           fi
           [ -x "$bin" ] || chmod +x "$bin"
 
-          # 1. It starts at all — the check that a trimming or reflection fault would fail — and
-          #    reports the version it is being released as. The binary embeds the csproj <Version>
-          #    while the NuGet packages take theirs from the tag, so this is also the only thing
-          #    that would notice the two drifting apart.
           actual="$("$bin" --version)"
           expected="qrshard ${GITHUB_REF_NAME#v}"
-          echo "version: $actual"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::binary reports '$actual' but the tag expects '$expected'"
-            exit 1
-          fi
-
-          # 2. The built-in self-test: encode, simulated screenshot degradation, ECC, and
-          #    cross-shard parity recovery, all through the AOT-compiled codec.
+          [ "$actual" = "$expected" ] || {
+            echo "::error::binary reports '$actual' but tag expects '$expected'"; exit 1;
+          }
           "$bin" test
 
-          # 3. A real file through the real CLI, with a data image deleted so parity has to
-          #    rebuild it, compared byte-for-byte independently of the tool's own SHA check.
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
           head -c 300000 /dev/urandom > "$work/payload.bin"
           "$bin" encode "$work/payload.bin" -o "$work/shards" -r 900 -R 25 > /dev/null
-          rm "$(ls "$work"/shards/*.png | head -1)"
+          removed=""
+          for candidate in "$work"/shards/*.qrs[0-9]*of[0-9]*.png; do
+            [ -f "$candidate" ] || continue
+            removed="$candidate"
+            break
+          done
+          [ -n "$removed" ] || { echo "::error::no data shard found"; exit 1; }
+          case "$(basename "$removed")" in *qrs-parity*) echo "::error::selected parity, not data"; exit 1;; esac
+          rm -- "$removed"
           "$bin" decode "$work/shards" -o "$work/out.bin" > /dev/null
-          if ! cmp -s "$work/payload.bin" "$work/out.bin"; then
-            echo "::error::round trip through the ${{ matrix.rid }} binary did not reproduce the input"
-            exit 1
-          fi
-          echo "round trip OK (parity rebuilt a deleted image)"
+          cmp -s "$work/payload.bin" "$work/out.bin" || {
+            echo "::error::parity round trip did not reproduce the input"; exit 1;
+          }
 
       - name: Archive (Windows)
         if: runner.os == 'Windows'
@@ -127,64 +219,456 @@ jobs:
         if: runner.os != 'Windows'
         run: tar -czf ${{ matrix.asset }} -C src/QrShard/bin/Release/net10.0/${{ matrix.rid }}/publish .
 
-      - name: Attach to release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Generate and validate the exact binary SPDX SBOM
         shell: bash
-        run: gh release upload "${{ github.ref_name }}" "${{ matrix.asset }}" --clobber || gh release create "${{ github.ref_name }}" "${{ matrix.asset }}" --generate-notes
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          tool_dir="$RUNNER_TEMP/sbom-tool"
+          input_dir="$RUNNER_TEMP/sbom-input"
+          output_dir="$RUNNER_TEMP/sbom-output"
+          mkdir -p "$input_dir" "$output_dir"
+          cp "${{ matrix.asset }}" "$input_dir/"
+          dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.5 --tool-path "$tool_dir"
+          sbom_tool="$tool_dir/sbom-tool"
+          [ "${{ runner.os }}" = Windows ] && sbom_tool="$sbom_tool.exe"
 
-  # Publishes via nuget.org trusted publishing: GitHub mints an OIDC token for this job,
-  # nuget.org validates it against a policy naming this repo and workflow file, and hands back
-  # a short-lived key. No long-lived API key is stored anywhere.
-  #
-  # Requires, one time: a policy at https://www.nuget.org/account/trustedpublishing with
-  # Repository Owner=lfarrand, Repository=QrShard, Workflow File=release.yml (filename only,
-  # no path), Environment blank; plus a NUGET_USER secret holding the nuget.org profile name
-  # (not an email). Without NUGET_USER the job still packs and simply skips publishing.
-  nuget:
-    # Publishing to nuget.org is the one irreversible step in a release: a version can be
-    # unlisted but never deleted or reused. So it waits for every binary to have been built AND
-    # smoke-tested — if the AOT binary cannot even start, or reports a version that disagrees
-    # with the tag, the packages must not go out. `fail-fast: false` above still lets all four
-    # legs finish first, so a failure is diagnosed in one run rather than one platform at a time.
-    needs: binaries
-    runs-on: ubuntu-latest
+          # The preceding Native-AOT publish produced this target's project.assets.json on the
+          # same OS/architecture that built the exact archive. This keeps host-only compiler packs
+          # from contaminating a cross-RID graph.
+          "$sbom_tool" generate \
+            -b "$input_dir" -bc "$GITHUB_WORKSPACE/src/QrShard" -m "$output_dir" \
+            -pn "QrShard.NativeAOT.${{ matrix.rid }}" -pv "$version" -ps "Lee Farrand" \
+            -nsb "https://github.com/$GITHUB_REPOSITORY" -mi SPDX:2.2 \
+            -F false -pm true -V Warning
+          manifest="$output_dir/_manifest/spdx_2.2/manifest.spdx.json"
+          "$sbom_tool" validate -b "$input_dir" -m "$output_dir/_manifest" \
+            -o "$RUNNER_TEMP/sbom-validation.json" -mi SPDX:2.2 -F false -n true -V Warning
+
+          jq -e --arg version "$version" \
+            --arg runtime "Microsoft.NETCore.App.Runtime.NativeAOT.${{ matrix.rid }}" \
+            --arg compiler "runtime.${{ matrix.rid }}.Microsoft.DotNet.ILCompiler" '
+              .spdxVersion == "SPDX-2.2" and
+              (.files | length) == 1 and
+              ([.packages[]? | select(
+                (.name | ascii_downcase) |
+                test("^(xunit|benchmarkdotnet|microsoft\\.sbom)"))] | length) == 0 and
+              ([.packages[]? | select(
+                (.name | startswith("QrShard")) and .versionInfo != $version)] | length) == 0 and
+              any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.0.0") and
+              any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.10") and
+              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.10") and
+              ([.packages[]? | select(.name | startswith("Microsoft.NETCore.App.Runtime.NativeAOT."))] | length) == 1 and
+              any(.packages[]?; .name == $runtime and .versionInfo == "10.0.10") and
+              ([.packages[]? | select(.name | test("^runtime\\..*\\.Microsoft\\.DotNet\\.ILCompiler$"))] | length) == 1 and
+              any(.packages[]?; .name == $compiler and .versionInfo == "10.0.10")
+            ' "$manifest" >/dev/null || {
+              echo "::error::${{ matrix.rid }} SBOM has a wrong-RID, stale, or non-production graph"; exit 1;
+            }
+          cp "$manifest" "qrshard-${{ matrix.rid }}-$GITHUB_REF_NAME.spdx.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: binary-${{ matrix.rid }}
+          path: |
+            ${{ matrix.asset }}
+            qrshard-${{ matrix.rid }}-${{ github.ref_name }}.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  packages:
+    needs: preflight
+    runs-on: ubuntu-24.04
     permissions:
-      id-token: write   # mint the OIDC token; NuGet/login returns 403 without it
-      contents: read    # job-level permissions replace the workflow-level default wholesale
-      packages: write   # mirror the same packages to GitHub Packages
-    env:
-      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
-      NUGET_USER: ${{ secrets.NUGET_USER }}
-      DOTNET_NOLOGO: true
+      contents: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
+        with:
+          persist-credentials: false
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.302
 
-      - name: Pack tool and library
+      - name: Pack once
+        env:
+          SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
         run: |
-          dotnet pack src/QrShard/QrShard.csproj -c Release -o nupkg -p:Version=${GITHUB_REF_NAME#v}
-          dotnet pack src/QrShard.Core/QrShard.Core.csproj -c Release -o nupkg -p:Version=${GITHUB_REF_NAME#v}
+          version="${GITHUB_REF_NAME#v}"
+          dotnet pack src/QrShard/QrShard.csproj -c Release -o nupkg -p:Version="$version" -warnaserror
+          dotnet pack src/QrShard.Core/QrShard.Core.csproj -c Release -o nupkg -p:Version="$version" -warnaserror
 
-      # Deliberately the last step before the push: the issued key lasts one hour and is
-      # single-use, so requesting it any earlier only risks it expiring.
+      - name: Consumer-test those exact package bytes
+        env:
+          QRSHARD_PREBUILT_FEED: ${{ github.workspace }}/nupkg
+          QRSHARD_PACKAGE_VERSION: ${{ github.ref_name }}
+        run: |
+          export QRSHARD_PACKAGE_VERSION="${QRSHARD_PACKAGE_VERSION#v}"
+          tests/verify-package-consumer.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nuget-packages
+          path: nupkg/*.nupkg
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom:
+    needs: packages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.302
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nuget-packages
+          path: release-inputs/packages
+
+      - name: Stage exact package-specific SBOM inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p release-inputs/tool-package release-inputs/core-package release-sbom sbom-output
+          [ -f "release-inputs/packages/QrShard.Tool.$version.nupkg" ] || {
+            echo "::error::missing exact QrShard.Tool package"; exit 1;
+          }
+          [ -f "release-inputs/packages/QrShard.Core.$version.nupkg" ] || {
+            echo "::error::missing exact QrShard.Core package"; exit 1;
+          }
+          [ "$(find release-inputs/packages -maxdepth 1 -type f | wc -l)" -eq 2 ] || {
+            echo "::error::expected exactly two NuGet packages"; exit 1;
+          }
+          cp "release-inputs/packages/QrShard.Tool.$version.nupkg" release-inputs/tool-package/
+          cp "release-inputs/packages/QrShard.Core.$version.nupkg" release-inputs/core-package/
+
+      - name: Generate and semantically validate SPDX 2.2 SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          tool_dir="$RUNNER_TEMP/sbom-tool"
+          dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.5 --tool-path "$tool_dir"
+          sbom_tool="$tool_dir/sbom-tool"
+
+          generate_sbom() {
+            local build_dir="$1" component_dir="$2" output_dir="$3" product="$4"
+            "$sbom_tool" generate \
+              -b "$GITHUB_WORKSPACE/$build_dir" \
+              -bc "$GITHUB_WORKSPACE/$component_dir" \
+              -m "$GITHUB_WORKSPACE/$output_dir" \
+              -pn "$product" -pv "$version" -ps "Lee Farrand" \
+              -nsb "https://github.com/$GITHUB_REPOSITORY" -mi SPDX:2.2 \
+              -F false -pm true -V Warning
+          }
+
+          validate_sbom() {
+            local build_dir="$1" output_dir="$2" manifest="$3" label="$4"
+            "$sbom_tool" validate -b "$build_dir" \
+              -m "$output_dir/_manifest" -o "$RUNNER_TEMP/$label-validation.json" \
+              -mi SPDX:2.2 -F false -n true -V Warning
+            jq -e --arg version "$version" '
+              .spdxVersion == "SPDX-2.2" and
+              (.files | length) == 1 and
+              ([.packages[]? | select(
+                (.name | ascii_downcase) |
+                test("^(xunit|benchmarkdotnet|microsoft\\.sbom)"))] | length) == 0 and
+              ([.packages[]? | select(
+                (.name | startswith("QrShard")) and .versionInfo != $version)] | length) == 0
+            ' "$manifest" >/dev/null || {
+              echo "::error::$label SBOM contains stale/non-production components or an unexpected file set"; exit 1;
+            }
+          }
+
+          validate_cli_dependencies() {
+            local manifest="$1" label="$2"
+            jq -e '
+              any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.0.0") and
+              any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.10") and
+              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.10")
+            ' "$manifest" >/dev/null || {
+              echo "::error::$label SBOM is missing pinned production dependencies"; exit 1;
+            }
+          }
+
+          # Package SBOMs intentionally use the ordinary framework-dependent restore graph rather
+          # than any RID-specific Native-AOT graph.
+          dotnet restore src/QrShard/QrShard.csproj -p:PublishAot=false --force
+          tool_output="sbom-output/tool-package"
+          generate_sbom release-inputs/tool-package src/QrShard "$tool_output" QrShard.Tool
+          tool_manifest="$tool_output/_manifest/spdx_2.2/manifest.spdx.json"
+          validate_sbom release-inputs/tool-package "$tool_output" "$tool_manifest" tool-package
+          validate_cli_dependencies "$tool_manifest" tool-package
+          jq -e '([.packages[]? | select(.name | startswith("Microsoft.NETCore.App.Runtime.NativeAOT."))] | length) == 0' \
+            "$tool_manifest" >/dev/null || {
+              echo "::error::tool-package SBOM inherited a Native-AOT runtime graph"; exit 1;
+            }
+          cp "$tool_manifest" "release-sbom/qrshard-tool-$GITHUB_REF_NAME.spdx.json"
+
+          dotnet restore src/QrShard.Core/QrShard.Core.csproj -p:PublishAot=false --force
+          core_output="sbom-output/core-package"
+          generate_sbom release-inputs/core-package src/QrShard.Core "$core_output" QrShard.Core
+          core_manifest="$core_output/_manifest/spdx_2.2/manifest.spdx.json"
+          validate_sbom release-inputs/core-package "$core_output" "$core_manifest" core-package
+          jq -e '
+            any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.0.0") and
+            any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.10") and
+            ([.packages[]? | select(.name | startswith("Microsoft.NETCore.App.Runtime.NativeAOT."))] | length) == 0
+          ' "$core_manifest" >/dev/null || {
+            echo "::error::Core package SBOM has the wrong production dependency graph"; exit 1;
+          }
+          cp "$core_manifest" "release-sbom/qrshard-core-$GITHUB_REF_NAME.spdx.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-sbom
+          path: release-sbom/*.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  create-draft:
+    needs: [binaries, packages, sbom]
+    runs-on: ubuntu-24.04
+    environment:
+      name: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: binary-*
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nuget-packages
+          path: release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-sbom
+          path: release-assets
+
+      - name: Checksum every candidate artifact
+        working-directory: release-assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected=(
+            qrshard-win-x64.zip
+            qrshard-linux-x64.tar.gz
+            qrshard-linux-arm64.tar.gz
+            qrshard-osx-arm64.tar.gz
+            "QrShard.Tool.$version.nupkg"
+            "QrShard.Core.$version.nupkg"
+            "qrshard-win-x64-$GITHUB_REF_NAME.spdx.json"
+            "qrshard-linux-x64-$GITHUB_REF_NAME.spdx.json"
+            "qrshard-linux-arm64-$GITHUB_REF_NAME.spdx.json"
+            "qrshard-osx-arm64-$GITHUB_REF_NAME.spdx.json"
+            "qrshard-tool-$GITHUB_REF_NAME.spdx.json"
+            "qrshard-core-$GITHUB_REF_NAME.spdx.json"
+          )
+          [ "$(find . -maxdepth 1 -type f | wc -l)" -eq "${#expected[@]}" ] || {
+            echo "::error::release candidate contains an unexpected number of files"; exit 1;
+          }
+          for asset in "${expected[@]}"; do
+            [ -f "$asset" ] || { echo "::error::missing release candidate $asset"; exit 1; }
+          done
+          sha256sum "${expected[@]}" > SHA256SUMS
+
+      - name: Release tag must still resolve to the event commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")"
+          sha="$(jq -r .object.sha <<< "$response")"
+          type="$(jq -r .object.type <<< "$response")"
+          for _ in {1..8}; do
+            if [ "$type" = commit ]; then break; fi
+            [ "$type" = tag ] || {
+              echo "::error::release tag resolves to unsupported Git object type '$type'"; exit 1;
+            }
+            response="$(gh api "repos/$GH_REPO/git/tags/$sha")"
+            sha="$(jq -r .object.sha <<< "$response")"
+            type="$(jq -r .object.type <<< "$response")"
+          done
+          [ "$type" = commit ] && [ "$sha" = "$GITHUB_SHA" ] || {
+            echo "::error::$GITHUB_REF_NAME resolves to $type $sha, not event commit $GITHUB_SHA"; exit 1;
+          }
+
+      - name: Attest build provenance for every release file
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-assets/*
+
+      - name: Attest win-x64 SPDX SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-assets/qrshard-win-x64.zip
+          sbom-path: release-assets/qrshard-win-x64-${{ github.ref_name }}.spdx.json
+
+      - name: Attest linux-x64 SPDX SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-assets/qrshard-linux-x64.tar.gz
+          sbom-path: release-assets/qrshard-linux-x64-${{ github.ref_name }}.spdx.json
+
+      - name: Attest linux-arm64 SPDX SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-assets/qrshard-linux-arm64.tar.gz
+          sbom-path: release-assets/qrshard-linux-arm64-${{ github.ref_name }}.spdx.json
+
+      - name: Attest osx-arm64 SPDX SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-assets/qrshard-osx-arm64.tar.gz
+          sbom-path: release-assets/qrshard-osx-arm64-${{ github.ref_name }}.spdx.json
+
+      - name: Attest tool-package SPDX SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-assets/QrShard.Tool.*.nupkg
+          sbom-path: release-assets/qrshard-tool-${{ github.ref_name }}.spdx.json
+
+      - name: Attest core-package SPDX SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-assets/QrShard.Core.*.nupkg
+          sbom-path: release-assets/qrshard-core-${{ github.ref_name }}.spdx.json
+
+      - name: Create one complete draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          response="$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")"
+          sha="$(jq -r .object.sha <<< "$response")"
+          type="$(jq -r .object.type <<< "$response")"
+          for _ in {1..8}; do
+            if [ "$type" = commit ]; then break; fi
+            [ "$type" = tag ] || {
+              echo "::error::release tag resolves to unsupported Git object type '$type'"; exit 1;
+            }
+            response="$(gh api "repos/$GH_REPO/git/tags/$sha")"
+            sha="$(jq -r .object.sha <<< "$response")"
+            type="$(jq -r .object.type <<< "$response")"
+          done
+          [ "$type" = commit ] && [ "$sha" = "$GITHUB_SHA" ] || {
+            echo "::error::$GITHUB_REF_NAME moved before draft creation"; exit 1;
+          }
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::error::release $GITHUB_REF_NAME already exists; refusing to replace assets"
+            exit 1
+          fi
+          created=0
+          cleanup() {
+            if [ "$created" -eq 1 ]; then
+              gh release delete "$GITHUB_REF_NAME" --yes || true
+            fi
+          }
+          trap cleanup ERR
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --generate-notes
+          created=1
+          for asset in release-assets/*; do
+            gh release upload "$GITHUB_REF_NAME" "$asset"
+          done
+          trap - ERR
+
+  publish-nuget:
+    needs: [binaries, packages, create-draft]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.302
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nuget-packages
+          path: nupkg
+
+      - name: NuGet publishing must be configured
+        env:
+          NUGET_USER: ${{ secrets.NUGET_USER }}
+        run: test -n "$NUGET_USER" || { echo "::error::NUGET_USER is not configured"; exit 1; }
+
       - name: NuGet login (OIDC)
-        if: env.NUGET_USER != ''
         id: login
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
         with:
           user: ${{ secrets.NUGET_USER }}
 
-      - name: Push to NuGet
-        if: env.NUGET_USER != ''
-        run: dotnet nuget push "nupkg/*.nupkg" --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+      - name: Push the tested bytes to NuGet
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find nupkg -maxdepth 1 -type f -name '*.nupkg' -print | sort)
+          [ "${#packages[@]}" -eq 2 ] || {
+            echo "::error::expected exactly two tested packages, found ${#packages[@]}"; exit 1;
+          }
+          for package in "${packages[@]}"; do
+            dotnet nuget push "$package" --source https://api.nuget.org/v3/index.json
+          done
 
-      # Secondary mirror, so the packages show under the repository's Packages section. Not a
-      # public distribution channel: GitHub Packages requires a token with read:packages to
-      # install from, even for public repos, so nuget.org above remains the supported source.
-      # Uses the run's own GITHUB_TOKEN — no secret to configure.
-      - name: Mirror to GitHub Packages
-        run: dotnet nuget push "nupkg/*.nupkg" --api-key "${{ secrets.GITHUB_TOKEN }}" --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json --skip-duplicate
+      - name: Mirror the same bytes to GitHub Packages
+        env:
+          NUGET_API_KEY: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find nupkg -maxdepth 1 -type f -name '*.nupkg' -print | sort)
+          [ "${#packages[@]}" -eq 2 ] || {
+            echo "::error::expected exactly two tested packages, found ${#packages[@]}"; exit 1;
+          }
+          for package in "${packages[@]}"; do
+            dotnet nuget push "$package" --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+          done
+
+  publish-release:
+    needs: [create-draft, publish-nuget]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Publish one complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          response="$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME")"
+          sha="$(jq -r .object.sha <<< "$response")"
+          type="$(jq -r .object.type <<< "$response")"
+          for _ in {1..8}; do
+            if [ "$type" = commit ]; then break; fi
+            [ "$type" = tag ] || {
+              echo "::error::release tag resolves to unsupported Git object type '$type'"; exit 1;
+            }
+            response="$(gh api "repos/$GH_REPO/git/tags/$sha")"
+            sha="$(jq -r .object.sha <<< "$response")"
+            type="$(jq -r .object.type <<< "$response")"
+          done
+          [ "$type" = commit ] && [ "$sha" = "$GITHUB_SHA" ] || {
+            echo "::error::$GITHUB_REF_NAME moved before publication"; exit 1;
+          }
+          [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true" ] || {
+            echo "::error::$GITHUB_REF_NAME is missing or is not the draft built by this run"; exit 1;
+          }
+          gh release edit "$GITHUB_REF_NAME" --draft=false

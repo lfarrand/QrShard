@@ -39,6 +39,34 @@ public class Interleave2Tests
     }
 
     [Fact]
+    public void GatherStreams_ReusesOnePermutationForAllConfidenceInputs()
+    {
+        const int n = 10_000;
+        var interleaver = new Interleaver2();
+        byte[] classic = TestData.Random(n, 41);
+        var scattered = new byte[n];
+        interleaver.Scatter(classic, scattered, n);
+        int[] permutation = interleaver.Permutation(n);
+        var scatteredFlags = new bool[n];
+        for (int i = 0; i < n; i++)
+            scatteredFlags[permutation[i]] = (i & 1) == 0;
+        byte[] scatteredSecond = scattered.Select(b => (byte)(b ^ 0x5a)).ToArray();
+        var cells = new byte[n];
+        var flags = new bool[n];
+        var second = new byte[n];
+
+        interleaver.GatherStreams(scattered, cells, scatteredFlags, flags,
+            scatteredSecond, second, n);
+
+        Assert.Equal(classic, cells);
+        for (int i = 0; i < n; i++)
+        {
+            Assert.Equal((i & 1) == 0, flags[i]);
+            Assert.Equal((byte)(classic[i] ^ 0x5a), second[i]);
+        }
+    }
+
+    [Fact]
     public void Permutation_DestroysArithmeticConcentration()
     {
         // The failure mode v2 exists for: bytes damaged at a FIXED STRIDE (a vertical blob

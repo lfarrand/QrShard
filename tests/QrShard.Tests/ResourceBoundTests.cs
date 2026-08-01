@@ -11,6 +11,102 @@ namespace QrShard.Tests;
 /// </summary>
 public class ResourceBoundTests
 {
+    [Fact]
+    public void OrdinaryShardLoads_AreBoundToOneFrameAndSkipMetadata()
+    {
+        // The folder and incremental APIs accept one shard image per item. ImageSharp otherwise
+        // loads every frame in an animated container before ShardDecoder copies only the root,
+        // letting a many-frame file exceed the worker budget by orders of magnitude. Recording
+        // decode has its own path and deliberately does not use these options.
+        var options = ShardDecoder.NewShardImageDecoderOptions();
+        Assert.Equal(1u, options.MaxFrames);
+        Assert.True(options.SkipMetadata);
+    }
+
+    [Fact]
+    public void AnimatedRecordingAndApngLimits_AreFiniteAndConsistent()
+    {
+        Assert.Equal(256L * 1024 * 1024, RecordingFrameSource.MaxAnimatedDecodedBytes);
+        Assert.Equal(4096, RecordingFrameSource.MaxAnimatedFrames);
+        Assert.Equal(RecordingFrameSource.MaxAnimatedDecodedBytes, SlideshowWriter.MaxApngDecodedBytes);
+        Assert.Equal(1, RecordingFrameSource.AllowedAnimatedFrames(3840, 2160, budgetMB: 64));
+        Assert.Equal(0, RecordingFrameSource.AllowedAnimatedFrames(8000, 6000, budgetMB: 4000));
+    }
+
+    [Fact]
+    public void LiveWorkersAndTemporalAverageRespectDecodeBudget()
+    {
+        var phoneFrame = new Bitmap(new Rgb24[1], 8000, 6000); // dimensions only
+        Assert.Equal(2, VideoDecoder.BudgetedLiveWorkers(phoneFrame, requestedWorkers: 64, budgetMB: 4000));
+        Assert.True(VideoDecoder.CanTemporalAverage(phoneFrame, budgetMB: 4000));
+
+        var larger = new Bitmap(new Rgb24[1], 10_000, 8_000);
+        Assert.False(VideoDecoder.CanTemporalAverage(larger, budgetMB: 4000));
+    }
+
+    [Fact]
+    public void InvalidImageDimensionsAreRejectedBeforeWorkerMath()
+    {
+        Assert.Throws<ShardDecodeException>(() =>
+            ShardDecoder.ValidateImageDimensions(0, 100, budgetMB: 4000));
+        Assert.Throws<ShardDecodeException>(() =>
+            ShardDecoder.ValidateImageDimensions(int.MaxValue, int.MaxValue, budgetMB: 4000));
+    }
+
+    [Fact]
+    public void CompressionAndEncryptionMaterializationAreBudgetCheckedBeforeAllocation()
+    {
+        Assert.True(PayloadPreparer.CompressionMaterializationFitsBudget(100_000_000, budgetMB: 400));
+        Assert.False(PayloadPreparer.CompressionMaterializationFitsBudget(100_000_000, budgetMB: 399));
+        PayloadPreparer.EnsureEncryptionFitsBudget(63_000_000, budgetMB: 64);
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            PayloadPreparer.EnsureEncryptionFitsBudget(65_000_000, budgetMB: 64));
+        Assert.Contains("EncodeMemoryBudgetMB", ex.Message);
+    }
+
+    [Fact]
+    public void EncodeWorkerBudgetCountsAllRetainedScratchAndWriterPixels()
+    {
+        var layout = Layout.Create(1920, 1080, 1, 8, 32, interleave2: true);
+        const long stream = 123_456;
+        long pixels = (long)layout.Width * layout.Height * 3;
+        long expectedPng = pixels + stream + 2 * layout.TotalBytes;
+
+        Assert.Equal(expectedPng,
+            ShardEncoder.EstimateRenderWorkerBytes(layout, stream, imageWriterCopiesPixels: false));
+        Assert.Equal(expectedPng + pixels,
+            ShardEncoder.EstimateRenderWorkerBytes(layout, stream, imageWriterCopiesPixels: true));
+    }
+
+    [Fact]
+    public void ArchiveEntryCountLimit_AcceptsTheBoundaryAndRejectsTheNextEntry()
+    {
+        ShardAssembler.EnsureArchiveEntryCount(ShardAssembler.MaxArchiveEntries);
+        var ex = Assert.Throws<ShardDecodeException>(() =>
+            ShardAssembler.EnsureArchiveEntryCount(ShardAssembler.MaxArchiveEntries + 1));
+        Assert.Contains(ShardAssembler.MaxArchiveEntries.ToString("N0"), ex.Message);
+    }
+
+    [Fact]
+    public void ArchivePathNodeLimit_AcceptsTheBoundaryAndRejectsTheNextNode()
+    {
+        ShardAssembler.EnsureArchivePathNodeCount(ShardAssembler.MaxArchivePathNodes);
+        var ex = Assert.Throws<ShardDecodeException>(() =>
+            ShardAssembler.EnsureArchivePathNodeCount(ShardAssembler.MaxArchivePathNodes + 1));
+        Assert.Contains(ShardAssembler.MaxArchivePathNodes.ToString("N0"), ex.Message);
+    }
+
+    [Fact]
+    public void ANewlyLoadedImageCannotExceedTheSingleWorkerPlanningBudget()
+    {
+        // The largest canvas QrShard can itself render remains decodable under the default.
+        ShardDecoder.ValidateImageDimensions(16_384, 16_384, budgetMB: 4_000); // ~1.61 GB load peak
+        var ex = Assert.Throws<ShardDecodeException>(() =>
+            ShardDecoder.ValidateImageDimensions(20_000, 20_000, budgetMB: 2_000));
+        Assert.Contains("DecodeMemoryBudgetMB", ex.Message);
+        Assert.Contains("2,400 MB", ex.Message);
+    }
+
     private static Layout DeclaredGrid(int gridW, int gridH) => new()
     {
         BitsPerCell = 8,
@@ -77,11 +173,11 @@ public class ResourceBoundTests
     }
 
     [Fact]
-    public void PermutationCache_StopsGrowingButKeepsReturningCorrectPermutations()
+    public void PermutationCache_IsByteBoundedAndKeepsReturningCorrectPermutations()
     {
         // The cache is keyed on a length derived from declared geometry and never evicted, and the
-        // instance outlives any one decode. Past the cap it must degrade to uncached — still
-        // correct, just recomputed — rather than grow without bound.
+        // instance outlives any one decode. It must retain one useful permutation rather than 64
+        // arrays whose total size can exceed a gigabyte.
         var interleaver = new Interleaver2();
 
         for (int i = 0; i < 200; i++)
@@ -104,6 +200,7 @@ public class ResourceBoundTests
         // Determinism is the wire-format contract — both sides derive π from the length alone, so
         // a cached and an uncached result must be identical.
         Assert.Equal(interleaver.Permutation(1000), new Interleaver2().Permutation(1000));
+        Assert.InRange(interleaver.CachedBytes, 0, 32 * 1024 * 1024);
     }
 
     [Fact]

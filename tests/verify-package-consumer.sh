@@ -17,16 +17,18 @@
 # so it does not reach projects that merely consume QrShard.
 #
 # Usage: tests/verify-package-consumer.sh
+# Or verify already-packed release bytes by setting QRSHARD_PREBUILT_FEED and
+# QRSHARD_PACKAGE_VERSION. This prevents a fresh, untested rebuild from being published later.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
-FEED="$WORK/feed"
+FEED="${QRSHARD_PREBUILT_FEED:-$WORK/feed}"
 
 # The published 1.3.7 exists on nuget.org, so packing at the real version would let a restore
 # silently satisfy itself from there and green-light a broken local build. A sentinel version
 # that exists in no other feed makes the resolution unambiguous.
-LOCAL_VERSION="99.99.99-consumertest"
+LOCAL_VERSION="${QRSHARD_PACKAGE_VERSION:-99.99.99-consumertest}"
 
 PASS=0
 FAIL=0
@@ -51,12 +53,71 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1
 # whatever a previous run happened to leave in the developer's global cache.
 export NUGET_PACKAGES="$(winpath "$WORK/packages")"
 
-step "Pack (with whatever licence the repo build normally uses)"
-dotnet pack "$REPO/src/QrShard.Core/QrShard.Core.csproj" -c Release -o "$FEED" \
-    -p:Version="$LOCAL_VERSION" --nologo -v quiet
-dotnet pack "$REPO/src/QrShard/QrShard.csproj" -c Release -o "$FEED" \
-    -p:Version="$LOCAL_VERSION" --nologo -v quiet
+if [ -z "${QRSHARD_PREBUILT_FEED:-}" ]; then
+    step "Pack (with whatever licence the repo build normally uses)"
+    dotnet pack "$REPO/src/QrShard.Core/QrShard.Core.csproj" -c Release -o "$FEED" \
+        -p:Version="$LOCAL_VERSION" --artifacts-path "$WORK/build-artifacts" --nologo -v quiet
+    dotnet pack "$REPO/src/QrShard/QrShard.csproj" -c Release -o "$FEED" \
+        -p:Version="$LOCAL_VERSION" --artifacts-path "$WORK/build-artifacts" --nologo -v quiet
+else
+    step "Use the prebuilt release packages (no rebuild)"
+fi
 ls "$FEED"/*.nupkg | sed 's|.*/|  packed: |'
+
+step "0. Package redistribution notices and flattened dependency inventory"
+TOOL_PACKAGE="$(ls "$FEED"/QrShard.Tool.*.nupkg)"
+CORE_PACKAGE="$(ls "$FEED"/QrShard.Core.*.nupkg)"
+tool_entries="$(unzip -Z1 "$TOOL_PACKAGE")"
+
+notice_ok=true
+for entry in \
+    tools/net10.0/any/LICENSE \
+    tools/net10.0/any/THIRD-PARTY-NOTICES.md \
+    tools/net10.0/any/IMAGESHARP-APACHE-2.0.txt \
+    tools/net10.0/any/DOTNET-LICENSE.txt \
+    tools/net10.0/any/DOTNET-THIRD-PARTY-NOTICES.txt; do
+    if ! grep -Fxq "$entry" <<<"$tool_entries"; then
+        bad "tool package is missing $entry"
+        notice_ok=false
+    fi
+done
+
+if $notice_ok &&
+   unzip -p "$TOOL_PACKAGE" tools/net10.0/any/LICENSE | cmp -s - "$REPO/LICENSE" &&
+   unzip -p "$TOOL_PACKAGE" tools/net10.0/any/THIRD-PARTY-NOTICES.md | cmp -s - "$REPO/THIRD-PARTY-NOTICES.md" &&
+   unzip -p "$TOOL_PACKAGE" tools/net10.0/any/IMAGESHARP-APACHE-2.0.txt | cmp -s - "$REPO/licenses/Apache-2.0.txt" &&
+   unzip -p "$TOOL_PACKAGE" tools/net10.0/any/DOTNET-LICENSE.txt | cmp -s - "$REPO/licenses/DotNet-MIT.txt"; then
+    ok "tool package carries the tracked project, ImageSharp, and .NET license files byte-for-byte"
+else
+    bad "tool package redistribution notices differ from the tracked canonical files"
+fi
+
+dotnet_notice_hash="$(unzip -p "$TOOL_PACKAGE" tools/net10.0/any/DOTNET-THIRD-PARTY-NOTICES.txt | sha256sum | awk '{print toupper($1)}')"
+if [ "$dotnet_notice_hash" = "6D15E10A101C6BFFF2AB4429ED061BF76C456FC4B23AD6B03E0D0F8377148A21" ]; then
+    ok "tool package carries the exact shared .NET 10.0.10 third-party notice"
+else
+    bad "tool package .NET notice is absent or not the reviewed 10.0.10 bytes"
+fi
+
+actual_dlls="$(grep -E '^tools/net10\.0/any/[^/]+\.dll$' <<<"$tool_entries" |
+    sed 's|.*/||' | grep -vE '^QrShard(\.Core)?\.dll$' | sort || true)"
+expected_dlls="$(printf '%s\n' \
+    Microsoft.Extensions.DependencyInjection.Abstractions.dll \
+    Microsoft.Extensions.DependencyInjection.dll \
+    SixLabors.ImageSharp.dll \
+    System.IO.Hashing.dll | sort)"
+if [ "$actual_dlls" = "$expected_dlls" ]; then
+    ok "flattened tool dependency DLLs match the reviewed notice allowlist"
+else
+    bad "flattened dependency inventory changed and needs a notice review: $actual_dlls"
+fi
+
+core_dlls="$(unzip -Z1 "$CORE_PACKAGE" | grep -E '\.dll$' | sed 's|.*/||' | sort || true)"
+if [ "$core_dlls" = "QrShard.Core.dll" ] && unzip -Z1 "$CORE_PACKAGE" | grep -Fxq LICENSE; then
+    ok "Core package carries its MIT license and does not flatten third-party DLLs"
+else
+    bad "Core package license/dependency layout changed"
+fi
 
 # Everything past this point is the consumer's world: no licence file, no licence key.
 unset SixLaborsLicenseKey || true
@@ -85,6 +146,12 @@ else
     # Compile only: the sample names holiday-photos.zip, which is illustrative and absent.
     if dotnet build "$APP" -c Release --nologo -v quiet > "$WORK/build.log" 2>&1; then
         ok "documented sample compiles against the packed QrShard.Core"
+        if cmp -s "$FEED/QrShard.Core.$LOCAL_VERSION.nupkg" \
+                  "$NUGET_PACKAGES/qrshard.core/$LOCAL_VERSION/qrshard.core.$LOCAL_VERSION.nupkg"; then
+            ok "consumer restored the exact tested QrShard.Core package bytes"
+        else
+            bad "consumer restored QrShard.Core from another source/build"
+        fi
         # Only meaningful when the build actually ran to completion — asserting it on a build
         # that failed for some other reason would report a pass for the wrong reason.
         if grep -qiE "sixlabors|licen[cs]e" "$WORK/build.log"; then
@@ -126,9 +193,23 @@ fi
 
 step "3. QrShard.Tool installs and self-tests"
 TOOLS="$WORK/tools"
+TOOL_CONFIG="$WORK/tool-nuget.config"
+cat > "$TOOL_CONFIG" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="exact-tested-package" value="$(winpath "$FEED")" />
+  </packageSources>
+</configuration>
+XML
 if dotnet tool install QrShard.Tool --version "$LOCAL_VERSION" \
-       --tool-path "$TOOLS" --add-source "$FEED" >/dev/null 2>&1; then
+       --tool-path "$TOOLS" --configfile "$TOOL_CONFIG" --no-cache >/dev/null 2>&1; then
     ok "dotnet tool install succeeded"
+    # The feed contains one QrShard.Tool ID/version, public sources are cleared, --no-cache is
+    # set, and NUGET_PACKAGES is isolated. A successful install therefore consumed this exact
+    # nupkg even on SDKs whose dotnet-tool path does not retain the source archive in that cache.
+    ok "tool install used the exact tested QrShard.Tool package bytes from the isolated feed"
     if "$TOOLS/qrshard" test 2>&1 | grep -q "All self-tests passed"; then
         ok "installed tool passes its own self-test"
     else

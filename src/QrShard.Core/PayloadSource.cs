@@ -11,6 +11,9 @@ internal interface IPayloadSource : IDisposable
 {
     long Length { get; }
 
+    /// <summary>Managed bytes retained for the life of this source (a memory map is zero).</summary>
+    long ResidentBytes { get; }
+
     /// <summary>Copies <c>destination.Length</c> bytes starting at <paramref name="offset"/>.</summary>
     void Read(long offset, Span<byte> destination);
 }
@@ -35,12 +38,13 @@ internal static class PayloadSource
     }
 }
 
-/// <summary>In-memory source — used for small files and for deflate-compressed payloads.</summary>
+/// <summary>In-memory source — used for small files and for Brotli-compressed payloads.</summary>
 internal sealed class BytePayloadSource(byte[] data) : IPayloadSource
 {
     public byte[] Data => data;
 
     public long Length => data.LongLength;
+    public long ResidentBytes => data.LongLength;
 
     public void Read(long offset, Span<byte> destination) =>
         data.AsSpan((int)offset, destination.Length).CopyTo(destination);
@@ -74,6 +78,7 @@ internal sealed unsafe class MappedPayloadSource : IPayloadSource
     }
 
     public long Length { get; }
+    public long ResidentBytes => 0;
 
     public void Read(long offset, Span<byte> destination)
     {

@@ -109,8 +109,8 @@ internal sealed class ShardRenderer(Fec fec, BitStream bitStream, FastPng fastPn
         }
         else
         {
-            // Without ECC the stream itself is the cell buffer; the caller allocated it exactly
-            // sized in this mode, because the renderer treats bytes past the end as zero cells.
+            // Without ECC the stream itself is the cell buffer; the caller clears its reusable
+            // tail so bytes after the logical header+payload remain deterministic zero cells.
             cellBuffer = stream;
         }
         Render(layout, palette, metaModules, cellBuffer, outPath, scratch.Pixels, writer);

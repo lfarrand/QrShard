@@ -121,7 +121,8 @@ public class AuditFixTests
 
     private sealed class ThrowingFrameSource : IFrameSource
     {
-        public IEnumerable<Bitmap> Frames(string path, double fps)
+        public IEnumerable<Bitmap> Frames(string path, double fps,
+            CancellationToken cancellationToken = default)
         {
             if (fps > 0)
                 throw new ShardDecodeException("producer boom");
@@ -156,8 +157,9 @@ public class AuditFixTests
 
         string page = new SlideshowWriter().Write(tmp.File("shards"), result.Files, 400);
         string html = File.ReadAllText(page);
-        Assert.Contains("data:image/png;base64,", html);          // qoi frames transcoded to renderable PNG
-        Assert.DoesNotContain("application/octet-stream", html);  // never embed an undecodable MIME
+        Assert.Contains("-frame-000001.png", html);
+        Assert.Single(Directory.GetFiles(tmp.File("shards"), ".slideshow-*-frame-000001.png"));
+        Assert.DoesNotContain(";base64,", html);
     }
 
     // ---- Finding: public decode API leaks raw file-IO exceptions ----

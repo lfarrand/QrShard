@@ -88,14 +88,25 @@ public class WatchAndReceiveTests
     [Fact]
     public void LiveInputArgs_UsePlatformFramework_AndWrapDshowNames()
     {
-        Assert.Equal("-f dshow -i \"video=Integrated Camera\"",
+        Assert.Equal(["-f", "dshow", "-i", "video=Integrated Camera"],
             LiveFrameSource.BuildInputArgs("dshow", "Integrated Camera"));
-        Assert.Equal("-f dshow -i \"video=USB Cam\"",
+        Assert.Equal(["-f", "dshow", "-i", "video=USB Cam"],
             LiveFrameSource.BuildInputArgs(null, "USB Cam") is var s && OperatingSystem.IsWindows()
                 ? s
-                : "-f dshow -i \"video=USB Cam\""); // platform default only checkable on Windows
-        Assert.Equal("-f v4l2 -i \"/dev/video0\"", LiveFrameSource.BuildInputArgs("v4l2", "/dev/video0"));
-        Assert.Equal("-f avfoundation -i \"0:none\"", LiveFrameSource.BuildInputArgs("avfoundation", "0:none"));
+                : ["-f", "dshow", "-i", "video=USB Cam"]); // platform default only checkable on Windows
+        Assert.Equal(["-f", "v4l2", "-i", "/dev/video0"], LiveFrameSource.BuildInputArgs("v4l2", "/dev/video0"));
+        Assert.Equal(["-f", "avfoundation", "-i", "0:none"], LiveFrameSource.BuildInputArgs("avfoundation", "0:none"));
+    }
+
+    [Fact]
+    public void FfmpegPathWithQuotes_RemainsOneArgumentInsteadOfInjectingOptions()
+    {
+        const string hostile = "/tmp/a\" -f lavfi -i testsrc .mp4";
+        var psi = RecordingFrameSource.BuildFfmpegStartInfo(["-i", hostile], "fps=8");
+
+        Assert.Contains(hostile, psi.ArgumentList);
+        Assert.Equal(1, psi.ArgumentList.Count(arg => arg == "-i"));
+        Assert.DoesNotContain("lavfi", psi.ArgumentList);
     }
 
     [Fact]

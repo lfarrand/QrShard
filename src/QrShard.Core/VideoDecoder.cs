@@ -1,4 +1,5 @@
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
 
 namespace QrShard;
 
@@ -17,7 +18,7 @@ internal sealed record VideoDecodeStats(int FramesExamined, int FramesDecoded, i
 /// </summary>
 internal sealed class VideoDecoder(
     IShardDecoder decoder, IFrameSource frameSource, IShardAssembler assembler,
-    IParityReassembler parityReassembler, ICameraRectifier cameraRectifier) : IVideoDecoder
+    IParityReassembler parityReassembler, ICameraRectifier cameraRectifier, AppSettings settings) : IVideoDecoder
 {
     private static readonly string[] VideoExtensions = [".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"];
 
@@ -38,7 +39,13 @@ internal sealed class VideoDecoder(
 
     /// <summary>Default wiring for tests and non-DI callers.</summary>
     public VideoDecoder() : this(new ShardDecoder(), new RecordingFrameSource(),
-        new ShardAssembler(), new ParityReassembler(), new CameraRectifier())
+        new ShardAssembler(), new ParityReassembler(), new CameraRectifier(), AppSettings.Current)
+    {
+    }
+
+    public VideoDecoder(IShardDecoder decoder, IFrameSource frameSource, IShardAssembler assembler,
+        IParityReassembler parityReassembler, ICameraRectifier cameraRectifier)
+        : this(decoder, frameSource, assembler, parityReassembler, cameraRectifier, AppSettings.Current)
     {
     }
 
@@ -50,8 +57,10 @@ internal sealed class VideoDecoder(
     {
         try
         {
-            var info = Image.Identify(path);
-            return info.FrameMetadataCollection.Count > 1;
+            // Dispatch needs to distinguish one frame from more than one, not inventory an
+            // attacker-controlled animation with millions of frame records.
+            var info = Image.Identify(new DecoderOptions { MaxFrames = 2, SkipMetadata = true }, path);
+            return info.FrameCount > 1;
         }
         // The fourth Image.Identify/Image.Load site, and the one the previous two rounds walked
         // past. Cli dispatch calls this on the raw path BEFORE any decoder runs, so it sits
@@ -85,10 +94,10 @@ internal sealed class VideoDecoder(
             if (pass > 0)
                 log($"  set still incomplete — re-extracting at {passFps} fps");
             int shardsBefore = shards.Count;
-            var frames = frameSource.Frames(path, passFps);
             bool complete = decodeWorkers > 1
-                ? CollectShardsParallel(frames, shards, seen, log, decodeWorkers, out var passStats)
-                : CollectShards(frames, shards, seen, log, out passStats);
+                ? CollectShardsParallel(token => frameSource.Frames(path, passFps, token),
+                    shards, seen, log, decodeWorkers, out var passStats)
+                : CollectShards(frameSource.Frames(path, passFps), shards, seen, log, out passStats);
             totalExamined += passStats.FramesExamined;
             totalDecoded += passStats.FramesDecoded;
             stoppedEarly = passStats.StoppedEarly;
@@ -123,6 +132,7 @@ internal sealed class VideoDecoder(
         var signature = new byte[SignatureLength];
         var previousSignature = new byte[SignatureLength];
         bool hasPrevious = false;
+        int previousWidth = 0, previousHeight = 0;
         int examined = 0, decoded = 0;
         bool stoppedEarly = false;
         var mode = CaptureMode.Unknown;
@@ -137,13 +147,17 @@ internal sealed class VideoDecoder(
         int[]? sum = null;
         int avgW = 0, avgH = 0, avgCount = 0;
         bool groupYielded = false;
+        bool averageBudgetWarningLogged = false;
 
         foreach (var frame in frames)
         {
             examined++;
             FrameSignature(frame, signature);
-            bool duplicate = hasPrevious && MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
+            bool duplicate = hasPrevious && frame.Width == previousWidth && frame.Height == previousHeight &&
+                             MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
             (previousSignature, signature) = (signature, previousSignature);
+            previousWidth = frame.Width;
+            previousHeight = frame.Height;
             hasPrevious = true;
 
             if (duplicate)
@@ -180,18 +194,50 @@ internal sealed class VideoDecoder(
             }
             if (!groupYielded)
             {
-                if (sum is null || avgW != frame.Width || avgH != frame.Height)
+                if (!CanTemporalAverage(frame, settings.DecodeMemoryBudgetMB))
                 {
-                    avgW = frame.Width;
-                    avgH = frame.Height;
-                    sum = new int[avgW * avgH * 3];
+                    sum = null;
+                    avgCount = 0;
+                    if (!averageBudgetWarningLogged)
+                    {
+                        log($"  temporal averaging disabled for {frame.Width:N0}x{frame.Height:N0} frames: " +
+                            $"its accumulator would exceed DecodeMemoryBudgetMB={settings.DecodeMemoryBudgetMB:N0}.");
+                        averageBudgetWarningLogged = true;
+                    }
                 }
                 else
                 {
-                    Array.Clear(sum);
+                    int required = checked(frame.Width * frame.Height * 3);
+                    long retainedBytes = sum is not null && sum.Length < required
+                        ? checked(sum.LongLength * sizeof(int))
+                        : 0;
+                    if (retainedBytes > 0 &&
+                        !CanTemporalAverage(frame, settings.DecodeMemoryBudgetMB, retainedBytes))
+                    {
+                        // A changing-resolution stream can otherwise hold the old LOH accumulator
+                        // while allocating a larger one. Skip this group; the now-unreferenced old
+                        // buffer can be collected before a later group starts at the new size.
+                        sum = null;
+                        avgCount = 0;
+                        if (!averageBudgetWarningLogged)
+                        {
+                            log("  temporal averaging skipped during a frame-size change: " +
+                                $"overlapping accumulators would exceed DecodeMemoryBudgetMB={settings.DecodeMemoryBudgetMB:N0}.");
+                            averageBudgetWarningLogged = true;
+                        }
+                    }
+                    else
+                    {
+                        if (sum is null || sum.Length < required)
+                            sum = new int[required];
+                        else
+                            Array.Clear(sum, 0, required);
+                        avgW = frame.Width;
+                        avgH = frame.Height;
+                        Accumulate(sum, frame);
+                        avgCount = 1;
+                    }
                 }
-                Accumulate(sum, frame);
-                avgCount = 1;
             }
         }
 
@@ -228,9 +274,13 @@ internal sealed class VideoDecoder(
             log($"  ok      {label}  ({which}, {shard.Payload.Length:N0} bytes) — {shards.Count} collected");
             return parityReassembler.IsSetComplete(shards);
         }
-        catch (ShardDecodeException)
+        catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
         {
-            return false; // torn/blended/junk frame — the loop brings the shard around again
+            // Every frame is untrusted input. A malformed/torn frame must not abort a whole
+            // recording merely because it reached an unexpected decoder exception; the folder
+            // decoder uses the same isolation policy. Resource exhaustion and cancellation remain
+            // process/run-level conditions and deliberately escape.
+            return false;
         }
     }
 
@@ -253,7 +303,10 @@ internal sealed class VideoDecoder(
 
     internal static Bitmap BuildAverage(int[] sum, int w, int h, int count)
     {
-        var px = new SixLabors.ImageSharp.PixelFormats.Rgb24[w * h];
+        int pixels = checked(w * h);
+        if (count < 1 || sum.Length < checked(pixels * 3))
+            throw new ArgumentException("Temporal-average buffer does not match the frame geometry.");
+        var px = new SixLabors.ImageSharp.PixelFormats.Rgb24[pixels];
         for (int i = 0; i < px.Length; i++)
         {
             int j = i * 3;
@@ -261,6 +314,28 @@ internal sealed class VideoDecoder(
                 (byte)(sum[j] / count), (byte)(sum[j + 1] / count), (byte)(sum[j + 2] / count));
         }
         return new Bitmap(px, w, h);
+    }
+
+    /// <summary>Whether one frame, the decode scratch, the RGB accumulators and the averaged
+    /// output fit the configured planning budget. If not, single-frame decoding still proceeds.</summary>
+    internal static bool CanTemporalAverage(Bitmap frame, int budgetMB)
+        => CanTemporalAverage(frame, budgetMB, retainedBytes: 0);
+
+    private static bool CanTemporalAverage(Bitmap frame, int budgetMB, long retainedBytes)
+    {
+        try
+        {
+            const int AccumulatorBytesPerPixel = 12; // three int channels
+            const int AverageOutputBytesPerPixel = 3;
+            long planned = checked((long)frame.Width * frame.Height *
+                (ShardDecoder.ScratchBytesPerPixel + AccumulatorBytesPerPixel + AverageOutputBytesPerPixel) +
+                retainedBytes);
+            return planned <= checked(budgetMB * 1_000_000L);
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -271,12 +346,52 @@ internal sealed class VideoDecoder(
     /// disposal kills ffmpeg. (File recordings keep the sequential path: its early-stop
     /// guarantees are exact, which the tests — and the "no wasted demux" promise — rely on.)
     /// </summary>
-    private bool CollectShardsParallel(IEnumerable<Bitmap> frames, List<DecodedShard> shards,
+    private bool CollectShardsParallel(Func<CancellationToken, IEnumerable<Bitmap>> frameFactory,
+        List<DecodedShard> shards,
         HashSet<(ulong FileId, int Index, bool Parity)> seen, Action<string> log, int workers,
         out VideoDecodeStats stats)
     {
-        using var queue = new System.Collections.Concurrent.BlockingCollection<(Bitmap Frame, int Index)>(workers * 2);
         using var cts = new CancellationTokenSource();
+        IEnumerable<Bitmap> frames = frameFactory(cts.Token);
+        using IEnumerator<Bitmap> enumerator = frames.GetEnumerator();
+        if (!enumerator.MoveNext())
+        {
+            stats = new VideoDecodeStats(0, 0, shards.Count, false);
+            return parityReassembler.IsSetComplete(shards);
+        }
+
+        Bitmap firstFrame = enumerator.Current;
+        ShardDecoder.ValidateImageDimensions(firstFrame.Width, firstFrame.Height, settings.DecodeMemoryBudgetMB);
+        long plannedPixels = checked((long)firstFrame.Width * firstFrame.Height);
+        long perWorker = checked(plannedPixels * ShardDecoder.ScratchBytesPerPixel);
+        int affordable = BudgetedLiveWorkers(firstFrame, workers, settings.DecodeMemoryBudgetMB);
+        if (affordable < workers)
+            log($"  using {affordable} live decode worker(s) instead of {workers}: " +
+                $"{firstFrame.Width:N0}x{firstFrame.Height:N0} frames plan ~{perWorker / 1_000_000:N0} MB each " +
+                $"against DecodeMemoryBudgetMB={settings.DecodeMemoryBudgetMB:N0}.");
+        workers = affordable;
+
+        IEnumerable<Bitmap> StableFrames()
+        {
+            yield return firstFrame;
+            while (enumerator.MoveNext())
+            {
+                Bitmap frame = enumerator.Current;
+                long pixels = checked((long)frame.Width * frame.Height);
+                if (pixels > plannedPixels)
+                    throw new ShardDecodeException(
+                        $"Live frame dimensions increased from {firstFrame.Width:N0}x{firstFrame.Height:N0} to " +
+                        $"{frame.Width:N0}x{frame.Height:N0} after worker memory planning; restart the receiver.");
+                yield return frame;
+            }
+        }
+
+        if (workers == 1)
+            return CollectShards(StableFrames(), shards, seen, log, out stats);
+
+        // One pending frame is enough to overlap capture with decode and prevents a 64-worker
+        // configuration from retaining another 128 full RGB frames outside the worker estimate.
+        using var queue = new System.Collections.Concurrent.BlockingCollection<(Bitmap Frame, int Index)>(1);
         int examined = 0, decodedCount = 0;
         bool stoppedEarly = false;
         object gate = new();
@@ -286,16 +401,20 @@ internal sealed class VideoDecoder(
             var signature = new byte[SignatureLength];
             var previousSignature = new byte[SignatureLength];
             bool hasPrevious = false;
+            int previousWidth = 0, previousHeight = 0;
             try
             {
-                foreach (var frame in frames)
+                foreach (var frame in StableFrames())
                 {
                     if (cts.IsCancellationRequested)
                         break;
                     int index = ++examined; // producer-only until the final barrier
                     FrameSignature(frame, signature);
-                    bool duplicate = hasPrevious && MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
+                    bool duplicate = hasPrevious && frame.Width == previousWidth && frame.Height == previousHeight &&
+                                     MeanAbsDiff(signature, previousSignature) < DuplicateThreshold;
                     (previousSignature, signature) = (signature, previousSignature);
+                    previousWidth = frame.Width;
+                    previousHeight = frame.Height;
                     hasPrevious = true;
                     if (duplicate)
                         continue;
@@ -309,6 +428,11 @@ internal sealed class VideoDecoder(
                         break;
                     }
                 }
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                // A cancellation-aware source may surface cancellation from MoveNext after the
+                // completing frame. That is the successful early-stop path, not a producer fault.
             }
             finally
             {
@@ -344,9 +468,9 @@ internal sealed class VideoDecoder(
                         }
                     }
                 }
-                catch (ShardDecodeException)
+                catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
                 {
-                    // torn or non-shard frame — the stream will bring the shard around again
+                    // torn, malformed or non-shard frame — the stream brings it around again
                 }
             }
         })).ToArray();
@@ -355,6 +479,15 @@ internal sealed class VideoDecoder(
         producer.GetAwaiter().GetResult(); // unwrap: surface the producer's ShardDecodeException, not an AggregateException
         stats = new VideoDecodeStats(examined, decodedCount, shards.Count, stoppedEarly);
         return stoppedEarly || parityReassembler.IsSetComplete(shards);
+    }
+
+    internal static int BudgetedLiveWorkers(Bitmap frame, int requestedWorkers, int budgetMB)
+    {
+        if (requestedWorkers < 1)
+            throw new ArgumentOutOfRangeException(nameof(requestedWorkers));
+        ShardDecoder.ValidateImageDimensions(frame.Width, frame.Height, budgetMB);
+        long perWorker = checked((long)frame.Width * frame.Height * ShardDecoder.ScratchBytesPerPixel);
+        return (int)Math.Clamp(checked(budgetMB * 1_000_000L) / perWorker, 1, requestedWorkers);
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
 using System.Management;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using Microsoft.Win32;
 
 namespace QrShard.Benchmarks;
@@ -47,6 +48,7 @@ internal static class MachineSpec
         }
     }
 
+    [SupportedOSPlatform("windows")]
     private static IEnumerable<ManagementBaseObject> Query(string wql)
     {
         using var searcher = new ManagementObjectSearcher(wql);
@@ -55,6 +57,7 @@ internal static class MachineSpec
             yield return item;
     }
 
+    [SupportedOSPlatform("windows")]
     private static string? Str(ManagementBaseObject o, string property)
     {
         string? value = o.Properties[property]?.Value?.ToString();
@@ -64,6 +67,7 @@ internal static class MachineSpec
         return string.Concat(value.Where(c => !char.IsControl(c))).Trim();
     }
 
+    [SupportedOSPlatform("windows")]
     private static string? Cpu()
     {
         foreach (var cpu in Query("SELECT Name, MaxClockSpeed, Description, Revision FROM Win32_Processor"))
@@ -87,6 +91,7 @@ internal static class MachineSpec
         return null;
     }
 
+    [SupportedOSPlatform("windows")]
     private static string? Cores()
     {
         int physical = 0, logical = 0;
@@ -98,6 +103,7 @@ internal static class MachineSpec
         return physical > 0 ? $"{physical} physical / {logical} logical" : null;
     }
 
+    [SupportedOSPlatform("windows")]
     private static string? Motherboard()
     {
         string? board = null;
@@ -112,6 +118,7 @@ internal static class MachineSpec
         return board;
     }
 
+    [SupportedOSPlatform("windows")]
     private static string? Ram()
     {
         // Group identical sticks: "4x Corsair CMK... DDR5-6000 (128 GB total)".
@@ -177,6 +184,7 @@ internal static class MachineSpec
     /// generated and shards encoded/decoded) and the artifacts volume (where results land),
     /// resolved to their physical disks via the logical-disk/partition/drive associations.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private static string? Storage()
     {
         var roles = new Dictionary<string, List<string>>(); // "model|letter" -> roles
@@ -204,6 +212,7 @@ internal static class MachineSpec
             : null;
     }
 
+    [SupportedOSPlatform("windows")]
     private static string? PhysicalDiskFor(string driveLetter)
     {
         foreach (var partition in Query(
@@ -225,6 +234,7 @@ internal static class MachineSpec
         return null;
     }
 
+    [SupportedOSPlatform("windows")]
     private static string? WindowsVersion()
     {
         string caption = "";

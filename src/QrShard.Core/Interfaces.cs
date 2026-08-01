@@ -76,7 +76,7 @@ internal interface IVideoDecoder
 /// <summary>Yields the frames of a recording (video file or animated image) in display order.</summary>
 internal interface IFrameSource
 {
-    IEnumerable<Bitmap> Frames(string path, double fps);
+    IEnumerable<Bitmap> Frames(string path, double fps, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Rectifies a camera photo of a camera-profile shard into an axis-aligned bitmap.</summary>

@@ -25,8 +25,10 @@ What the project treats as a vulnerability:
 - an encrypted payload being recoverable without the password, or a tampered one decrypting
   without an error
 
-What it does **not**: the tool writes with the permissions of whoever runs it, so a decode can
-overwrite files that user could already overwrite. Point `-o` somewhere sensible.
+What it does **not**: the tool writes with the permissions of whoever runs it, so an explicit
+single-file `-o` can replace a file that user could already replace. Point `-o` somewhere
+sensible. Archive output is stricter: its destination must be absent or empty and is never merged
+into an existing tree.
 
 ## What the format guarantees
 
@@ -35,22 +37,126 @@ bit-exactness is verified rather than assumed. Beneath that sit a CRC-32 per pay
 CRC-32-protected headers.
 
 Header integrity is a **checksum, not a MAC**: CRC-32 detects accidental corruption, and an
-attacker who rewrites a header can recompute it. For encrypted payloads this is closed by binding
-the cleartext identity fields (original size, SHA-256, file name) as AES-GCM associated data, so a
-tampered header fails decryption up front. For unencrypted payloads it is not closed, and cannot
-be — an unauthenticated format has no secret to authenticate with. **Treat an unencrypted shard
-set as attacker-modifiable in transit**; if that matters, use `-p`.
+attacker who rewrites a header can recompute it. For encrypted payloads, AES-GCM associated data
+binds exactly the original size, SHA-256, and file name, so changing one of those identity fields
+fails authentication. Other header fields — including archive, compression, and recovery flags —
+remain CRC-only even when the payload is encrypted. Rewriting them normally causes transform,
+family-consistency, or final-SHA failure, but changing the Archive flag on plaintext that is itself
+a valid tar can change whether verified bytes are returned as one file or safely extracted as a
+tree. The extraction boundaries below still apply. Encryption therefore protects payload
+confidentiality and the three listed identity fields; it is not a MAC over the whole header.
+**Treat every shard set as attacker-modifiable in transit at the unbound-header level**; for an
+unencrypted set, no header field has cryptographic authentication.
 
 Encryption is AES-256-GCM with a PBKDF2-SHA256 key at 600 000 iterations, a per-file random salt
 and nonce.
 
+### Password handling
+
+`-p/--password` is a command-line argument. Depending on the operating system and shell, its value
+can be retained in shell history or visible to other local users through process inspection. The
+CLI currently has no prompt, environment-variable, or password-file input, so do not put a
+high-value reusable secret on the command line. Wrong-password or authentication failure does not
+publish plaintext, but encryption does not hide the shard geometry, file name, original length,
+image count, or other cleartext header metadata.
+
+The password is converted to UTF-8 exactly as supplied before PBKDF2; QrShard does not apply
+Unicode normalization. Visually identical composed and decomposed strings are therefore different
+passwords.
+
+Session files contain the captured shard payloads themselves. For an unencrypted transfer that is
+plaintext, not merely metadata. Saves use same-directory atomic replacement and private permissions
+(requested Unix 0600, or stricter after the process umask, or a protected owner-only Windows DACL),
+but the session path and its backups still need the same protection as the source file.
+
+### Verified output and archive boundaries
+
+The current decoder does not stream unverified bytes into the final pathname. A single-file
+restore is written to an unpredictable same-directory staging file, checked for exact length and
+SHA-256, then atomically moved into place. Verification, decompression, and pre-publication I/O
+failures leave the previous destination intact, and the staging file is removed best-effort. Once
+the move commits, the old filesystem object is gone; a later Windows attribute-restoration failure
+can therefore report an error with the verified replacement already present.
+
+"Atomic" here describes what concurrent filesystem users see; it is not a power-loss durability
+guarantee. QrShard does not fsync every restored file and parent directory. Keep the source shards
+or another backup until the receiving storage has been persisted and independently checked when
+crash recovery matters.
+
+Atomic replacement creates a new filesystem object. If explicit `-o` replaces an existing file,
+QrShard copies its Unix rwx mode bits, or its Windows DACL and basic file attributes. It does not
+preserve ownership, timestamps, ACL details outside that Windows DACL, extended attributes,
+alternate data streams, sparse-file state, or hard-link identity. Choose a fresh destination path
+when preserving those properties matters. A new single-file output retains the staging object's
+private security (requested Unix 0600, or stricter after umask, or a protected owner-only Windows
+DACL); a new archive root likewise requests Unix 0700 or uses an owner-only DACL.
+
+The output parent is itself a trust boundary. Use a directory that untrusted local users cannot
+rename or delete entries in; private staging permissions do not make path-based publication safe
+against a principal that already has those rights on the parent directory.
+
+For an archive, the decrypted/decompressed tar is first length- and SHA-256-verified in a private
+temporary directory. Entries are then validated and extracted into a private sibling directory;
+the complete tree is published only after every entry succeeds. A destination that is a file or a
+non-empty directory is refused. Entry paths must be safe relative paths and must not collide by
+case or Unicode normalization. Only regular files and directories are accepted: symbolic links,
+hard-link entries, devices, and other special tar types are rejected. The bundled encoder skips
+reparse-point links inside selected folders (and rejects one selected as a top-level input), while
+hard-linked paths are copied as independent regular files.
+
+If the explicit archive destination is an existing empty directory, the published root carries
+forward its full Unix directory mode, including setgid/sticky policy bits, or its Windows DACL and
+basic attributes. Ownership, timestamps, extended attributes, and other metadata are not carried.
+This destination-root policy is separate from archive entry metadata. Archive publication is
+complete and non-merging; unlike the single-file move, replacing that empty directory is not
+promised as one atomic filesystem operation.
+
+Archive transfer is not a backup format. It carries Unix regular-file owner/group/other rwx bits,
+including executability; extraction applies them subject to the receiver's umask, while .NET strips
+setuid, setgid, and sticky special bits. Ownership, ACLs, extended attributes, alternate data
+streams, sparse-file state, directory modes/metadata, and hard-link identity are outside the
+portable contract.
+
+### Resource limits
+
+Single-file and prepared-archive payloads are capped at 1.5 GB. Ordinary image loads have a
+500-million-pixel ceiling and a separate pre-load admission charge of roughly 6 bytes/pixel against
+`DecodeMemoryBudgetMB`. Batch worker planning uses the largest identifiable input at roughly
+40 bytes/pixel; with the 4000 MB default this is about 332 MB/worker and 12 workers for 4K, or
+1.92 GB/worker and 2 workers for 48 MP. This throttles concurrency but is not a hard process-memory
+ceiling. APNG slideshow creation and native animated-image recording decode are capped at 256 MiB
+of decoded RGB frames; animated recording input is additionally capped at 4096 frames. Archive
+encode/decode is capped at 100,000 entries and 128 path segments per entry; decode also caps its
+collision-checking trie at 200,000 distinct path nodes.
+
+### Release artifacts
+
+Beginning with v1.6.2, tagged releases publish `SHA256SUMS` only after the exact Native-AOT binaries
+and NuGet packages have been tested with .NET SDK 10.0.302 on versioned GitHub-hosted runner labels.
+An active no-bypass tag ruleset blocks update/deletion of `v*`, and the workflow independently
+peels the remote tag and compares it with the event commit before attestation, draft creation, and
+publication. GitHub
+stores signed SLSA build-provenance for every release file, including `SHA256SUMS`, and signed
+SPDX 2.2 SBOM attestations generated separately for each binary archive and package. Native-AOT
+archives use their RID-specific restore graph, including the corresponding runtime/compiler packs;
+tool/core packages use their ordinary framework-dependent graphs. Verify them using the constrained
+commands in README. Releases produced by this workflow are immutable, so GitHub locks their assets
+and tag and creates an additional release attestation. Older releases predate these controls.
+
+These attestations authenticate artifact digests and workflow provenance, not platform publisher
+identity. The Windows executable is not Authenticode-signed. The workflow does not inspect the
+macOS signature; Native AOT is expected to produce only an ad-hoc signature, not a Developer ID
+signature or notarization. `SHA256SUMS` is plaintext and must not be trusted without its attestation.
+The release executable is `QrShard.exe` on Windows and case-sensitive `QrShard` on Unix.
+The `linux-x64` and `linux-arm64` Native-AOT assets require glibc 2.35 and 2.39 respectively.
+
 ## Known advisories
 
-### Availability: a single crafted image could abort a decode (fixed in 1.6.1)
+### Availability and diagnostic-output failures (fixed through 1.6.1)
 
-Not an integrity failure — nothing decodes wrongly — but a denial of the tool's whole purpose:
-one malformed file among a folder of good captures could end the run, and the good captures were
-never written.
+These did not produce wrongly verified bytes, but they could terminate a batch on one malformed
+image, suppress restoration of complete siblings, size diagnostic buffers from hostile metadata,
+or make terminal output misleading. The table separates their affected ranges and fix versions.
 
 | Defect | Affects | Fixed in |
 |---|---|---|
@@ -62,14 +168,12 @@ never written.
 | An incomplete file discarding every complete file grouped after it | v1.0.0 – v1.6.0 | **1.6.1** |
 | Diagnostics and heatmap buffers sized from an unvalidated metadata strip | v1.3.4 – v1.6.0 | **1.6.1** |
 
-**These are all one defect wearing six hats**, and the shape is worth naming because this codebase
-keeps producing it: *a guard written for the case its author pictured, with the immediately
-neighbouring case going the other way.* The 1.6.0 fix broadened one `Image.Identify` filter and
-argued in its own comment that enumerating exception types is the wrong policy — then left three
-more call sites enumerating. Each subsequent round found the previous round's blind spot.
-
-The mitigation that has actually held is the blanket per-image `catch` in `CollectShards`: a
-policy rather than a list. Every site above now follows it.
+The four `Image.Identify` rows share one root cause across six call sites: exception allowlists
+were used where the actual policy was that one malformed image must not abort a batch. The 1.6.0
+fix broadened one filter but left neighbouring call sites enumerating exception types. The
+terminal-output, group-ordering, and diagnostic-buffer rows are separate defects. The durable
+image-load mitigation is the blanket per-image `catch` in `CollectShards`: a policy rather than a
+growing list of decoder exceptions.
 
 ### Integrity: a crafted shard could make a decode report success wrongly (fixed in 1.5.0)
 
@@ -105,9 +209,10 @@ size gigabytes of buffers or stall a decode, and stops one malformed image abort
 decode and discarding every other image's successful result. Those are availability rather than
 integrity, and are not itemised here.
 
-None of these is remotely exploitable: every one requires a shard image the user chooses to
-decode. **Take the current release (1.6.1)** if you decode images from anywhere you do not
-control, and pass `-o` explicitly regardless.
+In the interactive CLI, reaching these historical defects required the operator to decode an
+attacker-controlled shard image. An embedding service that automatically accepts uploaded images
+should instead treat that input as remotely supplied. **Take the latest stable release** if you
+decode images from anywhere you do not control, and pass `-o` explicitly regardless.
 
 ### Path traversal via the shard header's file name (fixed in 1.3.10)
 
@@ -129,7 +234,7 @@ from the header via `Path.GetFileNameWithoutExtension`, which is not a sanitizer
 anchored to that already-escaped root.
 
 **1.3.10 is the first release in which both are fixed**, and it is the floor rather than the
-recommendation — fixes go to the latest release only, so take the current one (1.6.1):
+recommendation — fixes go to the latest release only, so take the latest stable release:
 
 ```
 dotnet tool update -g QrShard.Tool

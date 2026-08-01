@@ -16,7 +16,7 @@ internal sealed record EncodeOptions
     public string? Password { get; init; } // AES-256-GCM encrypt the payload (null = plaintext)
     public bool IsArchive { get; init; } // payload is a tar of a folder; decode extracts it
     public int FountainPercent { get; init; } // fountain-coded frames (% of data, video mode); 0 = off
-    public bool Interleave2 { get; init; } // v2 permuted interleave (metadata version 3; needs ECC)
+    public bool Interleave2 { get; init; } // v2 permutation (metadata v3, or v4 flag; needs ECC)
 }
 
 internal sealed record EncodeResult(
@@ -121,6 +121,25 @@ internal sealed class ShardEncoder(
         var (layout, headerSize, capacity, count, stripeData, stripeParity, stripes, parityTotal) =
             ComputeGeometry(opt, fileName, dataLength, fountain);
 
+        // Bound fixed resident payload/FEC storage before allocating parity. Compression and
+        // password encryption can turn the source into one retained managed array, while parity
+        // retains one capacity-sized chunk per recovery image. The old worker-only calculation
+        // ignored both and could exceed the configured budget before rendering even started.
+        long maxStreamBytes = checked(headerSize + (long)capacity);
+        long renderWorkerBytes = EstimateRenderWorkerBytes(
+            layout, maxStreamBytes, imageWriterCopiesPixels: format != "png");
+        long parityBytes = checked((long)parityTotal * capacity);
+        long stripeScratchBytes = stripeParity > 0 ? checked((long)stripeData * capacity) : 0;
+        long fixedResidentBytes = checked(source.ResidentBytes + parityBytes + stripeScratchBytes +
+            (long)parityTotal * IntPtr.Size);
+        long budget = checked(settings.EncodeMemoryBudgetMB * 1_000_000L);
+        if (fixedResidentBytes > budget - renderWorkerBytes)
+            throw new InvalidOperationException(
+                $"This encode plans ~{fixedResidentBytes / 1_000_000:N0} MB of resident payload/parity data plus " +
+                $"at least one ~{renderWorkerBytes / 1_000_000:N0} MB render working set, above " +
+                $"EncodeMemoryBudgetMB={settings.EncodeMemoryBudgetMB:N0}. Lower recovery, use --no-compress, " +
+                "split the input, reduce resolution, or raise the budget deliberately.");
+
         ulong fileId = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         var palette = paletteBuilder.Build(opt.BitsPerCell);
         byte[] metaModules = layout.PackMetadata();
@@ -175,24 +194,30 @@ internal sealed class ShardEncoder(
         var files = new string[count + parityTotal];
         int done = 0, totalImages = count + parityTotal;
 
-        // Parallelism is bounded by pixel-buffer memory (one reusable buffer per worker); the
-        // budget (default ~2 GB, appsettings.json EncodeMemoryBudgetMB) gives plenty of workers
-        // at normal resolutions and few at 16K.
-        long pixelBytes = (long)layout.Width * layout.Height * 3;
-        long budget = settings.EncodeMemoryBudgetMB * 1_000_000L;
-        int degree = (int)Math.Clamp(budget / Math.Max(1, pixelBytes), 1, Environment.ProcessorCount);
+        // Parallelism is bounded by the full known render working set: RGB canvas, stream, FEC
+        // cells, optional interleave scatter, and the ImageSharp pixel copy for non-PNG formats.
+        // Codec-internal compression storage remains format/input dependent, so this is a
+        // conservative planner for buffers QrShard controls rather than a process-RSS ceiling.
+        long workerBudget = budget - fixedResidentBytes;
+        int degree = (int)Math.Clamp(workerBudget / Math.Max(1, renderWorkerBytes), 1,
+            Math.Min(Environment.ProcessorCount, totalImages));
         var po = new ParallelOptions { MaxDegreeOfParallelism = degree };
-        var writer = renderer.CreateWriter(format, layout, settings);
         var logLock = new object(); // serializes the per-image progress callback across workers
 
-        // Data and parity images in ONE parallel loop (no barrier between the phases), with
-        // thread-local scratch (pixel canvas + stream/cell byte buffers) so each worker
-        // allocates its working set exactly once instead of per image. Data-image payloads are
-        // read straight from the (possibly memory-mapped) source into the staging buffer.
-        Parallel.For(0, totalImages, po,
-            () => new RenderScratch(layout),
-            (i, _, scratch) =>
+        // Run exactly `degree` cursor workers. Parallel.For's thread-local overload can create
+        // replacement locals as scheduler tasks turn over; explicit workers make the planned
+        // number of retained RenderScratch instances exact. Data and parity still share one
+        // queue, with no phase barrier.
+        int cursor = -1;
+        Parallel.For(0, degree, po, _ =>
+        {
+            var scratch = new RenderScratch(layout);
+            var writer = renderer.CreateWriter(format, layout, settings);
+            while (true)
             {
+                int i = Interlocked.Increment(ref cursor);
+                if (i >= totalImages)
+                    break;
                 bool isParity = i >= count;
                 int payloadLen;
                 string outPath;
@@ -209,12 +234,17 @@ internal sealed class ShardEncoder(
 
                 // Stage header + payload contiguously: [0..headerSize) header, then the payload.
                 int streamLength = headerSize + payloadLen;
-                byte[] stream = layout.EccParity > 0 ? scratch.Stream(streamLength) : new byte[streamLength];
+                int stagedLength = layout.EccParity > 0
+                    ? streamLength
+                    : checked((int)layout.TotalBytes);
+                byte[] stream = scratch.Stream(stagedLength);
                 var payloadSpan = stream.AsSpan(headerSize, payloadLen);
                 if (isParity)
                     parityChunks[i - count].CopyTo(payloadSpan);
                 else
                     source.Read((long)i * capacity, payloadSpan);
+                if (streamLength < stagedLength)
+                    Array.Clear(stream, streamLength, stagedLength - streamLength);
 
                 var header = new ShardHeader
                 {
@@ -244,11 +274,25 @@ internal sealed class ShardEncoder(
                     lock (logLock)
                         log($"  [{finished}/{totalImages}] {Path.GetFileName(outPath)}" +
                             (isParity ? " (parity)" : $" ({payloadLen:N0} bytes)"));
-                return scratch;
-            },
-            _ => { });
+            }
+        });
 
         return new EncodeResult(totalImages, capacity, layout.Width, layout.Height, [.. files],
             count, parityTotal, stripeData, stripeParity);
+    }
+
+    /// <summary>
+    /// Known peak bytes retained by one render worker. Count all buffers conservatively even when
+    /// ECC is disabled so an option change cannot make the admission calculation optimistic.
+    /// Non-PNG ImageSharp writers materialize their own pixel image in addition to our canvas.
+    /// </summary>
+    internal static long EstimateRenderWorkerBytes(Layout layout, long maxStreamBytes,
+        bool imageWriterCopiesPixels)
+    {
+        long pixels = checked((long)layout.Width * layout.Height * 3);
+        long cells = layout.TotalBytes;
+        return checked(pixels + maxStreamBytes + cells +
+            (layout.Interleave2 ? cells : 0) +
+            (imageWriterCopiesPixels ? pixels : 0));
     }
 }

@@ -20,10 +20,25 @@ internal sealed class FastPngReader
     /// <summary>Pixels land in the scratch's pooled buffer, like the ImageSharp path.</summary>
     public bool TryRead(string path, DecodeScratch scratch, out Bitmap bitmap)
     {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+        return TryRead(stream, scratch, out bitmap);
+    }
+
+    /// <summary>
+    /// Stream overload used when the caller has already identified and budget-checked this exact
+    /// open file object. Keeping one handle across identify and decode prevents a path in a watched
+    /// or shared directory being exchanged for a different, oversized file between the two opens.
+    /// The caller owns the stream.
+    /// </summary>
+    internal bool TryRead(Stream stream, DecodeScratch scratch, out Bitmap bitmap)
+    {
         bitmap = null!;
         try
         {
-            return TryReadCore(path, scratch, ref bitmap);
+            if (!stream.CanRead || !stream.CanSeek)
+                return false;
+            stream.Position = 0;
+            return TryReadCore(stream, scratch, ref bitmap);
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or EndOfStreamException or ArgumentException)
         {
@@ -31,9 +46,8 @@ internal sealed class FastPngReader
         }
     }
 
-    private static bool TryReadCore(string path, DecodeScratch scratch, ref Bitmap bitmap)
+    private static bool TryReadCore(Stream fs, DecodeScratch scratch, ref Bitmap bitmap)
     {
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
         Span<byte> sig = stackalloc byte[8];
         if (fs.Read(sig) != 8 || !sig.SequenceEqual(Signature))
             return false;
@@ -272,7 +286,7 @@ internal sealed class FastPngReader
     }
 
     /// <summary>Reads the concatenated IDAT payloads as one stream without copying them out first.</summary>
-    private sealed class ChunkRangeStream(FileStream fs, List<(long Offset, int Length)> ranges) : Stream
+    private sealed class ChunkRangeStream(Stream fs, List<(long Offset, int Length)> ranges) : Stream
     {
         private int _index;
         private int _posInChunk;

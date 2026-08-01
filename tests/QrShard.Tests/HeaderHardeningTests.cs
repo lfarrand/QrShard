@@ -1,4 +1,5 @@
 using QrShard;
+using System.Security.Cryptography;
 
 namespace QrShard.Tests;
 
@@ -10,6 +11,27 @@ namespace QrShard.Tests;
 /// </summary>
 public class HeaderHardeningTests
 {
+    private static ShardHeader FamilyHeader(string variant = "base")
+    {
+        byte[] sha = new byte[32];
+        if (variant == "sha") sha[0] = 1;
+        return new ShardHeader
+        {
+            FileId = 0xCAFE,
+            Index = variant == "index" ? 1 : 0,
+            Count = variant == "count" ? 2 : 1,
+            PayloadLength = 4,
+            PayloadCrc32 = 0,
+            TotalLength = variant == "total" ? 5 : 4,
+            OriginalLength = variant == "original" ? 5 : 4,
+            Flags = variant == "flags" ? ShardHeader.FlagArchive : (byte)0,
+            Sha256 = sha,
+            FileName = variant == "name" ? "other.bin" : "x.bin",
+            StripeData = variant == "stripe-data" ? 1 : 0,
+            StripeParity = variant == "stripe-parity" ? 1 : 0,
+        };
+    }
+
     private static byte[] BuildHeaderBytes(int count, int stripeData, int stripeParity, byte flags = 0)
     {
         var header = new ShardHeader
@@ -115,5 +137,183 @@ public class HeaderHardeningTests
         var shard = new DecodedShard(header, [1, 2, 3, 4], "crafted", 0, 0);
         var ex = Record.Exception(() => new ParityReassembler().IsSetComplete([shard]));
         Assert.True(ex is null or ShardDecodeException, $"unexpected {ex?.GetType().Name}: {ex?.Message}");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void IsSetComplete_RejectsDirectlyConstructedNegativeOrdinalsWithoutIndexing(bool parity)
+    {
+        var header = new ShardHeader
+        {
+            FileId = 7, Index = -1, Count = 1, PayloadLength = 1,
+            PayloadCrc32 = 0, TotalLength = 1, OriginalLength = 1,
+            Flags = parity ? ShardHeader.FlagParity : (byte)0,
+            Sha256 = new byte[32], FileName = "negative.bin",
+            StripeData = 1, StripeParity = 1,
+        };
+        var shard = new DecodedShard(header, [1], "direct", 0, 0);
+
+        var ex = Record.Exception(() => new ParityReassembler().IsSetComplete([shard]));
+
+        Assert.Null(ex);
+        Assert.False(new ParityReassembler().IsSetComplete([shard]));
+    }
+
+    [Fact]
+    public void IsSetComplete_DoesNotStopEarlyOnInconsistentRecoveryCapacity()
+    {
+        byte[] sha = new byte[32];
+        var dataHeader = new ShardHeader
+        {
+            FileId = 71, Index = 0, Count = 2, PayloadLength = 10,
+            PayloadCrc32 = 0, TotalLength = 20, OriginalLength = 20, Flags = 0,
+            Sha256 = sha, FileName = "capacity.bin",
+            StripeData = 2, StripeParity = 1,
+        };
+        var parityHeader = new ShardHeader
+        {
+            FileId = 71, Index = 0, Count = 2, PayloadLength = 11,
+            PayloadCrc32 = 0, TotalLength = 20, OriginalLength = 20, Flags = ShardHeader.FlagParity,
+            Sha256 = sha, FileName = "capacity.bin", StripeData = 2, StripeParity = 1,
+        };
+        var shards = new[]
+        {
+            new DecodedShard(dataHeader, new byte[10], "data", 0, 0),
+            new DecodedShard(parityHeader, new byte[11], "parity", 0, 0),
+        };
+
+        Assert.False(new ParityReassembler().IsSetComplete(shards));
+    }
+
+    [Fact]
+    public void IsSetComplete_DoesNotAllocateFromHugeCountOnClearlyIncompleteSet()
+    {
+        var header = new ShardHeader
+        {
+            FileId = 72, Index = 0, Count = 5_000_000, PayloadLength = 1, PayloadCrc32 = 0,
+            TotalLength = 5_000_000, OriginalLength = 5_000_000, Flags = 0,
+            Sha256 = new byte[32], FileName = "sparse.bin", StripeData = 254, StripeParity = 1,
+        };
+        var shard = new DecodedShard(header, [1], "one", 0, 0);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.False(new ParityReassembler().IsSetComplete([shard]));
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(allocated < 1_000_000, $"sparse completeness check allocated {allocated:N0} bytes");
+    }
+
+    [Theory]
+    [InlineData("count")]
+    [InlineData("total")]
+    [InlineData("original")]
+    [InlineData("flags")]
+    [InlineData("sha")]
+    [InlineData("name")]
+    [InlineData("stripe-data")]
+    [InlineData("stripe-parity")]
+    public void RepeatedFamilyMetadataMustMatch(string variant)
+    {
+        var first = FamilyHeader();
+        var other = FamilyHeader(variant);
+        var shards = new[]
+        {
+            new DecodedShard(first, [1, 2, 3, 4], "a", 0, 0),
+            new DecodedShard(other, [1, 2, 3, 4], "b", 0, 0),
+        };
+
+        Assert.False(first.HasSameFamilyAs(other));
+        Assert.False(new ParityReassembler().IsSetComplete(shards));
+        var ex = Assert.Throws<ShardDecodeException>(() =>
+            new ShardAssembler().Assemble([.. shards], null, _ => { }));
+        Assert.Contains("Inconsistent shard set", ex.Message);
+    }
+
+    [Fact]
+    public void IndexAndParityMarkerMayDifferWithinOneFamily()
+    {
+        var data = FamilyHeader();
+        var parity = new ShardHeader
+        {
+            FileId = data.FileId, Index = 7, Count = data.Count, PayloadLength = 8,
+            PayloadCrc32 = 123, TotalLength = data.TotalLength, OriginalLength = data.OriginalLength,
+            Flags = (byte)(data.Flags | ShardHeader.FlagParity), Sha256 = [.. data.Sha256],
+            FileName = data.FileName, StripeData = data.StripeData, StripeParity = data.StripeParity,
+        };
+        Assert.True(data.HasSameFamilyAs(parity));
+    }
+
+    private static ShardHeader RecoveryHeader(int index, byte flags, byte[] content, byte[] whole,
+        int count = 2, int stripeParity = 1) => new()
+    {
+        FileId = 0xBADC0DE,
+        Index = index,
+        Count = count,
+        PayloadLength = content.Length,
+        PayloadCrc32 = new Crc().Crc32(content),
+        TotalLength = whole.Length,
+        OriginalLength = whole.Length,
+        Flags = flags,
+        Sha256 = SHA256.HashData(whole),
+        FileName = "bounded.bin",
+        StripeData = 2,
+        StripeParity = stripeParity,
+    };
+
+    [Fact]
+    public void OversizedParityCannotSetChunkCapacityBeforeRecoveryAllocations()
+    {
+        byte[] whole = [1, 2, 3, 4, 5, 6, 7, 8];
+        byte[] firstChunk = whole[..4];
+        byte[] craftedParity = new byte[100_000];
+        var data = new DecodedShard(RecoveryHeader(0, 0, firstChunk, whole), firstChunk, "data", 0, 0);
+        var parity = new DecodedShard(
+            RecoveryHeader(0, ShardHeader.FlagParity, craftedParity, whole), craftedParity, "parity", 0, 0);
+
+        var ex = Assert.Throws<ShardDecodeException>(() =>
+            new ParityReassembler().ReassembleWithParity([data, parity], data.Header, _ => { }, out _));
+
+        Assert.Contains("capacities are inconsistent", ex.Message);
+    }
+
+    [Fact]
+    public void CompleteDataIgnoresMalformedOptionalParity()
+    {
+        using var tmp = new TempDir();
+        byte[] whole = [1, 2, 3, 4, 5, 6, 7, 8];
+        byte[] a = whole[..4], b = whole[4..];
+        byte[] craftedParity = new byte[100_000];
+        var data0 = new DecodedShard(RecoveryHeader(0, 0, a, whole), a, "data0", 0, 0);
+        var data1 = new DecodedShard(RecoveryHeader(1, 0, b, whole), b, "data1", 0, 0);
+        var parity = new DecodedShard(
+            RecoveryHeader(0, ShardHeader.FlagParity, craftedParity, whole), craftedParity, "parity", 0, 0);
+        string output = tmp.File("out.bin");
+
+        new ShardAssembler().Assemble([parity, data0, data1], output, _ => { });
+
+        Assert.Equal(whole, File.ReadAllBytes(output));
+    }
+
+    [Fact]
+    public void FountainFramesBeyondInitiallyEmittedOrdinalRemainUsable()
+    {
+        byte[] whole = [1, 2, 3, 4, 5, 6, 7, 8];
+        byte[] a = whole[..4], b = whole[4..];
+        const int extraOrdinal = 999;
+        byte[] coded = new FountainFec().EncodeFrame(new ArraySegment<byte[]>([a, b]),
+            0xBADC0DE, stripe: 0, seq: extraOrdinal, shardLen: 4);
+        byte fountain = ShardHeader.FlagFountain;
+        var data0 = new DecodedShard(RecoveryHeader(0, fountain, a, whole), a, "data0", 0, 0);
+        var parity = new DecodedShard(
+            RecoveryHeader(extraOrdinal, (byte)(fountain | ShardHeader.FlagParity), coded, whole),
+            coded, "coded", 0, 0);
+
+        byte[][] restored = new ParityReassembler().ReassembleWithParity(
+            [data0, parity], data0.Header, _ => { }, out int capacity);
+
+        Assert.Equal(4, capacity);
+        Assert.Equal(a, restored[0]);
+        Assert.Equal(b, restored[1]);
     }
 }

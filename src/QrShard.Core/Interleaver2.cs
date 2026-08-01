@@ -1,5 +1,3 @@
-using System.Collections.Concurrent;
-
 namespace QrShard;
 
 /// <summary>
@@ -15,28 +13,48 @@ namespace QrShard;
 /// </summary>
 internal sealed class Interleaver2
 {
-    private readonly ConcurrentDictionary<int, int[]> _cache = new();
+    private readonly object _cacheLock = new();
+    private int _cachedLength = -1;
+    private int[]? _cachedPermutation;
 
     /// <summary>
-    /// The cache is keyed on a length derived from attacker-declared geometry, so a set of images
-    /// each declaring a different size mints an int[length] per distinct value and never evicts —
-    /// and the instance is long-lived, so the growth outlives any one decode. A real transfer uses
-    /// ONE length for every image in the set, which is the whole point of caching here, so a cap
-    /// this far above 1 costs legitimate use nothing while bounding the adversarial case.
+    /// A normal Max4K permutation is about 21 MB. Cache only the most recently used one and only
+    /// below a byte cap: geometry is attacker-controlled, so an entry-count cap retained more than
+    /// a gigabyte across 64 realistic sizes. A real transfer repeats one length for every image,
+    /// which makes a one-entry cache the useful policy as well as the bounded one.
     /// </summary>
-    private const int MaxCachedPermutations = 64;
+    private const int MaxCachedBytes = 32 * 1024 * 1024;
+
+    internal int CachedBytes
+    {
+        get
+        {
+            lock (_cacheLock)
+                return (_cachedPermutation?.Length ?? 0) * sizeof(int);
+        }
+    }
 
     /// <summary>π for a protected region of <paramref name="length"/> bytes: dest[π[i]] = classic[i].</summary>
     public int[] Permutation(int length)
     {
-        if (_cache.TryGetValue(length, out var cached))
-            return cached;
-        // Past the cap, still correct — just uncached, so a pathological set pays time instead of
-        // unbounded memory. Racing callers may both build; the permutation is a pure function of
-        // length, so either result is identical and the loser's copy is simply collected.
-        if (_cache.Count >= MaxCachedPermutations)
-            return BuildPermutation(length);
-        return _cache.GetOrAdd(length, BuildPermutation);
+        lock (_cacheLock)
+            if (_cachedLength == length)
+                return _cachedPermutation!;
+
+        // Build outside the lock: callers decoding the same transfer may race once, but no worker
+        // is stalled while another performs Fisher-Yates over millions of entries.
+        int[] built = BuildPermutation(length);
+        if ((long)length * sizeof(int) > MaxCachedBytes)
+            return built;
+
+        lock (_cacheLock)
+        {
+            if (_cachedLength == length)
+                return _cachedPermutation!;
+            _cachedLength = length;
+            _cachedPermutation = built;
+            return built;
+        }
     }
 
     private static int[] BuildPermutation(int length)
@@ -81,5 +99,28 @@ internal sealed class Interleaver2
         int[] perm = Permutation(protectedLength);
         for (int i = 0; i < protectedLength; i++)
             classicDest[i] = cellFlags[perm[i]];
+    }
+
+    /// <summary>
+    /// Decode all confidence streams with one permutation. Large valid geometries intentionally
+    /// bypass the persistent cache; independently calling Gather/GatherFlags for cells, flags and
+    /// second choices would otherwise allocate and shuffle the same >32 MiB int array three times
+    /// for every image.
+    /// </summary>
+    public void GatherStreams(byte[] cells, byte[] classicCells,
+        bool[]? cellFlags, bool[]? classicFlags,
+        byte[]? secondChoices, byte[]? classicSecondChoices,
+        int protectedLength)
+    {
+        int[] perm = Permutation(protectedLength);
+        for (int i = 0; i < protectedLength; i++)
+        {
+            int source = perm[i];
+            classicCells[i] = cells[source];
+            if (cellFlags is not null && classicFlags is not null)
+                classicFlags[i] = cellFlags[source];
+            if (secondChoices is not null && classicSecondChoices is not null)
+                classicSecondChoices[i] = secondChoices[source];
+        }
     }
 }

@@ -17,8 +17,9 @@ public class ScreenAndPipelineTests
 
         if (OperatingSystem.IsWindows())
         {
-            Assert.Equal("-f gdigrab -i desktop", fullInput);
-            Assert.Equal("-f gdigrab -offset_x 100 -offset_y 80 -video_size 1920x1080 -i desktop", regionInput);
+            Assert.Equal(["-f", "gdigrab", "-i", "desktop"], fullInput);
+            Assert.Equal(["-f", "gdigrab", "-offset_x", "100", "-offset_y", "80",
+                "-video_size", "1920x1080", "-i", "desktop"], regionInput);
             Assert.Null(regionFilter);
         }
         else if (OperatingSystem.IsMacOS())
@@ -29,8 +30,8 @@ public class ScreenAndPipelineTests
         else
         {
             Assert.Contains("x11grab", fullInput);
-            Assert.Contains("+100,80", regionInput);
-            Assert.Contains("-video_size 1920x1080", regionInput);
+            Assert.Contains(regionInput, arg => arg.EndsWith("+100,80", StringComparison.Ordinal));
+            Assert.Contains("1920x1080", regionInput);
         }
         Assert.Null(fullFilter);
     }

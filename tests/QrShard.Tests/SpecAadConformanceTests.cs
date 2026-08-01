@@ -54,6 +54,76 @@ public class SpecAadConformanceTests
     }
 
     [Fact]
+    public void AuthMetaWithoutEncryption_IsRejectedAsTheSpecRequires()
+    {
+        var header = new ShardHeader
+        {
+            FileId = 1,
+            Index = 0,
+            Count = 1,
+            PayloadLength = 0,
+            PayloadCrc32 = 0,
+            TotalLength = 0,
+            OriginalLength = 0,
+            Flags = ShardHeader.FlagAuthMeta,
+            Sha256 = SHA256.HashData([]),
+            FileName = "invalid.bin",
+        };
+
+        Assert.Null(ShardHeader.Deserialize(header.Serialize(), out _));
+    }
+
+    [Fact]
+    public void UnknownFlags_AreRejectedByTheSharedHeaderParser()
+    {
+        var header = new ShardHeader
+        {
+            FileId = 2,
+            Index = 0,
+            Count = 1,
+            PayloadLength = 0,
+            PayloadCrc32 = 0,
+            TotalLength = 0,
+            OriginalLength = 0,
+            Flags = 0x80,
+            Sha256 = SHA256.HashData([]),
+            FileName = "future.bin",
+        };
+
+        Assert.Null(ShardHeader.Deserialize(header.Serialize(), out _));
+    }
+
+    [Fact]
+    public void MalformedUtf8Filename_IsRejectedInsteadOfCanonicalizedForAad()
+    {
+        var header = new ShardHeader
+        {
+            FileId = 3,
+            Index = 0,
+            Count = 1,
+            PayloadLength = 0,
+            PayloadCrc32 = 0,
+            TotalLength = 0,
+            OriginalLength = 0,
+            Flags = ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta,
+            Sha256 = SHA256.HashData([]),
+            FileName = "\uFFFD",
+        };
+        byte[] bytes = header.Serialize();
+
+        // Filename starts at byte 88. Keep its encoded length at three bytes, but replace the
+        // valid EF BF BD encoding with a malformed three-byte sequence and repair the public
+        // header CRC, just as an untrusted shard producer can.
+        bytes[88] = 0xE2;
+        bytes[89] = 0x28;
+        bytes[90] = 0xA1;
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(bytes.Length - 4),
+            new Crc().Crc32(bytes.AsSpan(0, bytes.Length - 4)));
+
+        Assert.Null(ShardHeader.Deserialize(bytes, out _));
+    }
+
+    [Fact]
     public void SpecDocuments_EveryFlagBitTheCodeKnows()
     {
         // Reads SPEC.md itself: each bit in KnownFlags must appear in the §4.1 table. This is the

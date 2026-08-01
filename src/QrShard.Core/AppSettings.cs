@@ -16,6 +16,18 @@ namespace QrShard;
 /// </summary>
 internal sealed class AppSettings
 {
+    private static readonly HashSet<string> RootSettings = new(StringComparer.Ordinal)
+    {
+        "PngCompressionLevel", "PayloadCompressionLevel", "ShardFolderSuffix",
+        "EncodeMemoryBudgetMB", "DecodeMaxParallelism", "DecodeMemoryBudgetMB",
+        "ReceiveFps", "WatchPollMs", "ReceiveDecodeWorkers", "EncodeDefaults", "EncodeProfiles",
+    };
+
+    private static readonly HashSet<string> EncodeSettings = new(StringComparer.Ordinal)
+    {
+        "Resolution", "CellPx", "BitsPerCell", "EccParity", "RecoveryPercent", "ImageFormat", "Compress",
+    };
+
     private static readonly Lazy<AppSettings> Cached = new(() => Load(DefaultPath));
 
     public static string DefaultPath => Path.Combine(AppContext.BaseDirectory, "appsettings.json");
@@ -34,36 +46,32 @@ internal sealed class AppSettings
     /// </summary>
     public CompressionLevel PngCompressionLevel { get; private set; } = CompressionLevel.Optimal;
 
-    /// <summary>Deflate level for compressing the file payload itself.</summary>
+    /// <summary>Compression level passed to BrotliStream for the file payload.</summary>
     public CompressionLevel PayloadCompressionLevel { get; private set; } = CompressionLevel.Optimal;
 
-    /// <summary>Memory budget (MB) for the encoder's per-worker pixel canvases.</summary>
+    /// <summary>Planning budget (MB) for resident payload/parity buffers and encode canvases.</summary>
     public int EncodeMemoryBudgetMB { get; private set; } = 2000;
 
-    /// <summary>Max parallel image decodes; 0 = automatic (cores, capped at 24).</summary>
+    /// <summary>
+    /// Upper bound on parallel image decodes; 0 = automatic (cores, capped at 24). Actual workers
+    /// are also reduced by image count and <see cref="DecodeMemoryBudgetMB"/>.
+    /// </summary>
     public int DecodeMaxParallelism { get; private set; }
 
     /// <summary>
     /// Memory budget (MB) for the decoder's per-worker scratch buffers — the counterpart to
     /// <see cref="EncodeMemoryBudgetMB"/>, which the decode side did not have.
     ///
-    /// A 4K frame costs about 199 MB of scratch and a 48-megapixel phone photo about 1.15 GB, so
-    /// the default affords the full 24 workers at 4K and about 6 on phone-sized photos. The figures
-    /// were 33 MB and 192 MB until the estimate was corrected: it counted 4 bytes per pixel and
-    /// omitted the adaptive binarizer's two 8-byte-per-pixel integral images, which dominate it.
-    /// Under-counting there is the dangerous direction, since the budget exists to stop the workers
-    /// collectively committing to an image they cannot afford. It bounds the case where the image
-    /// dimensions are the attacker's choice rather than a camera's.
-    ///
-    /// Raised from 4000 once that correction landed. At 4000 the corrected per-pixel figure priced
-    /// Max4K decode down to 20 workers where it had been running 24 — and only Max4K, since the
-    /// smaller presets still fit. 8000 restores the full pool there and doubles it on photo-sized
-    /// input. What it costs is headroom: this is a declared ceiling on scratch, NOT a reading of
-    /// free memory, so a full pool on 48-megapixel input now reaches about 6.9 GB against 3.5 GB
-    /// before. Machines with less RAM than that should lower it — the setting exists for exactly
-    /// that, and the decode simply runs with fewer workers rather than failing.
+    /// A 4K frame is planned at about 332 MB and a 48-megapixel phone photo at about 1.92 GB, so
+    /// the default affords about 12 workers at 4K and 2 on phone-sized photos. The estimate includes
+    /// the adaptive binarizer's two 8-byte-per-pixel integral images and measured camera-fallback
+    /// overhead. Under-counting is the dangerous direction because input dimensions are chosen by
+    /// the sender. This setting throttles concurrency; it is not a hard process-memory ceiling or a
+    /// reading of currently free memory, so machines with less RAM to spare should lower it. A
+    /// separate pre-load admission check charges one image at about six bytes/pixel against this
+    /// same setting (roughly the two RGB24 surfaces needed on the clean path).
     /// </summary>
-    public int DecodeMemoryBudgetMB { get; private set; } = 8000;
+    public int DecodeMemoryBudgetMB { get; private set; } = 4000;
 
     /// <summary>Default frame rate for the live receiver (`qrshard receive`).</summary>
     public double ReceiveFps { get; private set; } = 10;
@@ -114,7 +122,8 @@ internal sealed class AppSettings
         {
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
-                return settings;
+                throw new InvalidOperationException($"{file}: the JSON root must be an object.");
+            ValidateKnownProperties(root, RootSettings, "");
 
             settings.PngCompressionLevel = ReadLevel(root, "PngCompressionLevel", settings.PngCompressionLevel);
             settings.PayloadCompressionLevel = ReadLevel(root, "PayloadCompressionLevel", settings.PayloadCompressionLevel);
@@ -141,7 +150,7 @@ internal sealed class AppSettings
                 settings.ReceiveFps = receiveFps.ValueKind == JsonValueKind.Number
                     ? receiveFps.GetDouble()
                     : throw Invalid("ReceiveFps", receiveFps.ToString(), "a number of frames per second");
-                if (settings.ReceiveFps is <= 0 or > 120)
+                if (!double.IsFinite(settings.ReceiveFps) || settings.ReceiveFps is <= 0 or > 120)
                     throw Invalid("ReceiveFps", settings.ReceiveFps, "0-120 frames per second");
             }
 
@@ -153,11 +162,17 @@ internal sealed class AppSettings
             if (settings.ReceiveDecodeWorkers is < 0 or > 64)
                 throw Invalid("ReceiveDecodeWorkers", settings.ReceiveDecodeWorkers, "0 (auto) to 64");
 
-            if (root.TryGetProperty("EncodeDefaults", out var defaults) && defaults.ValueKind == JsonValueKind.Object)
-                ParseEncodeSettings(defaults, settings.EncodeDefaults, "EncodeDefaults", Invalid);
-
-            if (root.TryGetProperty("EncodeProfiles", out var profiles) && profiles.ValueKind == JsonValueKind.Object)
+            if (root.TryGetProperty("EncodeDefaults", out var defaults))
             {
+                if (defaults.ValueKind != JsonValueKind.Object)
+                    throw Invalid("EncodeDefaults", defaults.ToString(), "an object of encode settings");
+                ParseEncodeSettings(defaults, settings.EncodeDefaults, "EncodeDefaults", Invalid);
+            }
+
+            if (root.TryGetProperty("EncodeProfiles", out var profiles))
+            {
+                if (profiles.ValueKind != JsonValueKind.Object)
+                    throw Invalid("EncodeProfiles", profiles.ToString(), "an object of named profiles");
                 var parsed = new Dictionary<string, EncodeDefaultSettings>(StringComparer.OrdinalIgnoreCase);
                 foreach (var profile in profiles.EnumerateObject())
                 {
@@ -192,6 +207,7 @@ internal sealed class AppSettings
     private static void ParseEncodeSettings(JsonElement obj, EncodeDefaultSettings d, string prefix,
         Func<string, object, string, InvalidOperationException> invalid)
     {
+        ValidateKnownProperties(obj, EncodeSettings, prefix + ".");
         d.Resolution = ReadString(obj, "Resolution", d.Resolution);
         if (!IsValidResolution(d.Resolution))
             throw invalid($"{prefix}.Resolution", d.Resolution, "\"2160\" or \"3840x2160\" style");
@@ -230,16 +246,29 @@ internal sealed class AppSettings
         if (value.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase))
             return true;
         int split = value.IndexOfAny(['x', 'X']);
-        return split < 0
-            ? int.TryParse(value, out int r) && r > 0
-            : int.TryParse(value[..split], out int w) && w > 0 && int.TryParse(value[(split + 1)..], out int h) && h > 0;
+        if (split < 0)
+            return int.TryParse(value, out int r) && r is >= Layout.MinResolution and <= Layout.MaxResolution;
+        return int.TryParse(value[..split], out int w) &&
+               int.TryParse(value[(split + 1)..], out int h) &&
+               w is >= Layout.MinResolution and <= Layout.MaxResolution &&
+               h is >= Layout.MinResolution and <= Layout.MaxResolution;
+    }
+
+    private static void ValidateKnownProperties(JsonElement obj, HashSet<string> known, string prefix)
+    {
+        foreach (var property in obj.EnumerateObject())
+            if (!known.Contains(property.Name))
+                throw new InvalidOperationException(
+                    $"appsettings.json: unknown setting '{prefix}{property.Name}'. Check its spelling.");
     }
 
     private static CompressionLevel ReadLevel(JsonElement parent, string name, CompressionLevel fallback)
     {
         if (!parent.TryGetProperty(name, out var element))
             return fallback;
-        string value = element.ValueKind == JsonValueKind.String ? element.GetString() ?? "" : element.ToString();
+        if (element.ValueKind != JsonValueKind.String)
+            throw WrongType(name, "a string", element);
+        string value = element.GetString() ?? "";
         if (!Enum.TryParse(value, ignoreCase: true, out CompressionLevel parsed) || !Enum.IsDefined(parsed))
             throw new InvalidOperationException(
                 $"appsettings.json: invalid {name} '{value}'. " +
@@ -247,16 +276,33 @@ internal sealed class AppSettings
         return parsed;
     }
 
-    private static string ReadString(JsonElement parent, string name, string fallback) =>
-        parent.TryGetProperty(name, out var element) && element.ValueKind == JsonValueKind.String
-            ? element.GetString() ?? fallback
-            : fallback;
+    private static string ReadString(JsonElement parent, string name, string fallback)
+    {
+        if (!parent.TryGetProperty(name, out var element))
+            return fallback;
+        if (element.ValueKind != JsonValueKind.String)
+            throw WrongType(name, "a string", element);
+        return element.GetString() ?? throw WrongType(name, "a non-null string", element);
+    }
 
-    private static int ReadInt(JsonElement parent, string name, int fallback) =>
-        parent.TryGetProperty(name, out var element) && element.TryGetInt32(out int value) ? value : fallback;
+    private static int ReadInt(JsonElement parent, string name, int fallback)
+    {
+        if (!parent.TryGetProperty(name, out var element))
+            return fallback;
+        if (element.ValueKind != JsonValueKind.Number || !element.TryGetInt32(out int value))
+            throw WrongType(name, "a 32-bit integer", element);
+        return value;
+    }
 
-    private static bool ReadBool(JsonElement parent, string name, bool fallback) =>
-        parent.TryGetProperty(name, out var element) && element.ValueKind is JsonValueKind.True or JsonValueKind.False
-            ? element.GetBoolean()
-            : fallback;
+    private static bool ReadBool(JsonElement parent, string name, bool fallback)
+    {
+        if (!parent.TryGetProperty(name, out var element))
+            return fallback;
+        if (element.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            throw WrongType(name, "true or false", element);
+        return element.GetBoolean();
+    }
+
+    private static InvalidOperationException WrongType(string name, string expected, JsonElement actual) =>
+        new($"appsettings.json: invalid {name} JSON value '{actual}'. Expected {expected}.");
 }

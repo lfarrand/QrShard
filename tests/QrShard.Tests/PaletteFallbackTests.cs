@@ -104,4 +104,21 @@ public class PaletteFallbackTests
         Assert.Equal(theoretical, palettes.Bottom);
         Assert.False(palettes.Interpolate);
     }
+
+    [Fact]
+    public void SeparableGainShiftedStrip_BeatsCloserCollapsedStrip()
+    {
+        Rgb24[] theoretical = new Palette().Build(bitsPerCell: 4);
+        var healthy = theoretical.Select(p => new Rgb24(
+            (byte)Math.Round(p.R * 0.45),
+            (byte)Math.Round(p.G * 0.45),
+            (byte)Math.Round(p.B * 0.45))).ToArray();
+        var collapsed = (Rgb24[])theoretical.Clone();
+        collapsed[5] = collapsed[4];
+
+        // The damaged copy differs in only one entry and is therefore much closer by squared
+        // colour distance. Separability must take precedence or strong but valid gain loses.
+        Assert.Same(healthy, StripReader.SelectBestMeasured(collapsed, healthy, theoretical));
+        Assert.Same(healthy, StripReader.SelectBestMeasured(healthy, collapsed, theoretical));
+    }
 }
