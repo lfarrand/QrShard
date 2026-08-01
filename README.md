@@ -479,6 +479,12 @@ Six independent layers, from within-cell to whole-transfer:
    overshoot the correction bound, so at parity 16 and above a further subset search un-flips up
    to six positions to get back under it. That extra search is deliberately not offered below
    parity 16: with fewer syndromes to spare it returns more wrong answers than right ones.
+
+   When several trial patterns verify — which is common past the errors-only bound — the one
+   chosen is the one Reed-Solomon spent the fewest corrections on, not the first to be reached.
+   A candidate that used less of its budget sits deeper inside its decoding sphere and is much
+   less likely to be a miscorrection; at parity 8 that choice is right 60% of the time against
+   43% for the first hit, with nothing lost at any parity.
 3. **Multi-capture fusion**: several photos of the same shard that each fail on their own are
    combined — per-codeword selection with a majority vote from three captures up; with exactly
    two, the spatial clusters where the captures disagree are hypothesis-tested (glare moves
