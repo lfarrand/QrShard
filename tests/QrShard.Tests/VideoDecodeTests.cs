@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using QrShard;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
@@ -165,6 +166,149 @@ public class VideoDecodeTests
         Assert.Contains("missing image(s) 1", ex.Message);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void UnexpectedExceptionInOneUntrustedFrame_IsIsolated(int workers)
+    {
+        var decoder = new VideoDecoder(new UnexpectedFrameDecoder(), new OneFrameSource(),
+            new ShardAssembler(), new ParityReassembler(), new CameraRectifier());
+
+        var ex = Assert.Throws<ShardDecodeException>(() =>
+            decoder.Decode("ignored", null, 8, _ => { }, out _, decodeWorkers: workers));
+
+        Assert.Contains("No decodable shard images", ex.Message);
+    }
+
+    [Fact]
+    public void SuccessfulPayloadBudget_IsRunWideAcrossVideoFrames()
+    {
+        using var tmp = new TempDir();
+        string settingsPath = tmp.File("video-budget.json");
+        File.WriteAllText(settingsPath, """{ "DecodeMemoryBudgetMB": 64 }""");
+        var decoder = new VideoDecoder(new LargePayloadFrameDecoder(), new TwoDistinctFramesSource(),
+            new ShardAssembler(), new ParityReassembler(), new CameraRectifier(),
+            AppSettings.Load(settingsPath));
+
+        var ex = Assert.Throws<ShardResourceLimitException>(() =>
+            decoder.Decode("ignored", null, 8, _ => { }, out _));
+
+        Assert.Contains("DecodeMemoryBudgetMB=64", ex.Message);
+    }
+
+    [Fact]
+    public async Task ParallelLiveDecode_CancelsAProducerBlockedAfterTheCompletingFrame()
+    {
+        using var tmp = new TempDir();
+        var (content, files) = Encode(tmp, size: 100);
+        Assert.Single(files);
+        var scratch = new DecodeScratch();
+        Assert.True(new FastPngReader().TryRead(files[0], scratch, out Bitmap completingFrame));
+        var source = new BlockingAfterFramesSource([completingFrame]);
+        var decoder = new VideoDecoder(new ShardDecoder(), source,
+            new ShardAssembler(), new ParityReassembler(), new CameraRectifier());
+        string output = tmp.File("cancelled-live-out.bin");
+
+        // Decode is synchronous and itself schedules a producer and workers. Giving the outer
+        // orchestration a dedicated thread avoids starving that nested work on constrained CI
+        // pools; the CLI likewise invokes Decode from its main thread rather than a pool worker.
+        Task<VideoDecodeStats> receive = Task.Factory.StartNew(() =>
+            {
+                decoder.Decode("live-device", output, 8, _ => { }, out VideoDecodeStats stats,
+                    decodeWorkers: 2);
+                return stats;
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        VideoDecodeStats? stats = null;
+        Exception? failure = null;
+        try
+        {
+            // Await the handshake rather than blocking another pool thread. The macOS runner
+            // exposed the old nested-Task.Run/ManualResetEvent wait as a scheduling race before
+            // the test reached any of its cancellation or output assertions.
+            Task handshake = source.ProducerBlocked.Task;
+            Task first = await Task.WhenAny(handshake, receive, Task.Delay(TimeSpan.FromSeconds(10)));
+            if (first == receive)
+            {
+                stats = await receive; // propagate an early product failure instead of hiding it as a timeout
+                Assert.Fail("decode completed before the producer reached the simulated stalled camera read");
+            }
+            Assert.True(first == handshake, "producer never reached the simulated stalled camera read");
+            stats = await receive.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+        finally
+        {
+            // A failed handshake must not leave a later-scheduled producer blocked in the suite.
+            source.EmergencyRelease.Set();
+            try
+            {
+                // WaitAsync does not stop its underlying task. Bounded-join it after releasing the
+                // fake camera so TempDir cannot normally be disposed while decode still uses it.
+                await receive.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch (Exception cleanupFailure)
+            {
+                // Awaiting observes a producer fault. Preserve the first, most diagnostic failure.
+                failure ??= cleanupFailure;
+            }
+        }
+
+        if (failure is not null)
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        Assert.NotNull(stats);
+        Assert.True(stats.StoppedEarly);
+        Assert.Equal(content, File.ReadAllBytes(output));
+    }
+
+    [Fact]
+    public async Task ParallelLiveDecode_JoinsProducerAndUnwrapsFatalWorkerFailure()
+    {
+        var source = new BlockingAfterFramesSource(
+        [
+            new Bitmap([new Rgb24(0, 0, 0)], 1, 1),
+            new Bitmap([new Rgb24(255, 255, 255)], 1, 1),
+        ]);
+        var decoder = new VideoDecoder(new MismatchedFamilyFrameDecoder(), source,
+            new ShardAssembler(), new ParityReassembler(), new CameraRectifier());
+
+        Task<Exception> receive = Task.Factory.StartNew(() => Record.Exception(() =>
+                decoder.Decode("live-device", null, 8, _ => { }, out _, decodeWorkers: 2)),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        Exception? observed = null;
+        Exception? waitFailure = null;
+        try
+        {
+            observed = await receive.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (Exception ex)
+        {
+            waitFailure = ex;
+        }
+        finally
+        {
+            source.EmergencyRelease.Set();
+            try
+            {
+                observed ??= await receive.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch (Exception cleanupFailure)
+            {
+                waitFailure ??= cleanupFailure;
+            }
+        }
+
+        if (waitFailure is not null)
+            ExceptionDispatchInfo.Capture(waitFailure).Throw();
+        Assert.IsType<ShardFamilyMismatchException>(observed);
+        Assert.True(source.CancellationObserved.Task.IsCompletedSuccessfully,
+            "the fatal worker did not cancel and join the live producer before returning");
+    }
+
     [Fact]
     public void SingleFrameImage_IsNotTreatedAsVideo()
     {
@@ -196,17 +340,18 @@ public class VideoDecodeTests
     // ---------- Slideshow generation ----------
 
     [Fact]
-    public void Slideshow_EmbedsAllImagesAndInterval()
+    public void Slideshow_ReferencesAllImagesWithoutEmbeddingTheirBytes()
     {
         using var tmp = new TempDir();
         var (_, files) = Encode(tmp, size: 30_000);
         string path = new SlideshowWriter().Write(Path.GetDirectoryName(files[0])!, files, 350);
 
         string html = File.ReadAllText(path);
-        Assert.Equal(files.Count, html.Split("data:image/png;base64,").Length - 1);
+        Assert.All(files, file => Assert.Contains(Path.GetFileName(file), html));
         Assert.Contains("const interval = 350", html);
-        // Embedded payloads must be the actual files.
-        Assert.Contains(Convert.ToBase64String(File.ReadAllBytes(files[0]))[..64], html);
+        Assert.DoesNotContain(";base64,", html);
+        Assert.True(new FileInfo(path).Length < 64 * 1024,
+            "the manifest should stay small regardless of the shard bytes beside it");
     }
 
     [Fact]
@@ -281,5 +426,126 @@ public class VideoDecodeTests
         new VideoDecoder().Decode(mp4, output, 8, _ => { }, out var stats);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.True(stats.FramesDecoded < stats.FramesExamined); // dedupe active at 8 fps vs 2 img/s
+    }
+
+    private sealed class OneFrameSource : IFrameSource
+    {
+        public IEnumerable<Bitmap> Frames(string path, double fps,
+            CancellationToken cancellationToken = default)
+        {
+            yield return new Bitmap(new Rgb24[128 * 128], 128, 128);
+        }
+    }
+
+    private sealed class BlockingAfterFramesSource(IReadOnlyList<Bitmap> frames) : IFrameSource
+    {
+        internal TaskCompletionSource<bool> ProducerBlocked { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource<bool> CancellationObserved { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal ManualResetEventSlim EmergencyRelease { get; } = new(false);
+
+        public IEnumerable<Bitmap> Frames(string path, double fps,
+            CancellationToken cancellationToken = default)
+        {
+            foreach (Bitmap frame in frames)
+                yield return frame;
+            ProducerBlocked.TrySetResult(true);
+            WaitHandle.WaitAny([cancellationToken.WaitHandle, EmergencyRelease.WaitHandle]);
+            if (cancellationToken.IsCancellationRequested)
+                CancellationObserved.TrySetResult(true);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+    }
+
+    private sealed class MismatchedFamilyFrameDecoder : IShardDecoder
+    {
+        private int decoded;
+
+        public DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path)
+        {
+            int current = Interlocked.Increment(ref decoded);
+            byte[] payload = [(byte)current];
+            var header = new ShardHeader
+            {
+                FileId = 0xFA11_1E,
+                Index = 0,
+                Count = 3,
+                PayloadLength = payload.Length,
+                PayloadCrc32 = new Crc().Crc32(payload),
+                TotalLength = 3,
+                OriginalLength = 3,
+                Flags = 0,
+                Sha256 = new byte[32],
+                FileName = current == 1 ? "original.bin" : "renamed.bin",
+                StripeData = 0,
+                StripeParity = 0,
+            };
+            return new DecodedShard(header, payload, path, 0, 0);
+        }
+
+        public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath,
+            Action<string> log, string? password = null) => throw new NotSupportedException();
+        public List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log) =>
+            throw new NotSupportedException();
+        public DecodedShard DecodeImage(string path, DecodeScratch scratch) => throw new NotSupportedException();
+        public DecodeDiagnostics Diagnose(string path) => throw new NotSupportedException();
+    }
+
+    private sealed class UnexpectedFrameDecoder : IShardDecoder
+    {
+        public DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path) =>
+            throw new InvalidOperationException("crafted frame reached an unexpected decoder edge");
+
+        public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath,
+            Action<string> log, string? password = null) => throw new NotSupportedException();
+        public List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log) =>
+            throw new NotSupportedException();
+        public DecodedShard DecodeImage(string path, DecodeScratch scratch) => throw new NotSupportedException();
+        public DecodeDiagnostics Diagnose(string path) => throw new NotSupportedException();
+    }
+
+    private sealed class TwoDistinctFramesSource : IFrameSource
+    {
+        public IEnumerable<Bitmap> Frames(string path, double fps,
+            CancellationToken cancellationToken = default)
+        {
+            yield return new Bitmap([new Rgb24(0, 0, 0)], 1, 1);
+            yield return new Bitmap([new Rgb24(255, 255, 255)], 1, 1);
+        }
+    }
+
+    private sealed class LargePayloadFrameDecoder : IShardDecoder
+    {
+        private int index;
+
+        public DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path)
+        {
+            int current = index++;
+            byte[] payload = new byte[current == 0 ? 40_000_000 : 30_000_000];
+            var header = new ShardHeader
+            {
+                FileId = 0xB0D6E7,
+                Index = current,
+                Count = 3,
+                PayloadLength = payload.Length,
+                PayloadCrc32 = 0,
+                TotalLength = 70_000_000,
+                OriginalLength = 70_000_000,
+                Flags = 0,
+                Sha256 = new byte[32],
+                FileName = "large-video.bin",
+                StripeData = 0,
+                StripeParity = 0,
+            };
+            return new DecodedShard(header, payload, path, 0, 0);
+        }
+
+        public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath,
+            Action<string> log, string? password = null) => throw new NotSupportedException();
+        public List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log) =>
+            throw new NotSupportedException();
+        public DecodedShard DecodeImage(string path, DecodeScratch scratch) => throw new NotSupportedException();
+        public DecodeDiagnostics Diagnose(string path) => throw new NotSupportedException();
     }
 }

@@ -58,6 +58,8 @@ public sealed class QrShardCodec
     /// <summary>
     /// Encodes a file into shard images in <paramref name="outputDirectory"/>.
     /// Throws <see cref="ArgumentException"/> for invalid settings and
+    /// <see cref="InvalidOperationException"/> when the input exceeds 1.5 GB or the selected
+    /// geometry cannot hold a shard header, and
     /// <see cref="IOException"/>-family exceptions for file-system failures.
     /// </summary>
     public QrShardEncodeReport EncodeFile(string inputPath, string outputDirectory,
@@ -84,7 +86,12 @@ public sealed class QrShardCodec
 
     /// <summary>
     /// Decodes captured shard images (any order, duplicates fine, damaged captures repaired or
-    /// rebuilt from parity) and writes the restored file(s). Throws
+    /// rebuilt from parity) and writes the restored file(s). Output is staged, exact-length and
+    /// SHA-256 verified before publication. A single-file result is atomically moved into place.
+    /// An archive output directory must be absent or empty and is never merged into an existing
+    /// tree; replacing an existing empty directory is not guaranteed to be one atomic operation.
+    /// Replacing an existing file preserves only Unix rwx mode, or the Windows DACL and basic
+    /// attributes; use a fresh path for extended metadata or hard-link fidelity. Throws
     /// <see cref="QrShardDecodeException"/> with an actionable message when the set cannot be
     /// fully reassembled.
     /// </summary>
@@ -104,14 +111,23 @@ public sealed class QrShardCodec
 }
 
 /// <summary>
-/// Per-file completeness within a decode session. <see cref="MissingImages"/> holds the
-/// zero-based ordinals of the data images not yet captured (matching the wire index); when
-/// <see cref="Recoverable"/> is true the file assembles even with some still missing, via
-/// parity or fountain frames.
+/// Per-file completeness within a decode session. <see cref="MissingImages"/> holds a bounded
+/// prefix of zero-based data-image ordinals not yet captured (matching the wire index);
+/// <see cref="MissingImageCount"/> is always the exact total and
+/// <see cref="MissingImagesTruncated"/> says whether more ordinals were omitted. When
+/// <see cref="Recoverable"/> is true the file assembles even with some still missing, via parity
+/// or fountain frames.
 /// </summary>
 public sealed record QrShardFileStatus(
     string FileName, int DataPresent, int DataTotal, int ParityPresent,
-    IReadOnlyList<int> MissingImages, bool Recoverable);
+    IReadOnlyList<int> MissingImages, bool Recoverable)
+{
+    /// <summary>Exact number of missing data images, including conflicting copies treated as erasures.</summary>
+    public int MissingImageCount { get; init; } = MissingImages.Count;
+
+    /// <summary>True when <see cref="MissingImages"/> is only the leading diagnostic sample.</summary>
+    public bool MissingImagesTruncated => MissingImages.Count < MissingImageCount;
+}
 
 /// <summary>Outcome of adding one image to a session.</summary>
 public sealed record QrShardAddResult(bool Accepted, bool WasNew, string? Error);
@@ -120,16 +136,49 @@ public sealed record QrShardAddResult(bool Accepted, bool WasNew, string? Error)
 /// Incremental decode: feed captures one at a time as they arrive (files or in-memory image
 /// bytes), inspect what is still missing, and assemble the moment the set is recoverable —
 /// the embedding counterpart to the CLI's --session/--watch. Not thread-safe; drive it from a
-/// single consumer. Duplicate captures are harmless (deduplicated by file/part identity).
+/// single consumer. Duplicate captures are harmless (deduplicated by file/part identity). Retained
+/// valid shards are bounded by a configurable memory/count budget; a rejected addition reports the
+/// limit through <see cref="QrShardAddResult.Error"/> without changing session state.
 /// </summary>
-public sealed class QrShardDecodeSession(string? password = null)
+public sealed class QrShardDecodeSession
 {
+    private const int MaximumDecodeMemoryBudgetMB = 1_000_000;
+    private readonly string? password;
     private readonly ShardDecoder _decoder = new();
     private readonly ParityReassembler _parity = new();
     private readonly ShardAssembler _assembler = new();
     private readonly DecodeScratch _scratch = new();
     private readonly List<DecodedShard> _shards = [];
-    private readonly HashSet<(ulong, int, bool)> _seen = [];
+    private readonly Dictionary<(ulong, int, bool), DecodedShard?> _seen = [];
+    private readonly Dictionary<ulong, ShardHeader> _families = [];
+    private readonly long _retainedByteLimit;
+    private readonly int _retainedCountLimit;
+    private long _retainedBytes;
+    internal const int MaxReportedMissingImages = 256;
+
+    /// <summary>
+    /// Creates an incremental session with the built-in decode-retention budget (4,000 MB).
+    /// </summary>
+    public QrShardDecodeSession(string? password = null)
+        : this(password, AppSettings.BuiltIn.DecodeMemoryBudgetMB)
+    {
+    }
+
+    /// <summary>
+    /// Creates an incremental session whose retained valid shards are limited to
+    /// <paramref name="decodeMemoryBudgetMB"/> decimal megabytes. The same budget also derives a
+    /// metadata-aware unique-shard count ceiling. Values from 1 through 1,000,000 are accepted.
+    /// </summary>
+    public QrShardDecodeSession(string? password, int decodeMemoryBudgetMB)
+    {
+        if (decodeMemoryBudgetMB is < 1 or > MaximumDecodeMemoryBudgetMB)
+            throw new ArgumentOutOfRangeException(nameof(decodeMemoryBudgetMB),
+                $"Decode memory budget must be between 1 and {MaximumDecodeMemoryBudgetMB:N0} MB.");
+        this.password = password;
+        _retainedByteLimit = checked(decodeMemoryBudgetMB * 1_000_000L);
+        _retainedCountLimit =
+            ShardDecoder.SuccessfulShardRetentionBudget.MaximumInputCountForByteLimit(_retainedByteLimit);
+    }
 
     /// <summary>Decodes an image file and adds its shard to the session.</summary>
     public QrShardAddResult AddImage(string path)
@@ -157,29 +206,77 @@ public sealed class QrShardDecodeSession(string? password = null)
         }
     }
 
-    private QrShardAddResult Add(DecodedShard shard)
+    internal QrShardAddResult Add(DecodedShard shard)
     {
-        bool isNew = _seen.Add((shard.Header.FileId, shard.Header.Index, shard.Header.IsParity));
-        if (isNew)
+        bool newFamily = !_families.TryGetValue(shard.Header.FileId, out ShardHeader? family);
+        if (!newFamily && !family!.HasSameFamilyAs(shard.Header))
+            return new QrShardAddResult(false, false,
+                $"Inconsistent shard family for '{ShardHeader.Display(family.FileName)}': repeated file metadata differs.");
+
+        var key = (shard.Header.FileId, shard.Header.Index, shard.Header.IsParity);
+        if (!_seen.TryGetValue(key, out DecodedShard? existing))
+        {
+            long charge = RetentionCharge(shard);
+            if (_seen.Count >= _retainedCountLimit || charge > _retainedByteLimit - _retainedBytes)
+                return new QrShardAddResult(false, false,
+                    $"Decoded shard retention reached the session budget of " +
+                    $"{_retainedByteLimit / 1_000_000:N0} MB or its {_retainedCountLimit:N0}-shard count limit. " +
+                    "Split the capture set or create the session with a larger decodeMemoryBudgetMB.");
+            if (newFamily)
+                _families.Add(shard.Header.FileId, shard.Header);
+            _seen.Add(key, shard);
             _shards.Add(shard);
-        return new QrShardAddResult(true, isNew, null);
+            _retainedBytes += charge;
+            return new QrShardAddResult(true, true, null);
+        }
+        if (existing is not null && existing.Header.PayloadLength == shard.Header.PayloadLength &&
+            existing.Header.PayloadCrc32 == shard.Header.PayloadCrc32 &&
+            existing.Payload.AsSpan().SequenceEqual(shard.Payload))
+            return new QrShardAddResult(true, false, null);
+
+        if (existing is not null)
+        {
+            _shards.Remove(existing);
+            _retainedBytes = checked(_retainedBytes - RetentionCharge(existing) +
+                ConflictRetentionCharge(existing));
+        }
+        _seen[key] = null; // terminal erasure: never let a later alternative become first-wins
+        string kind = shard.Header.IsParity ? "parity" : "data";
+        return new QrShardAddResult(false, false,
+            $"Conflicting CRC-valid {kind} copies for ordinal {shard.Header.Index}; treating that ordinal as missing.");
     }
 
+    private static long RetentionCharge(DecodedShard shard) => checked(
+        2L * ShardHeader.Size(shard.Header.FileName) + 2L * shard.SourceFile.Length +
+        shard.Payload.Length + ShardDecoder.SuccessfulShardRetentionBudget.PerShardOverheadBytes);
+
+    private static long ConflictRetentionCharge(DecodedShard shard) => checked(
+        2L * ShardHeader.Size(shard.Header.FileName) + 2L * shard.SourceFile.Length +
+        ShardDecoder.SuccessfulShardRetentionBudget.PerShardOverheadBytes);
+
     /// <summary>True when every file in the session can be fully reassembled.</summary>
-    public bool IsComplete => _shards.Count > 0 && _parity.IsSetComplete(_shards);
+    public bool IsComplete => _families.Count > 0 &&
+        _shards.Select(s => s.Header.FileId).Distinct().Count() == _families.Count &&
+        _parity.IsSetComplete(_shards);
 
     /// <summary>Per-file progress: what is present, what is missing, and whether parity covers it.</summary>
     public IReadOnlyList<QrShardFileStatus> Status()
     {
         var result = new List<QrShardFileStatus>();
-        foreach (var group in _shards.GroupBy(s => s.Header.FileId))
+        var byFile = _shards.ToLookup(s => s.Header.FileId);
+        foreach ((ulong fileId, ShardHeader first) in _families)
         {
-            var first = group.First().Header;
+            var group = byFile[fileId].ToList();
             var have = group.Where(s => !s.Header.IsParity).Select(s => s.Header.Index).ToHashSet();
-            var missing = Enumerable.Range(0, first.Count).Where(i => !have.Contains(i)).ToList();
+            int missingCount = first.Count - have.Count;
+            var missing = new List<int>(Math.Min(MaxReportedMissingImages, missingCount));
+            for (int i = 0; i < first.Count && missing.Count < MaxReportedMissingImages; i++)
+                if (!have.Contains(i))
+                    missing.Add(i);
             result.Add(new QrShardFileStatus(
                 first.FileName, have.Count, first.Count, group.Count(s => s.Header.IsParity),
-                missing, _parity.IsSetComplete([.. group])));
+                missing, group.Count > 0 && _parity.IsSetComplete(group))
+                { MissingImageCount = missingCount });
         }
         return result;
     }
@@ -187,12 +284,18 @@ public sealed class QrShardDecodeSession(string? password = null)
     /// <summary>
     /// Assembles the collected shards into the restored file(s). Throws
     /// <see cref="QrShardDecodeException"/> if the set is not yet complete (check
-    /// <see cref="IsComplete"/> first) or if verification fails.
+    /// <see cref="IsComplete"/> first) or if verification fails. Output is staged and published
+    /// only after exact-length and SHA-256 verification. A single-file result is atomically moved
+    /// into place; an archive destination must be absent or empty and is never merged, but replacing
+    /// an existing empty directory is not guaranteed to be one atomic operation. Replacing an
+    /// existing file preserves only Unix rwx mode, or the Windows DACL and basic attributes.
     /// </summary>
     public IReadOnlyList<QrShardDecodedFile> Assemble(string? outputPath = null, Action<string>? progress = null)
     {
         try
         {
+            if (!IsComplete)
+                throw new ShardDecodeException("The decode session is incomplete; capture the missing images before assembling.");
             var restored = _assembler.Assemble(_shards, outputPath, progress ?? (_ => { }), password);
             return restored.Select(r => new QrShardDecodedFile(r.FileName, r.OutputPath, r.Length)).ToList();
         }

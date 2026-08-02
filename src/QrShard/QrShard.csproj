@@ -11,6 +11,9 @@
          from serializing on a single workstation-GC heap. -->
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <!-- Run trimming and Native-AOT compatibility analyzers during ordinary builds so a future
+         reflection-only code path fails CI before the release matrix reaches native publishing. -->
+    <IsAotCompatible>true</IsAotCompatible>
     <!-- DATAS adapts heap size to live data — great for long-lived services, measured ~3-9%
          slower for this burst-throughput CLI (A/B on a 100 MB round trip). The library does
          not set this; embedding hosts keep their own GC policy. -->
@@ -22,7 +25,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>qrshard</ToolCommandName>
     <PackageId>QrShard.Tool</PackageId>
-    <Version>1.6.1</Version>
+    <Version>1.6.2</Version>
     <Authors>Lee Farrand</Authors>
     <Description>Transfer any file between machines through the screen: encode to dense QR-style images, capture by screenshot, photo, or recording, and reconstitute bit-for-bit (SHA-256 verified).</Description>
     <PackageProjectUrl>https://github.com/lfarrand/QrShard</PackageProjectUrl>
@@ -41,12 +44,27 @@
 
   <ItemGroup>
     <ProjectReference Include="..\QrShard.Core\QrShard.Core.csproj" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10"
+                      GeneratePathProperty="true" />
     <PackageReference Include="SixLabors.ImageSharp" Version="4.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <Content Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\LICENSE" Link="LICENSE" Pack="false"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md" Pack="false"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\licenses\Apache-2.0.txt" Link="IMAGESHARP-APACHE-2.0.txt" Pack="false"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\licenses\DotNet-MIT.txt" Link="DOTNET-LICENSE.txt" Pack="false"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- The tool package flattens these Microsoft assemblies beside the executable instead of
+         retaining their NuGet dependency metadata. Copy the exact notice from the pinned package;
+         DI, DI.Abstractions and System.IO.Hashing 10.0.10 carry byte-identical notice files. -->
+    <Content Include="$(PkgMicrosoft_Extensions_DependencyInjection)\THIRD-PARTY-NOTICES.TXT"
+             Link="DOTNET-THIRD-PARTY-NOTICES.txt" Pack="false"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

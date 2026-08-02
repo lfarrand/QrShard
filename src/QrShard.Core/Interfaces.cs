@@ -18,6 +18,16 @@ internal interface IShardDecoder
 
     List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log);
 
+    /// <summary>
+    /// Collects into a caller-owned run-wide successful-payload allowance. Long-lived callers
+    /// such as watch mode use this overload so polling batches cannot each reset the cap. It may
+    /// return typed <see cref="DecodedShard.IsTerminalConflict"/> markers for session/watch state;
+    /// callers must consume those and never pass them to reassembly. Test and third-party
+    /// implementations that do not retain across calls keep the ordinary contract.
+    /// </summary>
+    List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log,
+        ShardDecoder.SuccessfulShardRetentionBudget successfulBudget) => CollectShards(imagePaths, log);
+
     DecodedShard DecodeImage(string path, DecodeScratch scratch);
 
     DecodedShard DecodeBitmap(Bitmap bmp, DecodeScratch scratch, string path);
@@ -76,7 +86,7 @@ internal interface IVideoDecoder
 /// <summary>Yields the frames of a recording (video file or animated image) in display order.</summary>
 internal interface IFrameSource
 {
-    IEnumerable<Bitmap> Frames(string path, double fps);
+    IEnumerable<Bitmap> Frames(string path, double fps, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Rectifies a camera photo of a camera-profile shard into an axis-aligned bitmap.</summary>

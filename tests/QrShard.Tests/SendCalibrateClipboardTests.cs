@@ -6,21 +6,30 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace QrShard.Tests;
 
 /// <summary>The send command, camera calibration probes, and clipboard DIB decoding.</summary>
+[Collection(CurrentDirectoryCollection.Name)]
 public class SendCalibrateClipboardTests
 {
     [Fact]
     public void Send_EncodesWithSlideshow_AndRespectsLaunchSuppression()
     {
-        Environment.SetEnvironmentVariable("QRSHARD_NO_LAUNCH", "1");
-        using var tmp = new TempDir();
-        string input = tmp.WriteFile("input.bin", TestData.Random(40_000));
-        string shardDir = tmp.File("shards");
-        var stdout = new StringWriter();
+        string? prior = Environment.GetEnvironmentVariable("QRSHARD_NO_LAUNCH");
+        try
+        {
+            Environment.SetEnvironmentVariable("QRSHARD_NO_LAUNCH", "1");
+            using var tmp = new TempDir();
+            string input = tmp.WriteFile("input.bin", TestData.Random(40_000));
+            string shardDir = tmp.File("shards");
+            var stdout = new StringWriter();
 
-        int code = new Cli().Run(["send", input, "-o", shardDir, "-r", "900"], stdout, stdout);
-        Assert.Equal(0, code);
-        Assert.True(File.Exists(Path.Combine(shardDir, "slideshow.html")));
-        Assert.Contains("suppressed by QRSHARD_NO_LAUNCH", stdout.ToString());
+            int code = new Cli().Run(["send", input, "-o", shardDir, "-r", "900"], stdout, stdout);
+            Assert.Equal(0, code);
+            Assert.True(File.Exists(Path.Combine(shardDir, "slideshow.html")));
+            Assert.Contains("suppressed by QRSHARD_NO_LAUNCH", stdout.ToString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("QRSHARD_NO_LAUNCH", prior);
+        }
     }
 
     [Fact]
@@ -81,6 +90,24 @@ public class SendCalibrateClipboardTests
         BinaryPrimitives.WriteInt32LittleEndian(junk, 40);
         BinaryPrimitives.WriteInt32LittleEndian(junk.AsSpan(4), -5); // negative width
         Assert.Null(ClipboardReader.ParseDib(junk));
+    }
+
+    [Fact]
+    public void CalibrateAnalyze_BoundsCapturePathMaterializationBeforeDiagnosis()
+    {
+        using var tmp = new TempDir();
+        string captures = tmp.Sub("many-captures");
+        int limit = ShardDecoder.SuccessfulShardRetentionBudget.MaximumInputCount(
+            decodeMemoryBudgetMB: 1);
+        for (int i = 0; i <= limit; i++)
+            File.WriteAllBytes(Path.Combine(captures, $"capture-{i:D4}.png"), []);
+        var calibration = new CalibrationRunner(new ShardEncoder(), new ShardDecoder(),
+            decodeMemoryBudgetMB: 1);
+
+        var ex = Assert.Throws<ShardResourceLimitException>(() =>
+            calibration.Analyze(captures, TextWriter.Null));
+
+        Assert.Contains("bounded image/path metadata allowance", ex.Message);
     }
 
     /// <summary>Packs pixels as a CF_DIB: 40-byte BITMAPINFOHEADER + 24-bit BGR rows, 4-byte padded.</summary>

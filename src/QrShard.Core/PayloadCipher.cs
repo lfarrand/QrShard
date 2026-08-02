@@ -18,6 +18,15 @@ namespace QrShard;
 /// </summary>
 internal sealed class PayloadCipher
 {
+    private readonly Action<byte[]>? keyClearedObserver;
+
+    public PayloadCipher()
+    {
+    }
+
+    /// <summary>Test seam invoked only after the derived-key array has been cleared.</summary>
+    internal PayloadCipher(Action<byte[]> keyClearedObserver) => this.keyClearedObserver = keyClearedObserver;
+
     private const int SaltSize = 16;
     private const int NonceSize = 12;
     private const int TagSize = 16;
@@ -31,7 +40,22 @@ internal sealed class PayloadCipher
     /// plaintext — reading it straight from its source, so the payload only ever exists once —
     /// and then seals it where it lies.
     /// </summary>
-    public static byte[] AllocateBlob(long bodyLength) => new byte[Overhead + bodyLength];
+    public static byte[] AllocateBlob(long bodyLength)
+    {
+        long blobLength;
+        try
+        {
+            blobLength = checked(bodyLength + Overhead);
+        }
+        catch (OverflowException)
+        {
+            throw new InvalidOperationException("The encrypted payload is too large to materialize safely.");
+        }
+        if (bodyLength < 0 || blobLength > Array.MaxLength)
+            throw new InvalidOperationException(
+                "Password encryption requires one contiguous managed payload; split this input into smaller transfers.");
+        return new byte[checked((int)blobLength)];
+    }
 
     /// <summary>The payload region of a blob: plaintext before sealing, ciphertext after.</summary>
     public static Span<byte> Body(byte[] blob) => blob.AsSpan(Overhead);
@@ -45,23 +69,53 @@ internal sealed class PayloadCipher
     /// </summary>
     public void SealInPlace(byte[] blob, string password, ReadOnlySpan<byte> aad = default)
     {
-        Span<byte> salt = blob.AsSpan(0, SaltSize);
-        Span<byte> nonce = blob.AsSpan(SaltSize, NonceSize);
-        Span<byte> tag = blob.AsSpan(SaltSize + NonceSize, TagSize);
-        Span<byte> body = blob.AsSpan(Overhead);
+        bool sealedSuccessfully = false;
+        try
+        {
+            Span<byte> salt = blob.AsSpan(0, SaltSize);
+            Span<byte> nonce = blob.AsSpan(SaltSize, NonceSize);
+            Span<byte> tag = blob.AsSpan(SaltSize + NonceSize, TagSize);
+            Span<byte> body = blob.AsSpan(Overhead);
 
-        RandomNumberGenerator.Fill(salt);
-        RandomNumberGenerator.Fill(nonce);
-        using var aes = new AesGcm(DeriveKey(password, salt), TagSize);
-        aes.Encrypt(nonce, body, body, tag, aad);
+            RandomNumberGenerator.Fill(salt);
+            RandomNumberGenerator.Fill(nonce);
+            byte[] key = DeriveKey(password, salt);
+            try
+            {
+                using var aes = new AesGcm(key, TagSize);
+                aes.Encrypt(nonce, body, body, tag, aad);
+                sealedSuccessfully = true;
+            }
+            finally
+            {
+                // AesGcm does not own or clear the caller-provided key array. Minimize how long the
+                // PBKDF2 result remains in managed memory even on authentication/backend failures.
+                ClearDerivedKey(key);
+            }
+        }
+        finally
+        {
+            if (!sealedSuccessfully)
+                CryptographicOperations.ZeroMemory(blob);
+        }
     }
 
     public byte[] Encrypt(byte[] plaintext, string password, ReadOnlySpan<byte> aad = default)
     {
         byte[] blob = AllocateBlob(plaintext.Length);
-        plaintext.CopyTo(Body(blob));
-        SealInPlace(blob, password, aad);
-        return blob;
+        bool sealedSuccessfully = false;
+        try
+        {
+            plaintext.CopyTo(Body(blob));
+            SealInPlace(blob, password, aad);
+            sealedSuccessfully = true;
+            return blob;
+        }
+        finally
+        {
+            if (!sealedSuccessfully)
+                CryptographicOperations.ZeroMemory(blob);
+        }
     }
 
     /// <summary>
@@ -84,14 +138,22 @@ internal sealed class PayloadCipher
         ReadOnlySpan<byte> tag = blob.AsSpan(SaltSize + NonceSize, TagSize);
         Span<byte> body = blob.AsSpan(Overhead);
 
-        using var aes = new AesGcm(DeriveKey(password, salt), TagSize);
+        byte[] key = DeriveKey(password, salt);
         try
         {
-            aes.Decrypt(nonce, body, tag, body, aad);
+            using var aes = new AesGcm(key, TagSize);
+            try
+            {
+                aes.Decrypt(nonce, body, tag, body, aad);
+            }
+            catch (AuthenticationTagMismatchException)
+            {
+                throw new ShardDecodeException($"'{ShardHeader.Display(fileName)}': wrong password, corrupted payload, or a tampered shard header.");
+            }
         }
-        catch (AuthenticationTagMismatchException)
+        finally
         {
-            throw new ShardDecodeException($"'{ShardHeader.Display(fileName)}': wrong password, corrupted payload, or a tampered shard header.");
+            ClearDerivedKey(key);
         }
         return new ArraySegment<byte>(blob, Overhead, blob.Length - Overhead);
     }
@@ -112,6 +174,38 @@ internal sealed class PayloadCipher
         return aad;
     }
 
+    /// <summary>
+    /// Current AAD suite. In addition to the v1 identity fields it domain-separates the protocol
+    /// and binds every family-wide transformation flag. In particular an attacker cannot toggle
+    /// archive extraction, compression, or FEC semantics while merely repairing the public header
+    /// CRC. The parity bit is per-image and is therefore normalized out.
+    /// </summary>
+    public static byte[] BuildAadV2(long originalLength, ReadOnlySpan<byte> sha256, string fileName,
+        byte flags)
+    {
+        ReadOnlySpan<byte> domain = "QrShard-AAD-v2:AES-256-GCM:PBKDF2-SHA256-600000\0"u8;
+        byte[] name = Encoding.UTF8.GetBytes(fileName);
+        var aad = new byte[domain.Length + 1 + 8 + 32 + 4 + name.Length];
+        int offset = 0;
+        domain.CopyTo(aad);
+        offset += domain.Length;
+        aad[offset++] = (byte)(flags & ~ShardHeader.FlagParity);
+        BinaryPrimitives.WriteInt64LittleEndian(aad.AsSpan(offset), originalLength);
+        offset += 8;
+        sha256[..32].CopyTo(aad.AsSpan(offset));
+        offset += 32;
+        BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan(offset), name.Length);
+        offset += 4;
+        name.CopyTo(aad.AsSpan(offset));
+        return aad;
+    }
+
     private static byte[] DeriveKey(string password, ReadOnlySpan<byte> salt) =>
         Rfc2898DeriveBytes.Pbkdf2(password, salt, Pbkdf2Iterations, HashAlgorithmName.SHA256, KeySize);
+
+    private void ClearDerivedKey(byte[] key)
+    {
+        CryptographicOperations.ZeroMemory(key);
+        keyClearedObserver?.Invoke(key);
+    }
 }

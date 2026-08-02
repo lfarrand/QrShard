@@ -3,7 +3,15 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace QrShard;
 
 /// <summary>One successfully decoded shard image: its header, verified payload, and provenance.</summary>
-internal sealed record DecodedShard(ShardHeader Header, byte[] Payload, string SourceFile, int EccParity, int CorrectedBytes);
+internal sealed record DecodedShard(ShardHeader Header, byte[] Payload, string SourceFile, int EccParity, int CorrectedBytes)
+{
+    /// <summary>
+    /// Typed compact marker emitted only by the shared-budget collection overload when two
+    /// CRC-valid candidates disagree. Its empty payload is not a decoded shard and must never be
+    /// passed to reassembly; session/watch orchestration persists/applies the terminal erasure.
+    /// </summary>
+    internal bool IsTerminalConflict { get; init; }
+}
 
 /// <summary>
 /// The measured calibration palettes: the better strip (classic path) plus both strips and
@@ -22,7 +30,42 @@ internal sealed record CameraPose(OrientedQuad Quad);
 internal sealed record RestoredFile(string FileName, string OutputPath, long Length);
 
 /// <summary>Any failure while decoding a capture; the message is user-facing and actionable.</summary>
-internal sealed class ShardDecodeException(string message) : Exception(message);
+internal class ShardDecodeException(string message) : Exception(message);
+
+/// <summary>
+/// A run-level decode resource ceiling was reached. Frame/video loops deliberately isolate a bad
+/// individual capture, but this subtype must escape those nets: retrying more attacker-controlled
+/// frames cannot restore the exhausted run-wide allowance.
+/// </summary>
+internal sealed class ShardResourceLimitException(string message) : ShardDecodeException(message);
+
+/// <summary>A CRC-valid candidate disagreed with retained file identity/recovery metadata.</summary>
+internal sealed class ShardFamilyMismatchException(string message) : ShardDecodeException(message);
+
+/// <summary>An expected non-error outcome suppressed from a canonical shard batch.</summary>
+internal sealed class ShardSuppressedException : ShardDecodeException
+{
+    internal ShardSuppressedException() : base("Duplicate or terminal-conflict shard suppressed.") { }
+}
+
+internal enum SuccessfulShardAdmissionKind
+{
+    Added,
+    Duplicate,
+    Conflict,
+    TerminalConflict,
+    InconsistentFamily,
+    Refused,
+}
+
+internal readonly record struct SuccessfulShardAdmission(
+    SuccessfulShardAdmissionKind Kind, byte[]? Payload);
+
+/// <summary>A result location which the retention budget can atomically revoke on conflict.</summary>
+internal sealed class SuccessfulShardSlot
+{
+    internal DecodedShard? Shard { get; set; }
+}
 
 /// <summary>
 /// Diagnostic capture of a single-image decode attempt: the located layout, per-codeword ECC
@@ -66,4 +109,26 @@ internal sealed class DecodeDiagnostics
     /// for arrays nobody then looked at.
     /// </summary>
     public bool WantDetail { get; init; }
+
+    /// <summary>
+    /// Optional admission hook for retaining a failed capture's cell stream. Folder decoding
+    /// supplies a run-wide, memory-budgeted implementation; single-image diagnostics leave it
+    /// null because they do not use fusion salvage. The hook runs before the copy is allocated.
+    /// </summary>
+    internal Func<Layout, int, bool>? TryReserveSalvage { get; init; }
+
+    /// <summary>Bytes admitted by <see cref="TryReserveSalvage"/> for this diagnostic.</summary>
+    internal int SalvageReservedBytes { get; set; }
+
+    /// <summary>
+    /// Optional run-wide admission hook invoked after header/payload CRC validation but before a
+    /// successful payload copy is retained by folder decoding.
+    /// </summary>
+    internal ShardDecoder.SuccessfulShardRetentionBudget? SuccessfulShardBudget { get; init; }
+
+    /// <summary>Revocable result location paired with <see cref="SuccessfulShardBudget"/>.</summary>
+    internal SuccessfulShardSlot? SuccessfulShardSlot { get; init; }
+
+    /// <summary>Set when a valid shard was refused solely by the successful-retention budget.</summary>
+    internal bool SuccessfulShardAdmissionRefused { get; set; }
 }

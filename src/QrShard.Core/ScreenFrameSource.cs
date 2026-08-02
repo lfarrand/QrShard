@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace QrShard;
 
 /// <summary>
@@ -6,35 +8,51 @@ namespace QrShard;
 /// most notably inside an RDP/VM window, which transfers files out of a locked-down remote
 /// desktop with no tooling, clipboard, or drive mapping on the remote side at all.
 /// </summary>
-internal sealed class ScreenFrameSource((int X, int Y, int W, int H)? region) : IFrameSource
+internal sealed class ScreenFrameSource((int X, int Y, int W, int H)? region, int decodeMemoryBudgetMB,
+    string? ffmpegPath = null) : IFrameSource
 {
-    public IEnumerable<Bitmap> Frames(string path, double fps) // path is the display label only
+    public ScreenFrameSource((int X, int Y, int W, int H)? region)
+        : this(region, AppSettings.BuiltIn.DecodeMemoryBudgetMB, AppSettings.BuiltIn.FfmpegPath)
+    {
+    }
+
+    public IEnumerable<Bitmap> Frames(string path, double fps,
+        CancellationToken cancellationToken = default) // path is the display label only
     {
         var (input, filter) = BuildScreenArgs(region);
-        return RecordingFrameSource.FfmpegPipe(input, fps, filter);
+        return RecordingFrameSource.FfmpegPipe(input, fps, filter, decodeMemoryBudgetMB,
+            cancellationToken, ffmpegPath);
     }
 
     /// <summary>Platform screen-grab input args, plus an optional filter for region cropping.</summary>
-    internal static (string InputArgs, string? Filter) BuildScreenArgs((int X, int Y, int W, int H)? region)
+    internal static (string[] InputArgs, string? Filter) BuildScreenArgs((int X, int Y, int W, int H)? region)
     {
         if (OperatingSystem.IsWindows())
         {
-            string size = region is (var x, var y, var w, var h)
-                ? $"-offset_x {x} -offset_y {y} -video_size {w}x{h} "
-                : "";
-            return ($"-f gdigrab {size}-i desktop", null);
+            var args = new List<string> { "-f", "gdigrab" };
+            if (region is (var x, var y, var w, var h))
+            {
+                args.AddRange(["-offset_x", x.ToString(CultureInfo.InvariantCulture),
+                    "-offset_y", y.ToString(CultureInfo.InvariantCulture),
+                    "-video_size", FormattableString.Invariant($"{w}x{h}")]);
+            }
+            args.AddRange(["-i", "desktop"]);
+            return ([.. args], null);
         }
         if (OperatingSystem.IsMacOS())
         {
             // avfoundation has no offset/size input options; crop in the filter graph instead.
-            string? crop = region is (var x, var y, var w, var h) ? $"crop={w}:{h}:{x}:{y}" : null;
-            return ("-f avfoundation -i \"Capture screen 0\"", crop);
+            string? crop = region is (var x, var y, var w, var h)
+                ? FormattableString.Invariant($"crop={w}:{h}:{x}:{y}")
+                : null;
+            return (["-f", "avfoundation", "-i", "Capture screen 0"], crop);
         }
 
         string display = Environment.GetEnvironmentVariable("DISPLAY") ?? ":0";
         if (region is (var rx, var ry, var rw, var rh))
-            return ($"-f x11grab -video_size {rw}x{rh} -i {display}+{rx},{ry}", null);
-        return ($"-f x11grab -i {display}", null);
+            return (["-f", "x11grab", "-video_size", FormattableString.Invariant($"{rw}x{rh}"),
+                "-i", FormattableString.Invariant($"{display}+{rx},{ry}")], null);
+        return (["-f", "x11grab", "-i", display], null);
     }
 
     /// <summary>Parses "x,y,w,h"; null input means the whole screen.</summary>
@@ -43,8 +61,12 @@ internal sealed class ScreenFrameSource((int X, int Y, int W, int H)? region) : 
         if (value is null)
             return null;
         string[] parts = value.Split(',');
-        if (parts.Length != 4 || !int.TryParse(parts[0], out int x) || !int.TryParse(parts[1], out int y)
-            || !int.TryParse(parts[2], out int w) || !int.TryParse(parts[3], out int h) || w <= 0 || h <= 0)
+        if (parts.Length != 4
+            || !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int x)
+            || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int y)
+            || !int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int w)
+            || !int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out int h)
+            || w <= 0 || h <= 0)
             throw new ArgumentException("--region must be x,y,w,h (e.g. 100,80,1920,1080).");
         return (x, y, w, h);
     }

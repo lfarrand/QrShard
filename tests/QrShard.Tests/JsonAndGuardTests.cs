@@ -52,7 +52,7 @@ public class JsonAndGuardTests
     }
 
     [Fact]
-    public void UnknownHeaderFlag_FailsWithUpdateMessage()
+    public void AuthMetaV2WithoutItsRequiredFlags_IsRejectedAsCorrupt()
     {
         using var tmp = new TempDir();
         var layout = Layout.Create(900, 900, 3, 4, 16);
@@ -66,7 +66,7 @@ public class JsonAndGuardTests
             PayloadCrc32 = new Crc().Crc32(payload),
             TotalLength = payload.Length,
             OriginalLength = payload.Length,
-            Flags = 0x80, // a flag bit this build does not define (0x40 is now FlagAuthMeta)
+            Flags = ShardHeader.FlagAuthMetaV2, // invalid without both encryption and AuthMeta v1
             Sha256 = TestData.Sha256(payload),
             FileName = "future.bin",
         };
@@ -81,6 +81,6 @@ public class JsonAndGuardTests
             path, new RenderScratch(layout), renderer.CreateWriter("png", layout, AppSettings.Current));
 
         var ex = Assert.Throws<ShardDecodeException>(() => new ShardDecoder().DecodeImage(path));
-        Assert.Contains("newer QrShard", ex.Message);
+        Assert.Contains("header is corrupt", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 }

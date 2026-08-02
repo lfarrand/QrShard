@@ -233,8 +233,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
     /// are retried as ERASURES when errors-only decoding fails: RS corrects 2x as many known
     /// positions as unknown ones, so borderline captures gain real capacity.
     /// </param>
+    /// <param name="stopAfterFirstFailure">
+    /// Returns as soon as one codeword is unrecoverable. Fusion hypotheses use this because a
+    /// single failed codeword invalidates the whole candidate; normal decode leaves it false so
+    /// diagnostics and correction totals cover every codeword.
+    /// </param>
     public bool TryRecoverInto(byte[] buffer, int parity, int cwCount, byte[] dest, out int correctedBytes,
-        int[]? codewordErrors = null, bool[]? suspectBytes = null, byte[]? secondChoice = null)
+        int[]? codewordErrors = null, bool[]? suspectBytes = null, byte[]? secondChoice = null,
+        bool stopAfterFirstFailure = false)
     {
         int dataLen = DataLength(parity);
         if (dest.Length < cwCount * dataLen)
@@ -273,7 +279,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     if (dirty.GetElement(lane) == 0)
                         CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
                     else
+                    {
                         DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
+                        if (stopAfterFirstFailure && failures > 0)
+                        {
+                            correctedBytes = corrected;
+                            return false;
+                        }
+                    }
                 }
             }
         }
@@ -303,7 +316,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     if (dirty.GetElement(lane) == 0)
                         CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
                     else
+                    {
                         DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
+                        if (stopAfterFirstFailure && failures > 0)
+                        {
+                            correctedBytes = corrected;
+                            return false;
+                        }
+                    }
                 }
             }
         }
@@ -339,7 +359,14 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     if (dirty.GetElement(lane) == 0)
                         CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
                     else
+                    {
                         DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
+                        if (stopAfterFirstFailure && failures > 0)
+                        {
+                            correctedBytes = corrected;
+                            return false;
+                        }
+                    }
                 }
             }
         }
@@ -376,13 +403,27 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
                     if (dirty.GetElement(lane) == 0)
                         CopyCleanCodeword(buffer, cwCount, j + lane, dataLen, dest);
                     else
+                    {
                         DecodeCodeword(buffer, parity, cwCount, j + lane, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
+                        if (stopAfterFirstFailure && failures > 0)
+                        {
+                            correctedBytes = corrected;
+                            return false;
+                        }
+                    }
                 }
             }
         }
 
         for (; j < cwCount; j++)
+        {
             DecodeCodeword(buffer, parity, cwCount, j, dataLen, dest, cwScratch, ref corrected, ref failures, codewordErrors, suspectBytes, secondChoice);
+            if (stopAfterFirstFailure && failures > 0)
+            {
+                correctedBytes = corrected;
+                return false;
+            }
+        }
 
         correctedBytes = corrected;
         return failures == 0;
@@ -445,19 +486,19 @@ internal sealed class Fec(Gf256 gf, ReedSolomon reedSolomon)
 
     private static byte MajorityByte(IReadOnlyList<byte[]> buffers, int index)
     {
-        // Tiny N (a handful of captures): count agreements pairwise.
-        byte best = buffers[0][index];
-        int bestVotes = 1;
-        for (int a = 0; a < buffers.Count; a++)
+        // Capture count is bounded by PhotoFusion, but a fixed byte histogram is both simpler and
+        // linear in that count instead of comparing every capture with every other capture.
+        Span<byte> votes = stackalloc byte[256];
+        votes.Clear();
+        byte best = 0;
+        byte bestVotes = 0;
+        for (int i = 0; i < buffers.Count; i++)
         {
-            byte candidate = buffers[a][index];
-            int votes = 0;
-            for (int b = 0; b < buffers.Count; b++)
-                if (buffers[b][index] == candidate)
-                    votes++;
-            if (votes > bestVotes)
+            byte candidate = buffers[i][index];
+            byte count = ++votes[candidate];
+            if (count > bestVotes)
             {
-                bestVotes = votes;
+                bestVotes = count;
                 best = candidate;
             }
         }

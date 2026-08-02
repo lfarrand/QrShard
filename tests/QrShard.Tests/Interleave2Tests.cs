@@ -39,6 +39,57 @@ public class Interleave2Tests
     }
 
     [Fact]
+    public async Task LargePermutation_IsSingleFlightAndOnlyWeaklyRetained()
+    {
+        // Just above the 32 MiB strong-cache ceiling. Before the single-flight gate, simultaneous
+        // encode workers each built and retained their own ~34 MiB int array.
+        const int n = 8_400_000;
+        var interleaver = new Interleaver2();
+        using var start = new ManualResetEventSlim(false);
+        Task<int[]>[] callers = Enumerable.Range(0, 8).Select(_ => Task.Run(() =>
+        {
+            start.Wait();
+            return interleaver.Permutation(n);
+        })).ToArray();
+
+        start.Set();
+        int[][] results = await Task.WhenAll(callers);
+
+        Assert.All(results, permutation => Assert.Same(results[0], permutation));
+        Assert.Equal(1, interleaver.PermutationBuilds);
+        Assert.Equal(0, interleaver.CachedBytes); // large result is a weak hand-off, not a process-lifetime pin
+        Assert.Equal(n, results[0].Length);
+    }
+
+    [Fact]
+    public void GatherStreams_ReusesOnePermutationForAllConfidenceInputs()
+    {
+        const int n = 10_000;
+        var interleaver = new Interleaver2();
+        byte[] classic = TestData.Random(n, 41);
+        var scattered = new byte[n];
+        interleaver.Scatter(classic, scattered, n);
+        int[] permutation = interleaver.Permutation(n);
+        var scatteredFlags = new bool[n];
+        for (int i = 0; i < n; i++)
+            scatteredFlags[permutation[i]] = (i & 1) == 0;
+        byte[] scatteredSecond = scattered.Select(b => (byte)(b ^ 0x5a)).ToArray();
+        var cells = new byte[n];
+        var flags = new bool[n];
+        var second = new byte[n];
+
+        interleaver.GatherStreams(scattered, cells, scatteredFlags, flags,
+            scatteredSecond, second, n);
+
+        Assert.Equal(classic, cells);
+        for (int i = 0; i < n; i++)
+        {
+            Assert.Equal((i & 1) == 0, flags[i]);
+            Assert.Equal((byte)(classic[i] ^ 0x5a), second[i]);
+        }
+    }
+
+    [Fact]
     public void Permutation_DestroysArithmeticConcentration()
     {
         // The failure mode v2 exists for: bytes damaged at a FIXED STRIDE (a vertical blob

@@ -1,4 +1,8 @@
 using QrShard;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Principal;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
@@ -73,9 +77,119 @@ public class SessionAndDiagnosticsTests
     }
 
     [Fact]
+    public void SessionSave_TightensExistingUnixModeToOwnerOnly()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        using var tmp = new TempDir();
+        string session = tmp.File("permissive.qrsession");
+        new SessionStore().Save(session, Array.Empty<DecodedShard>());
+        File.SetUnixFileMode(session, ShardAssembler.PortableUnixFileModeMask |
+            UnixFileMode.SetUser | UnixFileMode.SetGroup | UnixFileMode.StickyBit);
+
+        new SessionStore().Save(session, Array.Empty<DecodedShard>());
+
+        UnixFileMode mode = File.GetUnixFileMode(session);
+        Assert.Equal((UnixFileMode)0, mode & ~(UnixFileMode.UserRead | UnixFileMode.UserWrite));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void SessionSave_TightensExistingWindowsDaclToCurrentUser()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        using var tmp = new TempDir();
+        string session = tmp.File("permissive.qrsession");
+        new SessionStore().Save(session, Array.Empty<DecodedShard>());
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        SecurityIdentifier current = identity.User!;
+        var permissive = new FileSecurity();
+        permissive.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        permissive.AddAccessRule(new FileSystemAccessRule(current, FileSystemRights.FullControl,
+            AccessControlType.Allow));
+        permissive.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.WorldSid, domainSid: null),
+            FileSystemRights.Read, AccessControlType.Allow));
+        new FileInfo(session).SetAccessControl(permissive);
+
+        new SessionStore().Save(session, Array.Empty<DecodedShard>());
+
+        FileSecurity acl = new FileInfo(session)
+            .GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+        Assert.True(acl.AreAccessRulesProtected);
+        Assert.Equal(current, acl.GetOwner(typeof(SecurityIdentifier)));
+        var rules = acl.GetAccessRules(includeExplicit: true, includeInherited: true,
+                targetType: typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToList();
+        Assert.NotEmpty(rules);
+        Assert.All(rules, rule =>
+        {
+            Assert.False(rule.IsInherited);
+            Assert.Equal(current, rule.IdentityReference);
+            Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+        });
+    }
+
+    [Fact]
     public void SessionLoad_MissingFile_ReturnsEmpty()
     {
         Assert.Empty(new SessionStore().Load(Path.Combine(Path.GetTempPath(), "does-not-exist.qrsession")));
+    }
+
+    [Fact]
+    public void SessionLoad_DoesNotAllocateADeclaredPayloadThatIsNotInTheFile()
+    {
+        using var tmp = new TempDir();
+        string path = tmp.File("short.qrsession");
+        using (var fs = File.Create(path))
+        using (var writer = new BinaryWriter(fs))
+        {
+            writer.Write("QRSS"u8);
+            writer.Write((byte)1);
+            writer.Write(1);           // entry count
+            writer.Write(0);           // header length
+            writer.Write(32_000_000);  // absent payload: old loader allocated this before checking EOF
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.Throws<InvalidDataException>(() => new SessionStore().Load(path));
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(allocated < 1_000_000, $"malformed session allocated {allocated:N0} bytes");
+    }
+
+    [Fact]
+    public void SessionLoad_RejectsHeadersWithUnknownFlags()
+    {
+        using var tmp = new TempDir();
+        var header = new ShardHeader
+        {
+            FileId = 3,
+            Index = 0,
+            Count = 1,
+            PayloadLength = 0,
+            PayloadCrc32 = 0,
+            TotalLength = 0,
+            OriginalLength = 0,
+            Flags = 0x80,
+            Sha256 = SHA256.HashData([]),
+            FileName = "future.bin",
+        };
+        byte[] headerBytes = header.Serialize();
+        string path = tmp.File("future.qrsession");
+        using (var fs = File.Create(path))
+        using (var writer = new BinaryWriter(fs))
+        {
+            writer.Write("QRSS"u8);
+            writer.Write((byte)1);
+            writer.Write(1);
+            writer.Write(headerBytes.Length);
+            writer.Write(headerBytes);
+            writer.Write(0);
+        }
+
+        Assert.Throws<InvalidDataException>(() => new SessionStore().Load(path));
     }
 
     [Fact]

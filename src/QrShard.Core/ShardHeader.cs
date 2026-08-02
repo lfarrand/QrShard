@@ -1,4 +1,5 @@
 using System.Text;
+using System.Globalization;
 
 namespace QrShard;
 
@@ -15,6 +16,10 @@ namespace QrShard;
 /// </summary>
 internal sealed class ShardHeader
 {
+    private static readonly UTF8Encoding StrictUtf8 = new(
+        encoderShouldEmitUTF8Identifier: false,
+        throwOnInvalidBytes: true);
+
     public static readonly byte[] Magic = "QRS1"u8.ToArray();
     public const byte FlagCompressed = 0x01;  // payload is compressed (deflate unless FlagBrotli)
     public const byte FlagParity = 0x02;      // this image is cross-shard parity, not data
@@ -23,15 +28,16 @@ internal sealed class ShardHeader
     public const byte FlagArchive = 0x10;     // payload is a tar archive of a folder
     public const byte FlagFountain = 0x20;    // parity images are random-linear fountain frames
     public const byte FlagAuthMeta = 0x40;    // encryption binds the identity header as AES-GCM AAD
-    public const byte KnownFlags = 0x7F;      // every flag this build understands
+    public const byte FlagAuthMetaV2 = 0x80;  // AAD also binds transformation/archive semantics
+    public const byte KnownFlags = 0xFF;      // every flag this build understands
     private const byte HeaderVersion = 2;
 
     // Sanity ceilings for a crafted/corrupt header. The real encoder never approaches these:
     // even the sparsest camera profile packs >1 KB per image, so the 1.5 GB file cap yields far
     // fewer than MaxImages data images. They exist only so the geometry fields cannot drive an
     // integer overflow or an absurd allocation in the reassembler (see the Deserialize guards).
-    private const int MaxImages = 5_000_000;             // ceiling on Count
-    private const long MaxParityOrdinals = 100_000_000;  // ceiling on stripes*StripeParity (fountain 10x headroom)
+    internal const int MaxImages = 5_000_000;             // ceiling on Count
+    internal const long MaxParityOrdinals = 100_000_000;  // ceiling on stripes*StripeParity (fountain 10x headroom)
 
     public required ulong FileId { get; init; }
     public required int Index { get; init; }
@@ -47,6 +53,23 @@ internal sealed class ShardHeader
     public int StripeParity { get; init; }               // parity images per stripe
 
     public bool IsParity => (Flags & FlagParity) != 0;
+
+    /// <summary>
+    /// Whether two shards repeat the same file identity and recovery geometry. Every shard in a
+    /// family carries these fields; only the parity marker, ordinal, payload length and CRC are
+    /// expected to differ. Checking them prevents one colliding/poisoned shard from selecting a
+    /// different transform, output name, hash, length, or FEC layout for otherwise valid chunks.
+    /// </summary>
+    internal bool HasSameFamilyAs(ShardHeader other) =>
+        FileId == other.FileId &&
+        Count == other.Count &&
+        TotalLength == other.TotalLength &&
+        OriginalLength == other.OriginalLength &&
+        ((Flags ^ other.Flags) & ~FlagParity) == 0 &&
+        Sha256.AsSpan().SequenceEqual(other.Sha256) &&
+        string.Equals(FileName, other.FileName, StringComparison.Ordinal) &&
+        StripeData == other.StripeData &&
+        StripeParity == other.StripeParity;
 
     public static int Size(string fileName) => 92 + Encoding.UTF8.GetByteCount(fileName);
 
@@ -68,17 +91,43 @@ internal sealed class ShardHeader
     /// result is length-capped so a 4 KB name cannot flood the output either.
     /// </summary>
     public static string Display(string fileName)
+        => TerminalText(fileName, MaxDisplayLength);
+
+    /// <summary>Bounds text and neutralizes Unicode characters with terminal direction/layout
+    /// semantics. Valid supplementary characters remain intact; isolated surrogate code units do
+    /// not. JSON uses its encoder instead and must not pass through this lossy display helper.</summary>
+    internal static string TerminalText(string text, int maxLength)
     {
-        int keep = Math.Min(fileName.Length, MaxDisplayLength);
+        int keep = Math.Min(text.Length, maxLength);
         var sb = new StringBuilder(keep + 3);
         for (int i = 0; i < keep; i++)
         {
-            char c = fileName[i];
-            // C0, DEL and the C1 range: ESC drives ANSI sequences, CR rewrites the current line,
-            // and the C1 block is an alternate introducer for the same sequences.
-            sb.Append(c < ' ' || c == '\x7f' || (c >= '\x80' && c <= '\x9f') ? '?' : c);
+            char c = text[i];
+            UnicodeCategory category;
+            bool pair = char.IsHighSurrogate(c) && i + 1 < keep && char.IsLowSurrogate(text[i + 1]);
+            if (pair)
+                category = Rune.GetUnicodeCategory(new Rune(c, text[i + 1]));
+            else if (char.IsSurrogate(c))
+                category = UnicodeCategory.Surrogate;
+            else
+                category = char.GetUnicodeCategory(c);
+
+            // Format includes bidi embeddings/overrides/isolates and direction marks. Line and
+            // paragraph separators are terminal line controls even though they are outside C0/C1.
+            bool unsafeCategory = category is UnicodeCategory.Control or UnicodeCategory.Format or
+                UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator or
+                UnicodeCategory.Surrogate;
+            if (unsafeCategory)
+                sb.Append('?');
+            else if (pair)
+            {
+                sb.Append(c);
+                sb.Append(text[++i]);
+            }
+            else
+                sb.Append(c);
         }
-        if (fileName.Length > keep)
+        if (text.Length > keep)
             sb.Append("...");
         return sb.ToString();
     }
@@ -125,6 +174,19 @@ internal sealed class ShardHeader
             if (version != HeaderVersion)
                 return null;
             byte flags = r.ReadByte();
+            // Enforce the normative flag mask here, not only in the bitmap decoder. Session files
+            // and multi-capture fusion deserialize headers directly and must not silently accept a
+            // future feature that the assembler will ignore.
+            if ((flags & ~KnownFlags) != 0)
+                return null;
+            // AuthMeta changes AES-GCM verification and is meaningless without encryption. The
+            // wire specification requires this combination to be refused rather than silently
+            // treating a malformed/forged flag as harmless decoration.
+            if ((flags & FlagAuthMeta) != 0 && (flags & FlagEncrypted) == 0)
+                return null;
+            if ((flags & FlagAuthMetaV2) != 0 &&
+                (flags & (FlagEncrypted | FlagAuthMeta)) != (FlagEncrypted | FlagAuthMeta))
+                return null;
             ulong fileId = r.ReadUInt64();
             int index = r.ReadInt32();
             int count = r.ReadInt32();
@@ -138,7 +200,10 @@ internal sealed class ShardHeader
             int nameLen = r.ReadUInt16();
             if (nameLen > 4096 || ms.Position + nameLen + 4 > stream.Length)
                 return null;
-            string name = Encoding.UTF8.GetString(r.ReadBytes(nameLen));
+            // The filename bytes are also part of encrypted shards' AAD. Replacement-fallback
+            // decoding is not canonical: distinct malformed byte strings can decode to U+FFFD
+            // and then authenticate after BuildAad re-encodes a different byte sequence.
+            string name = StrictUtf8.GetString(r.ReadBytes(nameLen));
             int bodyLen = (int)ms.Position;
             uint headerCrc = r.ReadUInt32();
             if (headerCrc != new Crc().Crc32(stream.AsSpan(0, bodyLen)))
@@ -152,6 +217,8 @@ internal sealed class ShardHeader
             // comparison and slip past into the slice; it is rejected cleanly instead.
             if (count < 1 || count > MaxImages || payloadLength < 0 || stripeData < 0 || stripeParity < 0)
                 return null;
+            if ((stripeData == 0) != (stripeParity == 0))
+                return null; // recovery geometry is either wholly absent or wholly specified
             if (index < 0)
                 return null;
             if (!isParity && index >= count)
@@ -183,8 +250,18 @@ internal sealed class ShardHeader
                 // image — data ones included — then failed with "Shard header is corrupt.
                 // Recapture this image.", pointing the user at their camera instead of the flag.
                 // The advertised range goes to 1000.
-                if ((flags & FlagFountain) == 0 && stripeData + (long)stripeParity > CrossShardFec.MaxShardsPerStripe)
+                if ((flags & FlagFountain) != 0)
+                {
+                    // Fountain rank/inversion is quadratic/cubic in stripe width. The reference
+                    // profile fixes that width at no more than min(count, 64); accepting a crafted
+                    // 255-wide header here bypassed the planner and multiplied decoder work.
+                    if (stripeData > Math.Min(count, FountainFec.MaxStripeData))
+                        return null;
+                }
+                else if (stripeData + (long)stripeParity > CrossShardFec.MaxShardsPerStripe)
+                {
                     return null;
+                }
                 long stripes = ((long)count + stripeData - 1) / stripeData;
                 if (stripes * (long)stripeParity > MaxParityOrdinals)
                     return null;
@@ -207,7 +284,7 @@ internal sealed class ShardHeader
                 StripeParity = stripeParity,
             };
         }
-        catch (EndOfStreamException)
+        catch (Exception ex) when (ex is EndOfStreamException or DecoderFallbackException)
         {
             return null;
         }

@@ -1,0 +1,14 @@
+name: QrShard security analysis
+
+# Bytes read from shards, images, sessions, and archives are hostile. Command-line paths and
+# environment variables, however, are explicit same-user configuration rather than remote input;
+# the broad `local` group also models Path.GetTempPath as attacker data and turns every intentional
+# file-tool operation into a path/command-injection false positive. Keep the default remote model
+# and add only the local-file-content submodel that matches QrShard's actual data trust boundary.
+threat-models: file
+
+paths-ignore:
+  - '**/bin/**'
+  - '**/obj/**'
+  - 'publish/**'
+  - 'tests/**'

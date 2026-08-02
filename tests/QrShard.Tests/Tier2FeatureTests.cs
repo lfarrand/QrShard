@@ -71,6 +71,7 @@ public class Tier2FeatureTests
         var header = new ShardDecoder().Diagnose(result.Files[0]).Shard!.Header;
         Assert.True((header.Flags & ShardHeader.FlagEncrypted) != 0);
         Assert.True((header.Flags & ShardHeader.FlagAuthMeta) != 0);
+        Assert.True((header.Flags & ShardHeader.FlagAuthMetaV2) != 0);
 
         string output = tmp.File("out.bin");
         new ShardDecoder().DecodeFolder(result.Files, output, _ => { }, "hunter2");
@@ -101,6 +102,27 @@ public class Tier2FeatureTests
         var ex = Assert.Throws<ShardDecodeException>(
             () => new ShardAssembler().Assemble(tampered, tmp.File("out2.bin"), _ => { }, "pw"));
         Assert.Contains("tampered", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void EncryptedAssembly_TamperedArchiveSemantic_FailsAuthentication()
+    {
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("ordinary.bin", TestData.Random(6_000));
+        EncodeResult encoded = new ShardEncoder().Encode(input, tmp.Sub("shards"),
+            new EncodeOptions { Width = 900, Height = 900, Password = "pw" });
+        List<DecodedShard> shards = new ShardDecoder().CollectShards(encoded.Files, _ => { });
+        var tampered = shards.Select(s => s with
+        {
+            Header = CloneHeaderWithFlags(s.Header,
+                (byte)(s.Header.Flags | ShardHeader.FlagArchive)),
+        }).ToList();
+
+        ShardDecodeException error = Assert.Throws<ShardDecodeException>(() =>
+            new ShardAssembler().Assemble(tampered, tmp.File("extract"), _ => { }, "pw"));
+
+        Assert.Contains("tampered", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(Directory.Exists(tmp.File("extract")));
     }
 
     // ---- Capture-quality heatmap (works on failed captures) ----
@@ -205,5 +227,13 @@ public class Tier2FeatureTests
         FileId = h.FileId, Index = h.Index, Count = h.Count, PayloadLength = h.PayloadLength,
         PayloadCrc32 = h.PayloadCrc32, TotalLength = h.TotalLength, OriginalLength = h.OriginalLength,
         Flags = h.Flags, Sha256 = h.Sha256, FileName = name, StripeData = h.StripeData, StripeParity = h.StripeParity,
+    };
+
+    private static ShardHeader CloneHeaderWithFlags(ShardHeader h, byte flags) => new()
+    {
+        FileId = h.FileId, Index = h.Index, Count = h.Count, PayloadLength = h.PayloadLength,
+        PayloadCrc32 = h.PayloadCrc32, TotalLength = h.TotalLength, OriginalLength = h.OriginalLength,
+        Flags = flags, Sha256 = h.Sha256, FileName = h.FileName, StripeData = h.StripeData,
+        StripeParity = h.StripeParity,
     };
 }

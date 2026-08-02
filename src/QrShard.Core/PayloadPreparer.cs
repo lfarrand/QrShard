@@ -15,7 +15,7 @@ internal sealed class PayloadHandle(IPayloadSource source) : IDisposable
 internal interface IPayloadPreparer
 {
     PayloadHandle Open(string filePath, long length, bool compress, string? password, AppSettings cfg,
-        out byte flags, out byte[] sha);
+        byte semanticFlags, out byte flags, out byte[] sha);
 
     bool LooksCompressible(IPayloadSource source);
 }
@@ -33,70 +33,193 @@ internal interface IPayloadPreparer
 /// The header SHA-256 is always the hash of the ORIGINAL file, so verification happens after
 /// decrypt + decompress on the receiving side.
 /// </summary>
-internal sealed class PayloadPreparer(PayloadCipher cipher) : IPayloadPreparer
+internal sealed class PayloadPreparer(PayloadCipher cipher,
+    Action<byte[]>? plaintextClearedObserver = null,
+    Func<string, IPayloadSource>? mappedSourceFactory = null,
+    Func<IPayloadSource, byte[]>? sha256Factory = null) : IPayloadPreparer
 {
-    public PayloadPreparer() : this(new PayloadCipher())
+    public PayloadPreparer() : this(new PayloadCipher(), null, null, null)
     {
     }
 
     public PayloadHandle Open(string filePath, long length, bool compress, string? password, AppSettings cfg,
-        out byte flags, out byte[] sha)
+        byte semanticFlags, out byte flags, out byte[] sha)
     {
-        flags = 0;
+        flags = (byte)(semanticFlags & (ShardHeader.FlagArchive | ShardHeader.FlagFountain));
         if (length == 0)
         {
             sha = SHA256.HashData([]);
             byte[] empty = [];
             if (password is not null)
             {
-                empty = cipher.Encrypt(empty, password, PayloadCipher.BuildAad(0, sha, Path.GetFileName(filePath)));
-                flags |= ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta;
+                EnsureEncryptedPayloadFitsProtocol(0);
+                EnsureEncryptedPayloadFitsManagedArray(0);
+                flags |= ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta | ShardHeader.FlagAuthMetaV2;
+                empty = cipher.Encrypt(empty, password,
+                    PayloadCipher.BuildAadV2(0, sha, Path.GetFileName(filePath), flags));
             }
             return new PayloadHandle(new BytePayloadSource(empty));
         }
 
-        var mapped = new MappedPayloadSource(filePath);
-        sha = PayloadSource.ComputeSha256(mapped);
-
+        IPayloadSource mapped = (mappedSourceFactory ??
+            (static path => new MappedPayloadSource(path)))(filePath);
         byte[]? material = null;
-        if (compress && LooksCompressible(mapped))
+        try
         {
-            var original = new byte[length];
-            mapped.Read(0, original);
-            byte[] compressed = Compress(original, cfg.PayloadCompressionLevel);
-            if (compressed.Length < original.Length)
+            // Hashing reads the mapping and can fail independently (I/O/provider failure, or an
+            // injected embedding source). Establish ownership before that first read so no failure
+            // path strands a mapped view or file handle.
+            sha = (sha256Factory ?? PayloadSource.ComputeSha256)(mapped);
+            if (compress && CompressionMaterializationFitsBudget(length, cfg.EncodeMemoryBudgetMB) &&
+                LooksCompressible(mapped))
             {
-                material = compressed;
-                flags |= ShardHeader.FlagCompressed | ShardHeader.FlagBrotli;
+                var original = new byte[checked((int)length)];
+                byte[]? compressed = null;
+                try
+                {
+                    mapped.Read(0, original);
+                    compressed = Compress(original, cfg.PayloadCompressionLevel);
+                    if (compressed.Length < original.Length)
+                    {
+                        material = compressed;
+                        compressed = null; // ownership transferred; clear after encryption or return it
+                        flags |= ShardHeader.FlagCompressed | ShardHeader.FlagBrotli;
+                    }
+                }
+                finally
+                {
+                    ClearPlaintext(original);
+                    if (compressed is not null)
+                        ClearPlaintext(compressed); // compression lost or threw after allocating output
+                }
             }
-        }
 
-        if (password is not null)
-        {
-            var aad = PayloadCipher.BuildAad(length, sha, Path.GetFileName(filePath));
-            if (material is null)
+            if (password is not null)
             {
-                // Read the file straight into the blob's body and seal it there: the plaintext and
-                // the ciphertext are the same bytes, so an incompressible input is materialized
-                // once rather than twice.
-                byte[] blob = PayloadCipher.AllocateBlob(length);
-                mapped.Read(0, PayloadCipher.Body(blob));
-                cipher.SealInPlace(blob, password, aad);
-                material = blob;
+                flags |= ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta | ShardHeader.FlagAuthMetaV2;
+                var aad = PayloadCipher.BuildAadV2(length, sha, Path.GetFileName(filePath), flags);
+                if (material is null)
+                {
+                    EnsureEncryptedPayloadFitsProtocol(length);
+                    EnsureEncryptedPayloadFitsManagedArray(length);
+                    EnsureEncryptionFitsBudget(length, cfg.EncodeMemoryBudgetMB);
+                    // Read the file straight into the blob's body and seal it there: the plaintext and
+                    // the ciphertext are the same bytes, so an incompressible input is materialized
+                    // once rather than twice.
+                    byte[] blob = PayloadCipher.AllocateBlob(length);
+                    bool sealedSuccessfully = false;
+                    try
+                    {
+                        mapped.Read(0, PayloadCipher.Body(blob));
+                        cipher.SealInPlace(blob, password, aad);
+                        sealedSuccessfully = true;
+                        material = blob;
+                    }
+                    finally
+                    {
+                        if (!sealedSuccessfully)
+                            ClearPlaintext(blob);
+                    }
+                }
+                else
+                {
+                    byte[] plaintext = material;
+                    material = null; // plaintext is owned by the finally until ciphertext exists
+                    try
+                    {
+                        EnsureEncryptedPayloadFitsProtocol(plaintext.LongLength);
+                        EnsureEncryptedPayloadFitsManagedArray(plaintext.LongLength);
+                        EnsureEncryptionCopyFitsBudget(plaintext.LongLength, cfg.EncodeMemoryBudgetMB);
+                        material = cipher.Encrypt(plaintext, password, aad);
+                    }
+                    finally
+                    {
+                        ClearPlaintext(plaintext);
+                    }
+                }
             }
-            else
-            {
-                material = cipher.Encrypt(material, password, aad);
-            }
-            flags |= ShardHeader.FlagEncrypted | ShardHeader.FlagAuthMeta;
-        }
 
-        if (material is not null)
+            if (material is not null)
+            {
+                mapped.Dispose();
+                return new PayloadHandle(new BytePayloadSource(material));
+            }
+            return new PayloadHandle(mapped);
+        }
+        catch
         {
+            if (material is not null)
+                ClearPlaintext(material);
             mapped.Dispose();
-            return new PayloadHandle(new BytePayloadSource(material));
+            throw;
         }
-        return new PayloadHandle(mapped);
+    }
+
+    /// <summary>
+    /// Brotli currently needs the original array, a growing MemoryStream (less than twice input
+    /// in the worst useful case), and ToArray's result at once. Four input lengths is the safe
+    /// upper bound; if it does not fit, compression is an optional optimization and is skipped.
+    /// </summary>
+    internal static bool CompressionMaterializationFitsBudget(long length, int budgetMB)
+    {
+        if (length < 0 || length > Array.MaxLength)
+            return false;
+        try
+        {
+            return checked(length * 4) <= checked(budgetMB * 1_000_000L);
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
+
+    internal static void EnsureEncryptionFitsBudget(long length, int budgetMB)
+    {
+        long needed = checked(length + PayloadCipher.Overhead);
+        long budget = checked(budgetMB * 1_000_000L);
+        if (needed > budget)
+            throw new InvalidOperationException(
+                $"Password encryption needs ~{needed / 1_000_000:N0} MB for its authenticated payload, " +
+                $"above EncodeMemoryBudgetMB={budgetMB:N0}. Raise the budget deliberately or split the input.");
+    }
+
+    /// <summary>Reject AES-GCM's 44-byte envelope before allocating a protocol-oversized blob.</summary>
+    internal static void EnsureEncryptedPayloadFitsProtocol(long plaintextLength)
+    {
+        long preparedLength;
+        try
+        {
+            preparedLength = checked(plaintextLength + PayloadCipher.Overhead);
+        }
+        catch (OverflowException)
+        {
+            throw new InvalidOperationException("The encrypted payload length exceeds the supported protocol limit.");
+        }
+        ShardEncoder.EnsurePreparedLengthSupported(preparedLength);
+    }
+
+    /// <summary>
+    /// AES-GCM is intentionally one authenticated payload, so the current implementation must
+    /// materialize its envelope in one SZ array. Refuse the runtime-impossible case before a large
+    /// allocation attempt; unencrypted payloads remain streamable up to the wire-format limit.
+    /// </summary>
+    internal static void EnsureEncryptedPayloadFitsManagedArray(long plaintextLength)
+    {
+        long maximumPlaintext = (long)Array.MaxLength - PayloadCipher.Overhead;
+        if (plaintextLength < 0 || plaintextLength > maximumPlaintext)
+            throw new InvalidOperationException(
+                "Password encryption requires one contiguous managed payload; split this input into smaller transfers.");
+    }
+
+    private static void EnsureEncryptionCopyFitsBudget(long length, int budgetMB)
+    {
+        long needed = checked(length * 2 + PayloadCipher.Overhead);
+        long budget = checked(budgetMB * 1_000_000L);
+        if (needed > budget)
+            throw new InvalidOperationException(
+                $"Encrypting the compressed payload needs ~{needed / 1_000_000:N0} MB transiently, " +
+                $"above EncodeMemoryBudgetMB={budgetMB:N0}. Raise the budget deliberately or use --no-compress.");
     }
 
     /// <summary>
@@ -109,18 +232,44 @@ internal sealed class PayloadPreparer(PayloadCipher cipher) : IPayloadPreparer
         if (source.Length <= threshold)
             return true;
         var sample = new byte[sampleLen];
-        source.Read(source.Length / 2 - sampleLen / 2, sample);
-        using var ms = new MemoryStream();
-        using (var probe = new DeflateStream(ms, CompressionLevel.Fastest, leaveOpen: true))
-            probe.Write(sample);
-        return ms.Length < sampleLen * 98L / 100;
+        MemoryStream? ms = null;
+        try
+        {
+            source.Read(source.Length / 2 - sampleLen / 2, sample);
+            ms = new MemoryStream();
+            using (var probe = new DeflateStream(ms, CompressionLevel.Fastest, leaveOpen: true))
+                probe.Write(sample);
+            return ms.Length < sampleLen * 98L / 100;
+        }
+        finally
+        {
+            ClearPlaintext(sample);
+            if (ms is not null && ms.TryGetBuffer(out ArraySegment<byte> buffer) && buffer.Array is not null)
+                ClearPlaintext(buffer.Array);
+            ms?.Dispose();
+        }
     }
 
-    private static byte[] Compress(byte[] data, CompressionLevel level)
+    private byte[] Compress(byte[] data, CompressionLevel level)
     {
-        using var ms = new MemoryStream();
-        using (var brotli = new BrotliStream(ms, level))
-            brotli.Write(data);
-        return ms.ToArray();
+        var ms = new MemoryStream();
+        try
+        {
+            using (var brotli = new BrotliStream(ms, level, leaveOpen: true))
+                brotli.Write(data);
+            return ms.ToArray();
+        }
+        finally
+        {
+            if (ms.TryGetBuffer(out ArraySegment<byte> buffer) && buffer.Array is not null)
+                ClearPlaintext(buffer.Array);
+            ms.Dispose();
+        }
+    }
+
+    private void ClearPlaintext(byte[] buffer)
+    {
+        CryptographicOperations.ZeroMemory(buffer);
+        plaintextClearedObserver?.Invoke(buffer);
     }
 }

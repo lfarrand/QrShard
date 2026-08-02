@@ -1,14 +1,13 @@
 namespace QrShard.Tests;
 
 /// <summary>
-/// The decode scratch budget is a declared ceiling, and its value decides the worker pool. Both
-/// halves are worth pinning: the default must afford the full pool at the largest preset this tool
-/// encodes, and it must stay inside the range the loader accepts.
+/// The decode planning budget decides the worker pool. Pin both its conservative 4K/photo
+/// behaviour and its settings-file contract.
 /// </summary>
 public class DecodeBudgetDefaultTests
 {
     /// <summary>Bytes of concurrently-live scratch per source pixel; see ShardDecoder.</summary>
-    private const int ScratchBytesPerPixel = 24;
+    private const int ScratchBytesPerPixel = 40;
 
     /// <summary>
     /// Workers the BUDGET alone affords, uncapped by core count. That distinction is the whole
@@ -24,32 +23,25 @@ public class DecodeBudgetDefaultTests
     private const int FullPool = 24;
 
     [Fact]
-    public void TheDefaultAffordsTheFullPoolAtMax4K()
+    public void TheDefaultKeepsUsefulButBoundedParallelismAtMax4K()
     {
-        // Max4K is the widest preset the encoder offers, and at the previous default of 4000 it was
-        // the ONLY preset priced below the full pool — 20 workers where the smaller presets still
-        // fitted 24. That asymmetry was invisible until the per-pixel estimate was corrected from 4
-        // to 24 bytes, which is what made the ceiling bite.
+        // Repeated round-robin measurements found little difference between 12 and 24 workers,
+        // while the wider pool doubles the concurrency risk on adversarial camera inputs.
         int budget = new AppSettings().DecodeMemoryBudgetMB;
+        long workers = Affordable(budget, 3840, 2160);
 
-        Assert.True(Affordable(budget, 3840, 2160) >= FullPool,
-            $"Max4K affords only {Affordable(budget, 3840, 2160)} workers at {budget} MB");
-        Assert.True(Affordable(budget, 2160, 2160) >= FullPool,
-            $"2160² affords only {Affordable(budget, 2160, 2160)} workers at {budget} MB");
+        Assert.InRange(workers, 8, FullPool - 1);
     }
 
     [Fact]
     public void TheDefaultStillThrottlesPhotoSizedInput()
     {
-        // The budget has to keep meaning something. A 48-megapixel photo costs ~1.15 GB of scratch
-        // per worker, so it must still price below the full pool — that throttling is the whole
-        // point of the ceiling, and a default large enough to ignore it would be a default that had
-        // quietly stopped working.
+        // A 48-megapixel camera input is planned at ~1.92 GB per worker. Keep two-way progress
+        // without recreating the six-worker, ~11 GB private-memory peak reproduced in review.
         int budget = new AppSettings().DecodeMemoryBudgetMB;
         long workers = Affordable(budget, 8000, 6000);
 
-        Assert.True(workers < FullPool, $"a 48 MP photo should still be throttled, affords {workers}");
-        Assert.True(workers >= 2, $"…but not down to a single worker, affords {workers}");
+        Assert.Equal(2, workers);
     }
 
     [Fact]

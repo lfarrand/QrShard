@@ -15,7 +15,8 @@ public class VideoEscalationTests
     {
         public int Passes { get; private set; }
 
-        public IEnumerable<Bitmap> Frames(string path, double fps)
+        public IEnumerable<Bitmap> Frames(string path, double fps,
+            CancellationToken cancellationToken = default)
         {
             Passes++;
             // fps 8 → first half only (incomplete); fps ≥ 16 → all images.

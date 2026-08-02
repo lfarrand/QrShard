@@ -13,6 +13,20 @@ public class AppSettingsTests
     }
 
     [Fact]
+    public void FfmpegPathMustBeAbsolute()
+    {
+        using var tmp = new TempDir();
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            LoadJson(tmp, """{ "FfmpegPath": "ffmpeg" }"""));
+        Assert.Contains("FfmpegPath", ex.Message);
+
+        string absolute = Path.GetFullPath(tmp.File(OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg"));
+        string jsonPath = tmp.File("absolute-settings.json");
+        File.WriteAllText(jsonPath, System.Text.Json.JsonSerializer.Serialize(new { FfmpegPath = absolute }));
+        Assert.Equal(absolute, AppSettings.Load(jsonPath).FfmpegPath);
+    }
+
+    [Fact]
     public void FileWithCommentsAndTrailingComma_Parses()
     {
         using var tmp = new TempDir();
@@ -45,8 +59,19 @@ public class AppSettingsTests
     {
         using var tmp = new TempDir();
         string path = tmp.File("appsettings.json");
-        File.WriteAllText(path, """{ "SomethingElse": 1 }""");
+        File.WriteAllText(path, "{}");
         Assert.Equal(CompressionLevel.Optimal, AppSettings.Load(path).PngCompressionLevel);
+    }
+
+    [Theory]
+    [InlineData("{ \"DecodeMemoryBudgetMb\": 64 }", "DecodeMemoryBudgetMb")]
+    [InlineData("{ \"EncodeDefaults\": { \"CellPixels\": 1 } }", "EncodeDefaults.CellPixels")]
+    [InlineData("{ \"EncodeProfiles\": { \"small\": { \"CellPixels\": 1 } } }", "EncodeProfiles.small.CellPixels")]
+    public void UnknownSettings_FailLoudlyAsLikelyTypos(string json, string setting)
+    {
+        using var tmp = new TempDir();
+        var ex = Assert.Throws<InvalidOperationException>(() => LoadJson(tmp, json));
+        Assert.Contains(setting, ex.Message);
     }
 
     [Fact]
@@ -68,6 +93,19 @@ public class AppSettingsTests
         File.WriteAllText(path, "{ not json ");
         var ex = Assert.Throws<InvalidOperationException>(() => AppSettings.Load(path));
         Assert.Contains("not valid JSON", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("[]", "root")]
+    [InlineData("{ \"EncodeMemoryBudgetMB\": \"2000\" }", "EncodeMemoryBudgetMB")]
+    [InlineData("{ \"EncodeDefaults\": [] }", "EncodeDefaults")]
+    [InlineData("{ \"EncodeDefaults\": { \"Compress\": \"false\" } }", "Compress")]
+    [InlineData("{ \"EncodeProfiles\": [] }", "EncodeProfiles")]
+    public void WrongJsonTypes_FailLoudlyInsteadOfSilentlyUsingDefaults(string json, string setting)
+    {
+        using var tmp = new TempDir();
+        var ex = Assert.Throws<InvalidOperationException>(() => LoadJson(tmp, json));
+        Assert.Contains(setting, ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -157,6 +195,8 @@ public class AppSettingsTests
     [InlineData("""{ "EncodeDefaults": { "EccParity": 15 } }""", "EccParity")]
     [InlineData("""{ "EncodeDefaults": { "RecoveryPercent": 150 } }""", "RecoveryPercent")]
     [InlineData("""{ "EncodeDefaults": { "Resolution": "banana" } }""", "Resolution")]
+    [InlineData("""{ "EncodeDefaults": { "Resolution": "1" } }""", "Resolution")]
+    [InlineData("""{ "EncodeDefaults": { "Resolution": "999999x900" } }""", "Resolution")]
     [InlineData("""{ "EncodeDefaults": { "ImageFormat": "gif" } }""", "ImageFormat")]
     [InlineData("""{ "ShardFolderSuffix": "" }""", "ShardFolderSuffix")]
     [InlineData("""{ "EncodeMemoryBudgetMB": 10 } """, "EncodeMemoryBudgetMB")]

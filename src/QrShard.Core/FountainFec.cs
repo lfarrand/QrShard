@@ -48,14 +48,14 @@ internal sealed class FountainFec(Gf256 gf)
     }
 
     /// <summary>Rank of the coefficient rows over GF(2^8) — the stripe solves iff rank == dataCount.</summary>
-    public int Rank(IReadOnlyList<byte[]> coefRows, int dataCount)
+    public int Rank(IEnumerable<byte[]> coefRows, int dataCount)
     {
         var reduced = new List<byte[]>();
         var pivots = new List<int>();
-        foreach (byte[] row in coefRows)
+        using IEnumerator<byte[]> enumerator = coefRows.GetEnumerator();
+        while (reduced.Count < dataCount && enumerator.MoveNext())
         {
-            if (reduced.Count == dataCount)
-                break;
+            byte[] row = enumerator.Current;
             byte[]? r = Reduce(row, reduced, pivots, dataCount);
             if (r is null)
                 continue;
@@ -70,17 +70,17 @@ internal sealed class FountainFec(Gf256 gf)
     /// rows. Rows are considered in order, so callers list systematic (identity) rows first and
     /// the solver prefers original chunks over coded ones.
     /// </summary>
-    public bool TryReconstruct(IReadOnlyList<(byte[] Coef, byte[] Payload)> rows, int dataCount, int shardLen,
+    public bool TryReconstruct(IEnumerable<(byte[] Coef, byte[] Payload)> rows, int dataCount, int shardLen,
         out byte[][] data)
     {
         data = [];
         var selected = new List<(byte[] Coef, byte[] Payload)>();
         var reduced = new List<byte[]>();
         var pivots = new List<int>();
-        foreach (var row in rows)
+        using IEnumerator<(byte[] Coef, byte[] Payload)> enumerator = rows.GetEnumerator();
+        while (selected.Count < dataCount && enumerator.MoveNext())
         {
-            if (selected.Count == dataCount)
-                break;
+            var row = enumerator.Current;
             byte[]? r = Reduce(row.Coef, reduced, pivots, dataCount);
             if (r is null)
                 continue; // linearly dependent on rows already selected

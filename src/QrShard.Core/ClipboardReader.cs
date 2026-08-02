@@ -15,7 +15,7 @@ internal sealed class ClipboardReader
     private const uint CfDib = 8;
 
     [SupportedOSPlatform("windows")]
-    public unsafe Bitmap? TryRead()
+    public unsafe Bitmap? TryRead(int decodeMemoryBudgetMB)
     {
         bool opened = false;
         for (int attempt = 0; attempt < 5 && !(opened = OpenClipboard(IntPtr.Zero)); attempt++)
@@ -37,7 +37,7 @@ internal sealed class ClipboardReader
                 long size = (long)GlobalSize(handle);
                 if (size is <= 0 or > int.MaxValue)
                     return null;
-                return ParseDib(new ReadOnlySpan<byte>((void*)data, (int)size));
+                return ParseDib(new ReadOnlySpan<byte>((void*)data, (int)size), decodeMemoryBudgetMB);
             }
             finally
             {
@@ -52,7 +52,10 @@ internal sealed class ClipboardReader
 
     /// <summary>Parses a packed CF_DIB (BITMAPINFOHEADER + pixels): 24/32-bit uncompressed
     /// (BI_RGB, or BI_BITFIELDS with the standard BGRA masks), top-down or bottom-up.</summary>
-    internal static Bitmap? ParseDib(ReadOnlySpan<byte> dib)
+    internal static Bitmap? ParseDib(ReadOnlySpan<byte> dib) =>
+        ParseDib(dib, AppSettings.BuiltIn.DecodeMemoryBudgetMB);
+
+    internal static Bitmap? ParseDib(ReadOnlySpan<byte> dib, int decodeMemoryBudgetMB)
     {
         if (dib.Length < 40)
             return null;
@@ -64,15 +67,18 @@ internal sealed class ClipboardReader
         ushort bitCount = BinaryPrimitives.ReadUInt16LittleEndian(dib[14..]);
         uint compression = BinaryPrimitives.ReadUInt32LittleEndian(dib[16..]);
         uint clrUsed = BinaryPrimitives.ReadUInt32LittleEndian(dib[32..]);
-        if (width <= 0 || rawHeight == 0 || (bitCount != 24 && bitCount != 32))
+        // Math.Abs(int.MinValue) overflows. CF_DIB is attacker-controlled clipboard input, so
+        // reject that one unrepresentable absolute height before any dimension arithmetic.
+        if (width <= 0 || rawHeight is 0 or int.MinValue || (bitCount != 24 && bitCount != 32))
             return null;
         if (compression != 0 && compression != 3) // BI_RGB or BI_BITFIELDS
             return null;
-        if ((long)width * Math.Abs(rawHeight) > 500_000_000)
-            return null;
-
         bool bottomUp = rawHeight > 0;
         int height = Math.Abs(rawHeight);
+        // Apply the same pre-load admission as file images before allocating the packed RGB
+        // surface. Clipboard bytes are attacker-controlled and can otherwise request a ~1.5 GB
+        // managed array before DecodeBitmap gets its later chance to enforce this setting.
+        ShardDecoder.ValidateImageDimensions(width, height, decodeMemoryBudgetMB);
         int bytesPerPixel = bitCount / 8;
         int masks = compression == 3 && headerSize == 40 ? 12 : 0;
         long offset = headerSize + masks + (long)clrUsed * 4;

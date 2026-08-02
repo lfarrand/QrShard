@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 
@@ -105,25 +106,74 @@ internal static partial class MonitorResolution
 
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("xrandr", "--current")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-            });
+            string? executable = ExternalToolResolver.Resolve("xrandr");
+            if (executable is null)
+                return null;
+            ProcessStartInfo start = ExternalToolResolver.CreateStartInfo(executable);
+            start.RedirectStandardOutput = true;
+            start.RedirectStandardError = true;
+            start.ArgumentList.Add("--current");
+            using var process = Process.Start(start);
             if (process is null)
                 return null;
-            string output = process.StandardOutput.ReadToEnd();
-            if (!process.WaitForExit(3000))
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            Task<(string Text, bool Truncated)> stdout =
+                ReadBoundedAsync(process.StandardOutput, 1_000_000, timeout.Token);
+            Task<(string Text, bool Truncated)> stderr =
+                ReadBoundedAsync(process.StandardError, 16_384, timeout.Token);
+            Task exit = process.WaitForExitAsync(timeout.Token);
+            try
             {
-                process.Kill();
+                Task.WhenAll(exit, stdout, stderr).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                TryKill(process);
                 return null;
             }
-            return process.ExitCode == 0 ? TryParseXrandr(output) : null;
+            if (process.ExitCode != 0 || stdout.Result.Truncated)
+                return null;
+            return TryParseXrandr(stdout.Result.Text);
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
         {
             return null; // xrandr not installed, or no usable display
+        }
+    }
+
+    private static async Task<(string Text, bool Truncated)> ReadBoundedAsync(
+        StreamReader reader, int retainedChars, CancellationToken cancellationToken)
+    {
+        var text = new System.Text.StringBuilder(Math.Min(retainedChars, 4096));
+        var buffer = new char[4096];
+        bool truncated = false;
+        while (true)
+        {
+            int read = await reader.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+                return (text.ToString(), truncated);
+            int keep = Math.Min(read, retainedChars - text.Length);
+            if (keep > 0)
+                text.Append(buffer, 0, keep);
+            if (keep != read)
+                truncated = true;
+        }
+    }
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+            process.WaitForExit(1_000);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or
+                                         System.ComponentModel.Win32Exception or
+                                         NotSupportedException)
+        {
+            // Best effort; monitor detection is optional.
         }
     }
 
@@ -136,17 +186,33 @@ internal static partial class MonitorResolution
     {
         var primary = PrimaryGeometry().Match(output);
         if (primary.Success)
-            return (int.Parse(primary.Groups[1].Value), int.Parse(primary.Groups[2].Value));
+            return TryParseDimensions(primary);
 
         var connected = ConnectedGeometry().Match(output);
         if (connected.Success)
-            return (int.Parse(connected.Groups[1].Value), int.Parse(connected.Groups[2].Value));
+            return TryParseDimensions(connected);
 
         var active = ActiveModeLine().Match(output);
         if (active.Success)
-            return (int.Parse(active.Groups[1].Value), int.Parse(active.Groups[2].Value));
+            return TryParseDimensions(active);
 
         return null;
+    }
+
+    private static (int Width, int Height)? TryParseDimensions(Match match)
+    {
+        // This is untrusted helper output. Avoid Parse throwing on an arbitrarily long digit
+        // sequence, and reject dimensions far beyond any display/layout we could use. Detection
+        // is best-effort; a malformed response must fall back rather than abort CLI startup.
+        const int maxPlausibleMonitorDimension = Layout.MaxResolution * 4;
+        if (!int.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture,
+                out int width) ||
+            !int.TryParse(match.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture,
+                out int height) ||
+            width is < 1 or > maxPlausibleMonitorDimension ||
+            height is < 1 or > maxPlausibleMonitorDimension)
+            return null;
+        return (width, height);
     }
 
     [GeneratedRegex(@"^\S+ connected primary (\d+)x(\d+)\+", RegexOptions.Multiline)]

@@ -19,23 +19,30 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: package-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   consumer:
     # Packaging behaviour is platform-independent, so one runner is enough to catch the drift
     # this guards against; the cross-platform matrix stays in ci.yml.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
-      # Needed to BUILD the packages. Deliberately not exported past the pack step — the whole
-      # point is to prove a consumer needs no Six Labors licence of their own.
-      SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: true
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.302
 
       - name: Verify the packages from a consumer's point of view
+        env:
+          # The script unsets this immediately after its pack phase.
+          SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
         run: tests/verify-package-consumer.sh
