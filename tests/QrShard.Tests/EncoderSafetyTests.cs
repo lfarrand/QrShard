@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using QrShard;
 using SixLabors.ImageSharp.PixelFormats;
@@ -248,18 +249,43 @@ public class EncoderSafetyTests
         using var renderer = new BlockingRenderer();
         var encoder = Encoder(new PayloadPreparer(), renderer: renderer);
 
-        Task<EncodeResult> encode = Task.Run(() => encoder.Encode(input, output, Fast with { Compress = true }));
-        Assert.True(renderer.Entered.Wait(TimeSpan.FromSeconds(10)), "renderer did not enter");
+        // Encode is synchronous and enters a Parallel.For render stage. Keep its caller off the
+        // constrained test-runner pool, then await (rather than synchronously block on) entry into
+        // the injected renderer so the render workers always have a chance to run.
+        Task<EncodeResult> encode = Task.Factory.StartNew(
+            () => encoder.Encode(input, output, Fast with { Compress = true }),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        Exception? orchestrationFailure = null;
         try
         {
+            Task entered = renderer.Entered.Task;
+            Task first = await Task.WhenAny(entered, encode, Task.Delay(TimeSpan.FromSeconds(10)));
+            if (first == encode && !entered.IsCompletedSuccessfully)
+            {
+                _ = await encode; // propagate an early encoder failure instead of masking it as a timeout
+                Assert.Fail("encode completed before the renderer entered");
+            }
+            Assert.True(entered.IsCompletedSuccessfully, "renderer did not enter");
             File.WriteAllBytes(input, Enumerable.Repeat((byte)'B', 50_000).ToArray());
+        }
+        catch (Exception orchestrationException)
+        {
+            orchestrationFailure = orchestrationException;
         }
         finally
         {
             renderer.Release.Set();
         }
 
-        var ex = await Assert.ThrowsAsync<IOException>(async () => await encode);
+        // WaitAsync does not stop the underlying task. Always observe and bounded-join it after
+        // releasing the renderer so a failed handshake cannot race renderer/TempDir disposal.
+        Exception? encodeFailure = await Record.ExceptionAsync(async () =>
+            await encode.WaitAsync(TimeSpan.FromSeconds(10)));
+        if (orchestrationFailure is not null)
+            ExceptionDispatchInfo.Capture(orchestrationFailure).Throw();
+
+        var ex = Assert.IsType<IOException>(encodeFailure);
         Assert.Contains("changed", ex.Message);
         Assert.False(Directory.Exists(output));
         AssertNoStagingSibling(tmp.Path);
@@ -327,7 +353,8 @@ public class EncoderSafetyTests
     private sealed class BlockingRenderer : IShardRenderer, IDisposable
     {
         private readonly ShardRenderer inner = new();
-        public ManualResetEventSlim Entered { get; } = new(false);
+        public TaskCompletionSource<bool> Entered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         public ManualResetEventSlim Release { get; } = new(false);
 
         public ShardImageWriter CreateWriter(string format, Layout layout, AppSettings cfg) =>
@@ -340,14 +367,13 @@ public class EncoderSafetyTests
             int[]? interleavePermutation = null)
         {
             File.WriteAllText(outPath, "complete staged image");
-            Entered.Set();
+            Entered.TrySetResult(true);
             if (!Release.Wait(TimeSpan.FromSeconds(15)))
                 throw new TimeoutException("test did not release renderer");
         }
 
         public void Dispose()
         {
-            Entered.Dispose();
             Release.Dispose();
         }
     }
