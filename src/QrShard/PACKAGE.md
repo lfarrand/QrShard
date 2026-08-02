@@ -20,7 +20,7 @@ itself targets and requires **.NET 10**.
 
 Release executables are named `QrShard.exe` on Windows and case-sensitive `QrShard` on Unix. The
 Linux Native-AOT floors are glibc 2.35 (`linux-x64`) and glibc 2.39 (`linux-arm64`). Binary archives
-are built with .NET SDK 10.0.302. Beginning with v1.6.2, GitHub stores signed SLSA provenance and an
+are built with .NET SDK 10.0.302. Beginning with v1.7.0, GitHub stores signed SLSA provenance and an
 artifact-specific SPDX 2.2 SBOM attestation for their exact release bytes. Each binary SBOM uses
 its RID-specific Native-AOT restore graph; the tool-package SBOM uses the ordinary package graph.
 Releases produced by the current workflow are immutable. Verification instructions are in the

@@ -65,7 +65,7 @@ globalization is deliberately not used or bundled.
 - **Standalone binaries**: tagged releases attach Native-AOT single-file binaries for
   win-x64 / linux-x64 / linux-arm64 / osx-arm64 — no .NET install needed (see the Linux glibc
   floors above). The executable is named `QrShard.exe` on Windows and case-sensitive `QrShard`
-  on Unix. Beginning with v1.6.2, GitHub stores signed SLSA build-provenance and SPDX 2.2 SBOM
+  on Unix. Beginning with v1.7.0, GitHub stores signed SLSA build-provenance and SPDX 2.2 SBOM
   attestations for the archives and release packages. These attestations authenticate the exact
   GitHub Release bytes; they are not platform code signatures. Windows is not Authenticode-signed.
   The release workflow applies and verifies an ad-hoc macOS signature after stripping, but does not
@@ -87,11 +87,11 @@ globalization is deliberately not used or bundled.
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
   [Building](#building-and-testing) for the ImageSharp license note).
 
-### Verifying a v1.6.2-or-later tagged release
+### Verifying a v1.7.0-or-later tagged release
 
-The current release workflow first applies these controls to v1.6.2. Older published releases do
+The current release workflow first applies these controls to v1.7.0. Older published releases do
 not have the SBOM, checksum, or attestation assets described here. Install the
-[GitHub CLI](https://cli.github.com/), download a v1.6.2-or-later binary archive or `.nupkg`, and
+[GitHub CLI](https://cli.github.com/), download a v1.7.0-or-later binary archive or `.nupkg`, and
 constrain verification to this repository's release workflow and tag:
 
 ```sh
@@ -118,7 +118,7 @@ with the immutable GitHub Release. `SHA256SUMS` and the six standalone SBOM JSON
 provenance and immutable-release coverage, but are not themselves subjects of an SBOM predicate.
 `SHA256SUMS` remains a plaintext convenience index, but its bytes and every listed release file are
 also covered by provenance attestations. Releases produced by the current workflow, beginning with
-v1.6.2, are immutable after publication: GitHub locks their assets and tag and creates a release
+v1.7.0, are immutable after publication: GitHub locks their assets and tag and creates a release
 attestation.
 
 The `.nupkg` attached to GitHub Releases is the exact pre-publication byte sequence covered here.
@@ -1033,7 +1033,7 @@ Recover the partial package publication as follows:
    workflow artifacts plus `SHA256SUMS`, then publishes it. If any occupied version or draft asset
    differs, automation stops: leave that version occupied and release a new version after review.
 
-For releases produced by this workflow beginning with v1.6.2, GitHub stores signed SLSA provenance
+For releases produced by this workflow beginning with v1.7.0, GitHub stores signed SLSA provenance
 for every exact GitHub Release file (including `SHA256SUMS`) and an artifact-specific signed
 SPDX 2.2 predicate for each archive and package. Release immutability then prevents
 publication-time assets or the tag from being replaced. These controls authenticate GitHub
