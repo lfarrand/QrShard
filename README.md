@@ -67,8 +67,9 @@ globalization is deliberately not used or bundled.
   floors above). The executable is named `QrShard.exe` on Windows and case-sensitive `QrShard`
   on Unix. Beginning with v1.6.2, GitHub stores signed SLSA build-provenance and SPDX 2.2 SBOM
   attestations for the archives and release packages. These attestations authenticate the exact
-  GitHub Release bytes; they are not platform code signatures. Windows is not Authenticode-signed,
-  and macOS output is expected to be ad-hoc only rather than Developer ID signed or notarized.
+  GitHub Release bytes; they are not platform code signatures. Windows is not Authenticode-signed.
+  The release workflow applies and verifies an ad-hoc macOS signature after stripping, but does not
+  provide a Developer ID signature, notarization, or publisher identity.
 - **Local single-file publish**: `./publish.ps1` (or `.sh`) creates self-contained, single-file
   **JIT** builds for win-x64 / linux-x64 / linux-arm64 / osx-x64 / osx-arm64. These convenient
   local builds are not the Native-AOT artifacts produced by the tagged-release workflow. Each RID
@@ -974,6 +975,15 @@ those exact packages; a clean package-SBOM job generates the two ordinary framew
 graphs. All six SBOMs validate the staged artifact hash and reject stale, test, benchmark, and
 SBOM-tool components. The four binary manifests also reject wrong-RID graphs; the package
 manifests reject Native-AOT contamination.
+
+The pinned .NET 10.0.10 Apple runtime archive contains debug references to temporary Swift/Clang
+module-cache files. On macOS the workflow therefore defers only the standard `dsymutil` and `strip`
+post-link operations out of the affected MSBuild `Exec` wrapper; the corresponding
+[upstream fix](https://github.com/dotnet/runtime/pull/124266) is not in the pinned targets. Their real
+exit statuses remain fatal, the diagnostic remains visible, and the workflow requires a non-empty
+dSYM whose Mach-O UUID matches the exact stripped binary. It then applies and strictly verifies a
+fresh ad-hoc signature before that binary can be smoke-tested or archived. The Apple OS, Xcode,
+Clang, and `dsymutil` versions are recorded in the job alongside the pinned .NET toolchain.
 
 The committed NuGet lock files describe the portable framework-dependent graph used by ordinary
 builds, tests, packaging, and dependency submission. Each Native-AOT matrix restore writes its

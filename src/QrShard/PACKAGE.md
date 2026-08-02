@@ -25,9 +25,9 @@ artifact-specific SPDX 2.2 SBOM attestation for their exact release bytes. Each 
 its RID-specific Native-AOT restore graph; the tool-package SBOM uses the ordinary package graph.
 Releases produced by the current workflow are immutable. Verification instructions are in the
 repository README; older releases predate these controls. These controls are not platform
-signatures: Windows is not
-Authenticode-signed, and macOS output is expected to be ad-hoc only rather than Developer ID signed
-or notarized. `SHA256SUMS` is plaintext but is itself covered by provenance.
+signatures: Windows is not Authenticode-signed. The release workflow applies and verifies an ad-hoc
+macOS signature after stripping, but that signature provides neither publisher identity nor
+Developer ID/notarization. `SHA256SUMS` is plaintext but is itself covered by provenance.
 
 Each release is also mirrored to GitHub Packages, but **nuget.org is the supported install
 source** — GitHub Packages requires an access token with `read:packages` to install from, even

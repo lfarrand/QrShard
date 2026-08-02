@@ -186,11 +186,17 @@ pass are missing immutable versions pushed and downloaded again, making an ambig
 publication safely rerunnable. Draft assets use the same fail-closed exact-inventory policy.
 
 These attestations authenticate artifact digests and workflow provenance, not platform publisher
-identity. The Windows executable is not Authenticode-signed. The workflow does not inspect the
-macOS signature; Native AOT is expected to produce only an ad-hoc signature, not a Developer ID
-signature or notarization. `SHA256SUMS` is plaintext and must not be trusted without its attestation.
+identity. The Windows executable is not Authenticode-signed. After symbol stripping, the workflow
+applies and strictly verifies an ad-hoc macOS signature; this is not a Developer ID signature,
+notarization, or assertion of publisher identity. `SHA256SUMS` is plaintext and must not be trusted
+without its attestation.
 The release executable is `QrShard.exe` on Windows and case-sensitive `QrShard` on Unix.
 The `linux-x64` and `linux-arm64` Native-AOT assets require glibc 2.35 and 2.39 respectively.
+The macOS candidate also requires successful symbol extraction and stripping plus a non-empty dSYM
+whose Mach-O UUID matches the shipped binary. Those operations run directly because the pinned
+.NET 10.0.10 Apple runtime archive contains stale temporary module-cache debug references that its
+MSBuild wrapper misclassifies; an actual `dsymutil`, `strip`, signing, or signature-verification
+failure still stops the release.
 
 ## Known advisories
 

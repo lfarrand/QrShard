@@ -121,17 +121,24 @@ jobs:
           - os: windows-2025
             rid: win-x64
             asset: qrshard-win-x64.zip
+            strip_symbols: "false"
           # Native-AOT Linux binaries require the glibc of the build host or newer. Build x64 on
           # Ubuntu 22.04 deliberately (glibc 2.35), rather than a moving ubuntu-latest floor.
           - os: ubuntu-22.04
             rid: linux-x64
             asset: qrshard-linux-x64.tar.gz
+            strip_symbols: "true"
           - os: ubuntu-24.04-arm
             rid: linux-arm64
             asset: qrshard-linux-arm64.tar.gz
+            strip_symbols: "true"
           - os: macos-15
             rid: osx-arm64
             asset: qrshard-osx-arm64.tar.gz
+            # .NET 10.0.10's Apple runtime archive contains stale Clang module-cache
+            # references. Defer dsymutil/strip to the checked step below so MSBuild's
+            # Exec parser cannot turn dsymutil's successful diagnostic into a failure.
+            strip_symbols: "false"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     permissions:
@@ -150,6 +157,19 @@ jobs:
       - name: Record toolchain
         run: dotnet --info
 
+      - name: Record Apple toolchain
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          sw_vers
+          xcode-select --print-path
+          xcodebuild -version
+          xcrun --show-sdk-version
+          xcrun --find clang
+          xcrun clang --version
+          xcrun --find dsymutil
+          xcrun dsymutil --version
+
       - name: Test
         env:
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
@@ -163,7 +183,61 @@ jobs:
         # and semantically checked in the per-RID SBOM below; disable locked mode only for this
         # matrix restore while keeping every framework-dependent restore locked. Write the AOT
         # graph under ignored obj/ so this restore can never rewrite the committed portable graph.
-        run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false -p:RestoreLockedMode=false -p:NuGetLockFilePath=obj/aot/${{ matrix.rid }}/packages.lock.json -warnaserror
+        run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false -p:StripSymbols=${{ matrix.strip_symbols }} -p:RestoreLockedMode=false -p:NuGetLockFilePath=obj/aot/${{ matrix.rid }}/packages.lock.json -warnaserror
+
+      - name: Finalize macOS symbols and ad-hoc signature
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pub="src/QrShard/bin/Release/net10.0/${{ matrix.rid }}/publish"
+          bin="$pub/QrShard"
+          dsym="$bin.dSYM"
+          dwarf="$dsym/Contents/Resources/DWARF/QrShard"
+
+          [ -s "$bin" ] || { echo "::error::no macOS Native-AOT binary at $bin"; exit 1; }
+          [ ! -e "$dsym" ] || { echo "::error::unexpected pre-existing dSYM at $dsym"; exit 1; }
+
+          uuid_set() {
+            xcrun dwarfdump --uuid "$1" |
+              awk '/^UUID: / { print toupper($2) " " $3 }' |
+              LC_ALL=C sort
+          }
+
+          # Reproduce the .NET Native-AOT target's normal Apple post-link operations directly.
+          # dsymutil's real exit status remains authoritative while its known stale-.pcm
+          # diagnostic remains visible instead of being misparsed by MSBuild's Exec task.
+          # Remove this workaround after upgrading to .NET targets containing
+          # https://github.com/dotnet/runtime/pull/124266.
+          if ! xcrun dsymutil "$bin"; then
+            echo "::error::dsymutil failed for the macOS Native-AOT binary"
+            exit 1
+          fi
+          [ -s "$dwarf" ] || { echo "::error::dsymutil did not create $dwarf"; exit 1; }
+
+          binary_uuids="$(uuid_set "$bin")"
+          symbol_uuids="$(uuid_set "$dwarf")"
+          uuid_count="$(printf '%s\n' "$binary_uuids" | sed '/^$/d' | wc -l | tr -d ' ')"
+          [ "$uuid_count" = "1" ] && [[ "$binary_uuids" == *" (arm64)" ]] || {
+            echo "::error::expected one arm64 UUID, got '$binary_uuids'"; exit 1;
+          }
+          [ "$binary_uuids" = "$symbol_uuids" ] || {
+            echo "::error::dSYM UUIDs '$symbol_uuids' do not match binary UUIDs '$binary_uuids'"; exit 1;
+          }
+
+          if ! xcrun strip -no_code_signature_warning -x "$bin"; then
+            echo "::error::strip failed for the macOS Native-AOT binary"
+            exit 1
+          fi
+          # Normalize the final Apple-silicon executable to the documented ad-hoc policy.
+          # Replace this step rather than layering over it if Developer ID signing is added.
+          /usr/bin/codesign --force --sign - --timestamp=none "$bin"
+          /usr/bin/codesign --verify --strict --verbose=4 "$bin"
+
+          final_uuids="$(uuid_set "$bin")"
+          [ "$final_uuids" = "$binary_uuids" ] || {
+            echo "::error::macOS binary UUIDs changed during strip/sign finalization"; exit 1;
+          }
 
       - name: Verify portable lock files remained unchanged
         run: git diff --exit-code -- src/QrShard.Core/packages.lock.json src/QrShard/packages.lock.json tests/QrShard.Benchmarks/packages.lock.json tests/QrShard.Tests/packages.lock.json
