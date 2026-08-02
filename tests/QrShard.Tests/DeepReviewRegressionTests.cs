@@ -91,13 +91,11 @@ public class DeepReviewRegressionTests
     }
 
     [Fact]
-    public void AnIncompleteFileDoesNotDiscardACompleteOne()
+    public void IncompleteMixedFamilyPreflightsBeforeAnyOutput()
     {
-        // Silent data loss, decided by filename. Assemble threw on the first group it could not
-        // reassemble, so a folder holding a partial capture of A and a WHOLE capture of B lost B
-        // entirely whenever A's shards sorted first. The tool printed "'B': 1/1 data + 0 parity —
-        // recoverable ✓" on the line above and then wrote nothing, and the comment on Cli's call
-        // site already claimed the behaviour asserted here.
+        // A mixed folder is one decode request. Structural completeness must be established for
+        // every family before any sibling is published, so group/filename order cannot produce a
+        // misleading partially-successful result that a retry later silently renames.
         using var tmp = new TempDir();
         byte[] partialContent = TestData.Random(900_000); // spans 3 images at this density
         byte[] wholeContent = TestData.Random(20_000);    // fits in 1
@@ -116,8 +114,8 @@ public class DeepReviewRegressionTests
         try
         {
             Environment.CurrentDirectory = cwd;
-            // Still reports failure — one file genuinely cannot be rebuilt — but the other must
-            // be on disk, because it was recoverable and the user captured it.
+            // One family genuinely cannot be rebuilt, so the entire mixed request fails before
+            // the otherwise-complete sibling becomes externally visible.
             Assert.Throws<ShardDecodeException>(() =>
                 new ShardDecoder().DecodeFolder(Directory.GetFiles(folder), null, _ => { }));
         }
@@ -126,7 +124,7 @@ public class DeepReviewRegressionTests
             Environment.CurrentDirectory = previous;
         }
 
-        Assert.Equal(wholeContent, File.ReadAllBytes(Path.Combine(cwd, "zzz_whole.bin")));
+        Assert.False(File.Exists(Path.Combine(cwd, "zzz_whole.bin")));
     }
 
     /// <summary>A frame locator that reports a grid far finer than the area it claims to have

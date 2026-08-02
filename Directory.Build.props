@@ -6,6 +6,10 @@
          the solution root, or set the SixLaborsLicenseKey environment variable instead.
          Free community licenses: https://sixlabors.com/pricing/ -->
     <SixLaborsLicenseFile Condition="Exists('$(MSBuildThisFileDirectory)sixlabors.lic')">$(MSBuildThisFileDirectory)sixlabors.lic</SixLaborsLicenseFile>
+    <!-- Resolve deterministically in CI. Local restore updates the committed lock files when a
+         dependency is deliberately changed; CI rejects any graph drift instead. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
   </PropertyGroup>
 
 </Project>

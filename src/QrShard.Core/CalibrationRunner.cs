@@ -6,9 +6,25 @@ namespace QrShard;
 /// real transfer, and <see cref="Analyze"/> measures what actually survived — recommending the
 /// densest settings that decoded with comfortable ECC headroom on THIS screen/capture pair.
 /// </summary>
-internal sealed class CalibrationRunner(IShardEncoder encoder, IShardDecoder decoder) : ICalibration
+internal sealed class CalibrationRunner : ICalibration
 {
-    public CalibrationRunner() : this(new ShardEncoder(), new ShardDecoder())
+    private readonly IShardEncoder encoder;
+    private readonly IShardDecoder decoder;
+    private readonly int decodeMemoryBudgetMB;
+
+    public CalibrationRunner(IShardEncoder encoder, IShardDecoder decoder, AppSettings settings)
+        : this(encoder, decoder, settings.DecodeMemoryBudgetMB)
+    {
+    }
+
+    internal CalibrationRunner(IShardEncoder encoder, IShardDecoder decoder, int decodeMemoryBudgetMB)
+    {
+        this.encoder = encoder;
+        this.decoder = decoder;
+        this.decodeMemoryBudgetMB = decodeMemoryBudgetMB;
+    }
+
+    public CalibrationRunner() : this(new ShardEncoder(), new ShardDecoder(), AppSettings.BuiltIn)
     {
     }
 
@@ -27,19 +43,25 @@ internal sealed class CalibrationRunner(IShardEncoder encoder, IShardDecoder dec
     {
         var probes = camera ? CameraProbes : ScreenProbes;
         int eccParity = camera ? CameraEccParity : ScreenEccParity;
-        Directory.CreateDirectory(outDir);
-        output.WriteLine($"Writing {probes.Length} {(camera ? "camera-profile " : "")}calibration probes ({width}x{height}) → {outDir}");
+        // A calibration is one generation too: build every probe under one private sibling and
+        // publish the directory only after all encodes succeed. Individual ShardEncoder calls
+        // deliberately refuse non-empty destinations, so each probe gets a private sub-generation
+        // which is then composed into this outer transaction.
+        using var calibrationOutput = new ShardEncoder.OutputTransaction(outDir);
+        output.WriteLine($"Writing {probes.Length} {(camera ? "camera-profile " : "")}calibration probes ({width}x{height}) → {ShardHeader.Display(outDir)}");
         foreach (var (cellPx, bits) in probes)
         {
             var layout = Layout.Create(width, height, cellPx, bits, eccParity, camera);
             int payloadSize = (int)Math.Max(1, (layout.UsableBytes - ShardHeader.Size("p.bin")) * 9 / 10);
-            string input = Path.Combine(outDir, $"cal-c{cellPx}b{bits}.bin");
+            string input = Path.Combine(calibrationOutput.StagingDirectory, $"cal-c{cellPx}b{bits}.bin");
+            string probeOutput = Path.Combine(calibrationOutput.StagingDirectory,
+                $".probe-c{cellPx}b{bits}-{Guid.NewGuid():N}");
             byte[] payload = new byte[payloadSize];
             new Random(cellPx * 100 + bits).NextBytes(payload);
             File.WriteAllBytes(input, payload);
             try
             {
-                encoder.Encode(input, outDir, new EncodeOptions
+                EncodeResult result = encoder.Encode(input, probeOutput, new EncodeOptions
                 {
                     Width = width,
                     Height = height,
@@ -49,6 +71,9 @@ internal sealed class CalibrationRunner(IShardEncoder encoder, IShardDecoder dec
                     CameraMode = camera,
                     Compress = false,
                 });
+                foreach (string file in result.Files)
+                    File.Move(file, Path.Combine(calibrationOutput.StagingDirectory, Path.GetFileName(file)));
+                Directory.Delete(probeOutput);
             }
             finally
             {
@@ -56,6 +81,7 @@ internal sealed class CalibrationRunner(IShardEncoder encoder, IShardDecoder dec
             }
             output.WriteLine($"  probe: cell {cellPx}px, {bits} bits/cell ({layout.UsableBytes:N0} B capacity)");
         }
+        calibrationOutput.Publish();
         output.WriteLine();
         output.WriteLine("Next: display each probe image full-screen at 100% zoom, capture it the way you");
         output.WriteLine("will capture real transfers (screenshot tool, phone photo, etc.), put the");
@@ -67,10 +93,14 @@ internal sealed class CalibrationRunner(IShardEncoder encoder, IShardDecoder dec
 
     public int Analyze(string capturedFolder, TextWriter output)
     {
-        var images = Directory.EnumerateFiles(capturedFolder)
-            .Where(f => Path.GetExtension(f).ToLowerInvariant() is ".png" or ".bmp" or ".jpg" or ".jpeg" or ".webp" or ".tif" or ".tiff")
-            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        IEnumerable<string> candidates = Directory.EnumerateFiles(capturedFolder)
+            .Where(f => Path.GetExtension(f).ToLowerInvariant() is
+                ".png" or ".bmp" or ".jpg" or ".jpeg" or ".webp" or ".tif" or ".tiff");
+        // Calibration consumes the same untrusted capture-folder namespace as ordinary decode.
+        // Bound path/count materialization before sorting or diagnostics rather than letting a
+        // directory with millions of names exhaust memory outside the decoder's admission gates.
+        List<string> images = ShardDecoder.MaterializeInputPaths(
+            candidates, decodeMemoryBudgetMB);
         if (images.Count == 0)
         {
             output.WriteLine("No captured probe images found in the folder.");

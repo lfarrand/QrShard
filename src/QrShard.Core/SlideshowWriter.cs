@@ -14,8 +14,9 @@ namespace QrShard;
 /// frames are all harmless because every shard is self-describing and CRC/ECC-gated.
 ///
 /// The page stays tiny even for large transfers because it references the files beside it rather
-/// than base64-embedding and duplicating every shard in memory. The HUD overlay hides automatically
-/// in fullscreen so it never damages a recorded shard ('h' toggles it back).
+/// than base64-embedding and duplicating every shard in memory. Playback begins only after an
+/// explicit Start gesture requests browser fullscreen and removes every control/overlay from the
+/// frame. Each next image is decoded off-screen before the visible image is switched.
 /// </summary>
 internal sealed class SlideshowWriter : ISlideshowWriter
 {
@@ -113,13 +114,18 @@ internal sealed class SlideshowWriter : ISlideshowWriter
             <title>QrShard slideshow ({{imageFiles.Count}} images, {{intervalMs}} ms)</title>
             <style>
               html, body { margin: 0; height: 100%; background: #fff; overflow: hidden; }
-              img { width: 100vw; height: 100vh; object-fit: contain; image-rendering: pixelated; display: block; }
-              #hud { position: fixed; right: 12px; bottom: 8px; font: 13px system-ui, sans-serif;
-                     color: #333; background: #ffffffd0; padding: 3px 9px; border-radius: 4px; }
-              #hud.hidden { display: none; }
+              #shard { width: 100vw; height: 100vh; object-fit: contain; image-rendering: pixelated; display: block; }
+              #controls { position: fixed; inset: 0; display: grid; place-content: center; gap: 12px;
+                          text-align: center; font: 16px system-ui, sans-serif; color: #111;
+                          background: #fffffff2; }
+              #controls.hidden { display: none; }
+              button { font: inherit; padding: 10px 18px; cursor: pointer; }
             </style></head><body>
             <img id="shard" alt="shard">
-            <div id="hud"></div>
+            <div id="controls">
+              <button id="start" type="button" disabled>Start fullscreen playback</button>
+              <div id="status">Loading the first shard…</div>
+            </div>
             <script>
             const images = [
             """);
@@ -146,23 +152,65 @@ internal sealed class SlideshowWriter : ISlideshowWriter
             ];
             const interval = {{intervalMs}};
             const shard = document.getElementById("shard");
-            const hud = document.getElementById("hud");
-            let i = 0, cycle = 1, hudHidden = false;
-            function tick() {
-              shard.src = images[i];
-              hud.textContent = `image ${i + 1}/${images.length} · cycle ${cycle} · F11 fullscreen · press h to toggle this overlay`;
-              i = (i + 1) % images.length;
-              if (i === 0) cycle++;
+            const controls = document.getElementById("controls");
+            const start = document.getElementById("start");
+            const status = document.getElementById("status");
+            let i = 0, playing = false, timer = 0;
+
+            function queueNext(skipped = 0) {
+              if (!playing) return;
+              const nextIndex = (i + 1) % images.length;
+              const loader = new Image();
+              loader.onload = () => {
+                if (!playing) return;
+                shard.src = loader.src;
+                i = nextIndex;
+                timer = window.setTimeout(queueNext, interval);
+              };
+              loader.onerror = () => {
+                // Missing/corrupt sidecars are erasures: advance past them so image-level parity
+                // can do its job instead of stalling forever on one unreadable frame.
+                i = nextIndex;
+                if (skipped + 1 >= images.length)
+                  timer = window.setTimeout(() => queueNext(0), interval);
+                else
+                  queueNext(skipped + 1);
+              };
+              loader.src = images[nextIndex];
             }
-            function updateHud() {
-              hud.className = hudHidden || document.fullscreenElement ? "hidden" : "";
+
+            function loadFirst(index, remaining) {
+              if (remaining === 0) {
+                status.textContent = "No shard image could be loaded. Restore the image files and reload this page.";
+                return;
+              }
+              const loader = new Image();
+              loader.onload = () => {
+                shard.src = loader.src;
+                i = index;
+                start.disabled = false;
+                status.textContent = `${images.length} images · {{intervalMs}} ms each. Start recording after the controls disappear.`;
+              };
+              loader.onerror = () => loadFirst((index + 1) % images.length, remaining - 1);
+              loader.src = images[index];
             }
-            document.addEventListener("fullscreenchange", updateHud);
-            document.addEventListener("keydown", e => {
-              if (e.key === "h") { hudHidden = !hudHidden; updateHud(); }
-            });
-            setInterval(tick, interval);
-            tick();
+
+            async function begin() {
+              if (playing) return;
+              // requestFullscreen requires a user gesture. Even if browser policy denies it,
+              // controls are removed before playback so an F11/manual fullscreen recording is
+              // still clean.
+              try {
+                if (!document.fullscreenElement && document.documentElement.requestFullscreen)
+                  await document.documentElement.requestFullscreen();
+              } catch (_) { }
+              controls.className = "hidden";
+              playing = true;
+              timer = window.setTimeout(queueNext, interval);
+            }
+
+            start.addEventListener("click", begin);
+            loadFirst(0, images.length);
             </script></body></html>
             """);
             writer.Flush();

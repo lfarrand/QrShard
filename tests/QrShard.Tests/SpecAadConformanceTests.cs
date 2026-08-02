@@ -50,7 +50,8 @@ public class SpecAadConformanceTests
         Assert.Equal(0x10, ShardHeader.FlagArchive);
         Assert.Equal(0x20, ShardHeader.FlagFountain);
         Assert.Equal(0x40, ShardHeader.FlagAuthMeta);
-        Assert.Equal(0x7F, ShardHeader.KnownFlags);   // "any bit outside 0x7F" must be refused
+        Assert.Equal(0x80, ShardHeader.FlagAuthMetaV2);
+        Assert.Equal(0xFF, ShardHeader.KnownFlags);
     }
 
     [Fact]
@@ -74,7 +75,7 @@ public class SpecAadConformanceTests
     }
 
     [Fact]
-    public void UnknownFlags_AreRejectedByTheSharedHeaderParser()
+    public void AuthMetaV2WithoutItsRequiredEncryptionSuite_IsRejected()
     {
         var header = new ShardHeader
         {
@@ -87,7 +88,7 @@ public class SpecAadConformanceTests
             OriginalLength = 0,
             Flags = 0x80,
             Sha256 = SHA256.HashData([]),
-            FileName = "future.bin",
+            FileName = "invalid-v2.bin",
         };
 
         Assert.Null(ShardHeader.Deserialize(header.Serialize(), out _));
@@ -130,7 +131,7 @@ public class SpecAadConformanceTests
         // check that would have caught 0x40 being absent while the encoder set it on every
         // encrypted shard.
         string spec = File.ReadAllText(Path.Combine(SolutionRoot(), "SPEC.md"));
-        for (int bit = 0x01; bit <= 0x40; bit <<= 1)
+        for (int bit = 0x01; bit <= 0x80; bit <<= 1)
         {
             if ((ShardHeader.KnownFlags & bit) == 0)
                 continue;

@@ -76,6 +76,10 @@ public class ResourceBoundTests
             ShardEncoder.EstimateRenderWorkerBytes(layout, stream, imageWriterCopiesPixels: false));
         Assert.Equal(expectedPng + pixels,
             ShardEncoder.EstimateRenderWorkerBytes(layout, stream, imageWriterCopiesPixels: true));
+        Assert.Equal((long)layout.CodewordCount * Fec.CodewordLength * sizeof(int),
+            ShardEncoder.EstimateSharedInterleaveBytes(layout));
+        Assert.Equal(0, ShardEncoder.EstimateSharedInterleaveBytes(
+            Layout.Create(1920, 1080, 1, 8, 32, interleave2: false)));
     }
 
     [Fact]

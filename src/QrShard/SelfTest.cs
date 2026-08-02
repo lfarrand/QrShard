@@ -58,11 +58,11 @@ internal sealed class SelfTest(IShardEncoder encoder, IShardDecoder decoder) : I
 
             string shardDir = Path.Combine(root, "shards");
             var result = encoder.Encode(filePath, shardDir, opt);
-            output.WriteLine($"Testing '{Path.GetFileName(filePath)}' ({len:N0} bytes) at your settings:");
+            output.WriteLine($"Testing '{ShardHeader.Display(Path.GetFileName(filePath))}' ({len:N0} bytes) at your settings:");
             output.WriteLine($"  {result.ImageCount} image(s), {result.Width}x{result.Height}px, cell {opt.CellPx}px, " +
                              $"{opt.BitsPerCell} bits/cell, ECC {opt.EccParity}{(opt.CameraMode ? ", camera profile" : "")}.");
 
-            bool exact = DecodeMatches(shardDir, wantSha, out _);
+            bool exact = DecodeMatches(result.Files, shardDir, wantSha, out _, opt.Password);
             output.WriteLine($"  {(exact ? "PASS" : "FAIL")}  exact round-trip (pristine images)");
 
             bool degradedOk = true;
@@ -72,9 +72,14 @@ internal sealed class SelfTest(IShardEncoder encoder, IShardDecoder decoder) : I
                 string capDir = Path.Combine(root, $"cap{(int)(scale * 100)}");
                 Directory.CreateDirectory(capDir);
                 bool damage = scale == 1.25; // one pass draws a cursor over the data area
+                var captures = new List<string>(result.Files.Count);
                 foreach (string f in result.Files)
-                    SimulateScreenshot(f, Path.Combine(capDir, Path.GetFileName(f)), scale, damage);
-                bool ok = DecodeMatches(capDir, wantSha, out double util);
+                {
+                    string capture = Path.Combine(capDir, Path.GetFileNameWithoutExtension(f) + ".png");
+                    SimulateScreenshot(f, capture, scale, damage);
+                    captures.Add(capture);
+                }
+                bool ok = DecodeMatches(captures, capDir, wantSha, out double util, opt.Password);
                 degradedOk &= ok;
                 if (util >= 0)
                     worstUtil = Math.Max(worstUtil, util);
@@ -106,7 +111,7 @@ internal sealed class SelfTest(IShardEncoder encoder, IShardDecoder decoder) : I
         }
         catch (Exception ex) when (ex is IOException or ShardDecodeException or ArgumentException or InvalidOperationException or UnauthorizedAccessException)
         {
-            output.WriteLine($"error: {ex.Message}");
+            output.WriteLine($"error: {ShardHeader.Display(ex.Message)}");
             return 1;
         }
         finally
@@ -117,14 +122,15 @@ internal sealed class SelfTest(IShardEncoder encoder, IShardDecoder decoder) : I
 
     /// <summary>Decodes an image folder and checks the SHA against the original; also reports the
     /// worst-case ECC utilization across the images (-1 when no ECC or nothing decoded).</summary>
-    private bool DecodeMatches(string imageDir, byte[] wantSha, out double worstUtilization)
+    private bool DecodeMatches(IEnumerable<string> imagePaths, string workDir, byte[] wantSha,
+        out double worstUtilization, string? password = null)
     {
         worstUtilization = -1;
-        var images = Directory.EnumerateFiles(imageDir, "*.png").ToList();
-        string outPath = Path.Combine(imageDir, "restored.out");
+        var images = imagePaths.ToList();
+        string outPath = Path.Combine(workDir, "restored.out");
         try
         {
-            decoder.DecodeFolder(images, outPath, _ => { });
+            decoder.DecodeFolder(images, outPath, _ => { }, password);
         }
         catch (ShardDecodeException)
         {

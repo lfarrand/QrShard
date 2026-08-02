@@ -47,12 +47,16 @@ Hosted runners do **not** exercise a physical monitor, webcam, capture card, rea
 scaling, or a real X11 desktop. Treat live capture and display auto-detection as implemented but
 hardware-dependent; run `qrshard calibrate` on the actual sender/receiver setup.
 
-Video decoding and the live receiver additionally need [ffmpeg](https://ffmpeg.org) on `PATH`
+Video decoding and the live receiver additionally need [ffmpeg](https://ffmpeg.org) on an absolute,
+trusted `PATH` entry (or pinned with `FfmpegPath`)
 (animated png/gif/webp recordings decode natively without it).
 
 The tagged Native-AOT Linux binaries have explicit libc floors: **glibc 2.35** for `linux-x64`
 (built on Ubuntu 22.04) and **glibc 2.39** for `linux-arm64` (built on Ubuntu 24.04). On an older
-distribution, use the .NET tool package with a compatible .NET 10 runtime or build locally.
+distribution, use the .NET tool package with a compatible .NET 10 runtime or build locally. Linux
+standalone/local-publish binaries also require a system ICU installation (normally the distribution's
+`libicu` package): full Unicode normalization/casing is a path-safety boundary, so invariant
+globalization is deliberately not used or bundled.
 
 ## Installing
 
@@ -75,7 +79,10 @@ distribution, use the .NET tool package with a compatible .NET 10 runtime or bui
 - **As a library**: `dotnet add package QrShard.Core` — the embeddable codec, wire-compatible with
   the CLI. `QrShardCodec.EncodeFile` / `DecodeImages` for one-shot use, plus `QrShardDecodeSession`
   for **incremental** decoding: feed captures (files or in-memory image bytes) as they arrive,
-  query which images are still missing, and assemble the moment the set is recoverable.
+  query which images are still missing, and assemble the moment the set is recoverable. Its default
+  retained-shard ceiling is 4,000 decimal MB; embeddings can set a smaller explicit bound with
+  `new QrShardDecodeSession(password: null, decodeMemoryBudgetMB: 512)`. A refused addition leaves
+  session state unchanged and reports the resource limit in `QrShardAddResult.Error`.
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
   [Building](#building-and-testing) for the ImageSharp license note).
 
@@ -158,7 +165,8 @@ verified against a SHA-256 carried inside the shards. If decode says it succeede
 bit-identical.
 
 **Video mode — no manual capturing at all.** Add `--video` when encoding and `slideshow.html` is
-written next to the shards: open it in any browser, press F11, and it cycles every image forever
+written next to the shards: open it in any browser, press **Start fullscreen** (the required user
+gesture), and it cycles every image forever. Missing/unreadable frames are skipped as erasures
 (default 500 ms each; `--interval` to tune). The HTML page is a small **relative manifest**, not a
 self-contained copy: keep it beside the shard images and any generated `.slideshow-…-frame-….png`
 sidecars. Moving only the HTML file breaks its references. `--slideshow apng` instead writes one
@@ -220,6 +228,8 @@ so the rest of the desktop is never captured or scanned.
 | `-R, --recovery <pct>` | 0–100 | 0 (off) | Extra **parity images** (Cauchy erasure code), calculated as a percentage of data images and distributed per stripe. Loss tolerance is per stripe: `-R 15` adds about 15 parity images per 100 data images (~13% of the resulting set) |
 | `-F, --fountain <pct>` | 0–1000 | 0 (off) | **Fountain-coded frames** (random linear code) for video mode: a full-rank set of roughly `stripeData` captured frames per stripe reconstructs the data; dependent/duplicate frames do not count. Mutually exclusive with `-R` |
 | `-p, --password <pw>` | any string | off | AES-256-GCM encrypt the payload (PBKDF2-SHA256 key); decode needs the same password. Command-line passwords may be exposed in shell history and process listings |
+| `--password-file <file>` | strict UTF-8, optional UTF-8 BOM, ≤64 KiB/4096 characters | off | Read the password without placing it in argv; one trailing line ending is removed. UTF-16/32 and invalid UTF-8 are rejected |
+| `--password-stdin` | first line, ≤4096 characters | off | Read the password from standard input. Mutually exclusive with both other password forms |
 | `-f, --format <fmt>` | `png`, `bmp`, `tga`, `qoi`, `webp`, `tiff` | `png` | Lossless container format |
 | `--camera` | flag | off | Camera profile: finder patterns so shards decode from **photos/handheld video** of the screen; shifts defaults to cell 8 / 2 bits / ECC 32 |
 | `--video` | flag | off | Also write a slideshow (see `--slideshow`) for recording-based capture |
@@ -255,7 +265,9 @@ guarantees.
 |---|---|---|---|
 | `-o, --out <path>` | any path | original filename in the current directory (never overwrites — falls back to `<name>.restored<ext>`, then `.restored-2`, `.restored-3`, …) | Where to write the file (a directory for archive payloads). Single files are staged and verified before atomic publication; an archive destination must be absent or empty |
 | `-p, --password <pw>` | any string | — | Password for encrypted payloads. A wrong password fails without publishing plaintext, but lengths, image counts, and other cleartext shard metadata remain visible. Command-line values may appear in shell history/process listings |
-| `--session <file>` | any path | off | Accumulate shards across sittings: incomplete sets persist (exit 3) with a missing-image report; the next run resumes from the union; deleted on success. Applies to decoding **images**; a recording is re-read from the start each time, so passing it there is rejected rather than silently ignored |
+| `--password-file <file>` | strict UTF-8, optional UTF-8 BOM, ≤64 KiB/4096 characters | — | Read the password from a protected file; one trailing line ending is removed |
+| `--password-stdin` | first line, ≤4096 characters | — | Read from standard input. Exactly one password source may be used |
+| `--session <file>` | any path | off | Accumulate shards across sittings in an append journal; deleted on success. With an explicit `-o`, the destination must be a fresh, nonexistent path. Conflicting CRC-valid copies become a durable terminal erasure rather than first/last-wins. Applies to **images**; recordings are re-read and reject this option |
 | `--watch` | flag | off | Keep watching the folder: decode captures as they land, assemble the moment the set completes; Ctrl+C persists to the session |
 | `--clipboard` | flag | off | (Windows) decode the bitmap on the clipboard — snip a displayed shard with Win+Shift+S, no file saving; accumulates with `--session` |
 | `--fps <n>` | finite, >0 | 8 | Frame extraction rate when decoding a video recording. If not pinned, an incomplete file recording is automatically re-extracted at 2× then 4× until the set completes |
@@ -297,6 +309,8 @@ operation.
 | `--fps <n>` | finite, >0–120 | 10 (or `ReceiveFps`) | Capture sampling rate |
 | `-o, --out <path>` | any path | decoded-name rules above | Output file or archive directory |
 | `-p, --password <pw>` | any string | — | Password for an encrypted transfer; command-line exposure warning above applies |
+| `--password-file <file>` | strict UTF-8 file | — | Protected-file password source; mutually exclusive with `-p` and stdin |
+| `--password-stdin` | first line | — | Standard-input password source |
 
 ### Scripting: exit codes and `--json`
 
@@ -329,26 +343,32 @@ way — `.complete`, then `.files[].missing`:
 $ qrshard decode captures/ --json; echo "exit $?"
 {
   "complete": false,
+  "terminalConflicts": 0,
   "files": [
     { "fileName": "report.pdf", "fileId": "aca8f0d2a53524aa", "dataPresent": 24,
-      "dataTotal": 26, "parityPresent": 0, "recoverable": false, "missing": [3, 11] }
+      "dataTotal": 26, "parityPresent": 0, "recoverable": false,
+      "missingCount": 2, "missingTruncated": false, "missing": [3, 11] }
   ]
 }
 exit 3
 ```
 
-There is deliberately no `restored` key on that shape: when `-o` is omitted, a folder mixing one
-complete file with one incomplete file writes the complete one before stopping, and which files
-landed is not tracked on that path — so listing them would be a guess. An explicit `-o` cannot
-name multiple outputs, so a mixed-FileId folder must instead be decoded without it or split up.
+There is deliberately no `restored` key on that shape. Multi-family decode preflights every family
+and publishes **nothing** unless all are recoverable and internally consistent. `missing` is capped
+at 256 ordinals while `missingCount` remains exact; `terminalConflicts` reports ordinals for which
+two valid candidates from the same shard family disagreed. Inconsistent family metadata is a hard
+error, not an erasure that can poison a session. An explicit `-o` cannot name multiple outputs, so a mixed-FileId
+folder must be decoded without it or split up.
 
 ## Workflow tools: sessions, watch, verify, heatmap, calibrate
 
-- **Sessions** (`--session s`): capture in as many sittings as you like; every decoded shard
-  persists to a CRC-guarded session file and each run reports exactly what's still missing. The
-  file is atomically replaced with private permissions (requested Unix 0600, or stricter after
-  umask / protected owner-only Windows DACL), but it contains raw shard payloads — plaintext for
-  an unencrypted transfer — so protect it like the source.
+- **Sessions** (`--session s`): capture in as many sittings as you like. The owner-only v2 session
+  is atomically initialized, then extended as an exclusive, CRC-framed append journal; a torn final
+  record is recovered and repaired on the next save, while interior corruption fails closed.
+  Conflicting same-family valid candidates persist as compact terminal erasures and are treated as missing.
+  Deletion first quarantines and authenticates the exact opened object so a path-replacement race
+  cannot delete a foreign file. Sessions contain raw shard payloads — plaintext for an unencrypted
+  transfer — so protect them like the source.
 - **Watch mode** (`decode incoming/ --watch --session s`): leave the receiver running and just
   keep dropping captures in — it decodes each as it lands and assembles automatically.
 - **`verify`**: is this set complete/recoverable? Per-file data/parity counts, missing indices,
@@ -373,9 +393,7 @@ name multiple outputs, so a mixed-FileId folder must instead be decoded without 
 ## Configuration (appsettings.json)
 
 An optional `appsettings.json` next to the executable holds preferences and machine tuning.
-Comments are allowed in it, and the settings it ships with are documented inline there
-(`ReceiveFps`, `ReceiveDecodeWorkers` and `WatchPollMs` are accepted but not listed in the sample;
-the table below is the complete set). Precedence: **CLI flag >
+Comments are allowed in it, and the settings it ships with are documented inline there. Precedence: **CLI flag >
 appsettings.json > built-in default**. Invalid values fail loudly, naming the setting.
 
 | Setting | Supported values | Default | Description |
@@ -392,10 +410,11 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 | `PayloadCompressionLevel` | same four values | `Optimal` | Brotli level for compressing the file payload |
 | `EncodeMemoryBudgetMB` | 64–1000000 | 2000 | Planning budget for resident compressed/encrypted payload bytes, retained parity/FEC buffers, and image canvases. Compression is skipped when its conservative transient peak would exceed the budget; password encryption or a payload/parity plan that cannot fit one canvas is refused with an actionable error. Remaining capacity caps parallel workers, also hard-capped at the logical core count |
 | `DecodeMaxParallelism` | 0–1024 | 0 (auto: cores, capped at 24) | Upper bound on parallel image decodes. The memory planner and image count can reduce the actual pool further |
-| `DecodeMemoryBudgetMB` | 64–1000000 | 4000 | Worker-planning budget based on the largest identified source image at ~40 bytes/pixel. That is ~332 MB per 4K frame and ~1.92 GB per 48 MP photo, so the default plans about 12 and 2 workers respectively. It is not a hard process-memory ceiling or a reading of free RAM. A separate one-image admission gate charges ~6 bytes/pixel before load |
+| `DecodeMemoryBudgetMB` | 64–1000000 | 4000 | Configuration limit applied independently to worker planning (~40 bytes/pixel), per-image pre-load admission (~6 bytes/pixel), path/input materialization, retained successful payloads, fusion salvage/work, watch/video lifetime state, and retained session payload/header/key state. These are conservative admission ceilings, not one subtractive pool or a hard process-working-set limit. The on-disk session journal is separately capped at 3× this byte value |
 | `ReceiveFps` | >0–120 | 10 | Default frame rate for the live `receive` capture |
 | `WatchPollMs` | 50–60000 | 250 | Folder poll interval (ms) for `decode --watch` |
 | `ReceiveDecodeWorkers` | 0–64 | 0 (auto) | Parallel frame-decode workers for the live receiver |
+| `FfmpegPath` | absolute executable path | safe absolute PATH lookup | Pin the ffmpeg executable. Relative/current/application-directory discovery is refused; the child receives a restricted PATH |
 | `EncodeProfiles` | `{ "<name>": { …encode-default keys… } }` | (none) | Named encode presets selected with `--profile <name>`; each starts from `EncodeDefaults` and overrides only the keys it names |
 
 ### Tuning for a large machine
@@ -615,15 +634,13 @@ Six independent layers, from within-cell to whole-transfer:
    carried in every image and verified after reassembly — a successful decode strongly checks
    that the output matches the content declared by that shard set. This is content integrity,
    not sender authentication: an attacker who can replace the whole set can supply a new hash.
-   Encrypted payloads are additionally
-   authenticated by AES-GCM, which also **binds the cleartext identity fields** (original size,
-   SHA-256, filename) as associated data: because the header CRC is an integrity check, not a MAC,
-   an attacker could recompute it — but a tampered filename/size on an encrypted shard now fails
-   decryption up front rather than silently mis-routing a write. No other header field is AAD:
-   archive/transform/recovery flags remain CRC-only and can affect processing or availability.
-   In particular, flipping the Archive flag on authenticated bytes that already form a valid tar
-   can switch between restoring that tar as one file and extracting it; the safe archive-output
-   rules above remain the containment backstop.
+   Current encrypted payloads are additionally authenticated by the domain-separated AuthMetaV2
+   AES-GCM suite. Its associated data binds original size, SHA-256, exact UTF-8 filename, and the
+   family-wide compression/archive/fountain semantics, so changing a name/size or flipping Archive
+   fails authentication rather than redirecting or reinterpreting verified bytes. Per-image
+   ordinal/payload fields, image count, recovery geometry, and transformed length remain outside
+   the AAD; CRC, family-consistency, length, and final-SHA checks validate those before publication.
+   Older encrypted sets retain their documented legacy AAD behavior.
 6. **Structural redundancy**: the self-describing metadata strip and the palette calibration
    strip are duplicated top and bottom, so an overlay across either edge cannot brick an image.
    When both palette strips are healthy but differ (vertical illumination gradients — screen
@@ -900,24 +917,30 @@ Requires the exact .NET SDK **10.0.302** enforced by `global.json`. Run `dotnet 
 at the solution root. `./publish.ps1` and `bash ./publish.sh` create self-contained JIT single-file
 builds; tagged Native-AOT assets are built by the release workflow instead.
 
-Three workflows run on pushes to `main` and on every pull request (CI, Interop, Package), a fourth
-on pull requests only (Perf gate), and a fifth weekly or on manual dispatch (Fuzz):
+The repository's build, security-analysis, dependency, release-candidate, and scheduled assurance
+workflows are:
 
 | Workflow | What it guards |
 |---|---|
 | **CI** | Build + the full suite on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and macos-15 — every platform a release binary is published for. Each job renders totals, a per-class breakdown and the slowest tests into the run summary |
+| **CodeQL** | C# and GitHub Actions analysis on every PR/main push, weekly, and on manual dispatch |
+| **Dependency Review** | Rejects a pull request that introduces a dependency with a low-or-higher known vulnerability |
 | **Interop** | Four encoders x four decoders: shards encoded on each OS/arch must decode on every other, forcing parity reconstruction (where the x64 and arm64 GF(2⁸) paths could disagree) and covering the encrypted path |
 | **Package** | Packs both NuGet packages and consumes them from *outside* the repo — compiles the readme's own code sample against the packed package, round-trips through the public API, and installs the dotnet tool |
 | **Perf gate** | Base and head builds race the same 30 MB round trip; a >30% median regression fails |
+| **Release** | PR/manual runs exercise the complete read-only Native-AOT/package/SBOM candidate path; canonical `v*` tags alone can enter the protected promotion jobs |
+| **Dependency Submission** | Restores the locked graph and submits it to GitHub on `main` and manual runs |
 | **Fuzz** | Weekly, 20 000-seed deep run of the structure-aware fuzz suite: PNG/image decode, metadata/header parsing, crafted recovery geometry, sessions, encrypted blobs, and clipboard DIBs (the image-sized noise target uses a bounded subset) |
 
 The ImageSharp package runs a compile-time license-validation target. GitHub does not expose
 ordinary Actions secrets to fork or Dependabot pull requests, so the CI key is stored separately as
 an encrypted Dependabot secret as well as an Actions secret; it is never committed. Dependabot
-alerts, security updates, and weekly NuGet/GitHub-Actions update proposals are enabled. Bot PRs are
+alerts, security updates, and weekly NuGet/.NET-SDK/GitHub-Actions update proposals are enabled. Bot PRs are
 not auto-merged. Fork changes are not merged directly: a maintainer must reproduce them on a trusted
 repository branch and all required checks must pass. A red no-secret fork run is not evidence that
-the code itself failed.
+the code itself failed. Same-repository branches are a maintainer trust boundary because candidate
+MSBuild and package steps receive the encrypted ImageSharp build key; do not grant branch-write
+access to an untrusted contributor.
 
 `main` is covered by an active repository ruleset: changes require a pull request, open review
 threads must be resolved, and branch deletion and non-fast-forward updates are blocked. The rule
@@ -926,15 +949,14 @@ GitHub Actions app to pass against the latest `main`. It requires no approving r
 is presently a sole-maintainer repository, and it has no bypass actor. A separate active tag
 ruleset blocks update or deletion of every `v*` release tag, also without a bypass actor, while
 still allowing a new tag to be created. Repository Actions policy permits GitHub-owned actions plus
-the explicitly used
-`NuGet/login` and `dorny/test-reporter`, and requires every `uses:` reference to be a full commit
-SHA. These controls, the protected release environment, and release immutability are GitHub-side
+the explicitly used `NuGet/login`, `dorny/test-reporter`, and
+`advanced-security/component-detection-dependency-submission-action`, and requires every `uses:`
+reference to be a full commit SHA. These controls, the protected release environment, and release immutability are GitHub-side
 state rather than immutable files; re-verify them after a repository transfer or settings change.
 
 Tagged releases are stable-only: preflight requires canonical `vMAJOR.MINOR.PATCH` tags (so NuGet
 normalization cannot disguise an occupied version), requires the tag commit to be on `main`,
-requires the tag version to match both project versions, refuses the run if either package
-ID/version already exists on nuget.org, and fails closed unless the live `release` environment has
+requires the tag version to match both project versions, and fails closed unless the live `release` environment has
 a required reviewer and exactly one `v*` deployment tag policy, and the repository has the exact
 tag update/deletion rules and ref pattern described above. GitHub deliberately hides a ruleset's
 bypass actors from the read-only workflow token, so the current no-bypass setting remains a
@@ -959,45 +981,41 @@ repository currently has one maintainer, while administrator bypass is disabled.
 artifact-only, no-checkout job creates signed SLSA provenance for every release file, attaches each
 of the six artifact-specific signed SBOM predicates, and creates one complete draft containing the
 four archives, both packages, six SBOM documents, and `SHA256SUMS`. A downstream no-checkout NuGet
-OIDC job publishes and mirrors the tested package bytes, then a final no-checkout job makes the
+OIDC job first validates both exact package names and their bounded ZIP structure, then performs a
+read-only two-registry preflight. Any existing NuGet.org copy must have a valid repository signature
+and be semantically identical apart from that signature; any GitHub Packages copy must be
+byte-identical. Only after **all** existing copies pass does it publish missing immutable versions,
+poll and reconcile ambiguous responses, and mirror the tested bytes. A final no-checkout job makes the
 draft public and immutable. No repository code is checked out or built in a write-enabled job.
 
 ### Release recovery: partial NuGet publication
 
-If a package source accepts one package and a later push fails, neither rerunning the failed
-publication job nor starting a new/all-jobs run is safe: the former resubmits both packages,
-while the latter stops at preflight when it sees the occupied version. Adding `--skip-duplicate`
-would not prove that a remote duplicate contains this run's tested bytes. Use the reviewed manual
-recovery below; do not rebuild or retag the same version.
+If a package source accepts one package and a later write or response fails, leave the tag and draft
+in place and rerun the failed workflow jobs. The idempotent publication job discovers the official
+V3 package endpoints, validates every present copy across both registries before any new write,
+pushes only absent versions, and then downloads and authenticates the result. It never relies on
+`--skip-duplicate`, which would not prove byte identity. Never rebuild or retag the same version.
 
-Draft creation has one ambiguous failure mode: GitHub may create the release but the `gh release
-create` response may be lost, so the workflow records no owned draft and a rerun refuses the
-already-existing release. Do **not** automate deletion of that foreign-looking state. Inspect it
-manually first:
+Draft creation is likewise reconciled: a rerun accepts only an existing **draft**, rejects any
+unexpected asset, downloads every present asset, and requires exact byte equality before uploading
+missing assets. It never deletes an uncertain draft automatically. If provenance is unclear,
+inspect it manually:
 
 ```sh
 gh release view "$tag" --json isDraft,author,assets,targetCommitish,url
 ```
 
-Only if it is the expected workflow-owned draft, targets the intended commit, and contains no
-unexpected assets, delete the **release only** (`gh release delete "$tag" --yes`, without
-`--cleanup-tag`) and then use **Re-run failed jobs** on the same workflow run. Leave any uncertain
-or externally created release untouched and investigate instead.
+If it is not the expected workflow-owned draft targeting the intended commit, leave it untouched
+and investigate. Do not delete a draft merely to make a rerun pass.
 
 Recover the partial package publication as follows:
 
-1. Leave the tag and complete GitHub release **draft** in place. Inventory `QrShard.Tool` and
-   `QrShard.Core` separately on nuget.org and the GitHub Packages mirror.
-2. Retrieve the original run's retained `nuget-packages` artifact (seven-day retention), or the
-   matching nupkg assets already attached to the draft, and verify those local bytes against the
-   draft's `SHA256SUMS`. Never repack the same version.
-3. In a reviewed, no-checkout/no-build recovery job, use NuGet OIDC trusted publishing to push only
-   the missing original nupkg; mirror only missing package IDs to GitHub Packages. Inventory the
-   sources first rather than using a glob to hide which publication already succeeded.
-4. Consumer-test both package IDs at the released version, recheck the draft inventory, then
-   publish that existing draft and record the recovery in its notes. If the original bytes are no
-   longer available or fail their recorded hash, unlist the partial package, leave that version
-   occupied, and release a new version instead.
+1. Leave the tag and GitHub release **draft** in place and use **Re-run failed jobs** on the same run.
+2. The retained, already consumer-tested artifact is reconciled against each registry; present
+   copies must match and missing copies alone are pushed.
+3. The final job downloads the draft again, checks its exact inventory and bytes against the
+   workflow artifacts plus `SHA256SUMS`, then publishes it. If any occupied version or draft asset
+   differs, automation stops: leave that version occupied and release a new version after review.
 
 For releases produced by this workflow beginning with v1.6.2, GitHub stores signed SLSA provenance
 for every exact GitHub Release file (including `SHA256SUMS`) and an artifact-specific signed
@@ -1023,8 +1041,8 @@ environment variable. This is a technical notice, not legal advice.
   the CLI. `EnvironmentAssumptionTests` additionally exercises Turkish-I command dispatch,
   invariant settings/resolution parsing under hostile ambient cultures, Unicode filenames through
   the real filesystem encode/decode chain, and a forced single-worker decoder. The named-culture
-  theories require normal globalization data; invariant-globalization Native-AOT binaries are
-  exercised separately by release smoke tests.
+  theories and the Native-AOT release binaries use full globalization data; the exact AOT smoke
+  tests include canonically equivalent Unicode archive-name collision rejection.
 - **Cross-version interop**: `tests/QrShard.Tests/golden/` holds frozen shard fixtures encoded by
   the tagged binaries themselves; the suite asserts the current decoder still reconstructs every
   one byte-for-byte, so a shard encoded with an old release always decodes.

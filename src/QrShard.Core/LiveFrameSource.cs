@@ -6,15 +6,17 @@ namespace QrShard;
 /// The "path" given to <see cref="Frames"/> is the device spec; early stop kills ffmpeg,
 /// which ends the capture the moment the transfer completes.
 /// </summary>
-internal sealed class LiveFrameSource(string? format, int decodeMemoryBudgetMB) : IFrameSource
+internal sealed class LiveFrameSource(string? format, int decodeMemoryBudgetMB, string? ffmpegPath = null) : IFrameSource
 {
-    public LiveFrameSource(string? format) : this(format, AppSettings.Current.DecodeMemoryBudgetMB)
+    public LiveFrameSource(string? format)
+        : this(format, AppSettings.BuiltIn.DecodeMemoryBudgetMB, AppSettings.BuiltIn.FfmpegPath)
     {
     }
 
     public IEnumerable<Bitmap> Frames(string device, double fps, CancellationToken cancellationToken = default) =>
         RecordingFrameSource.FfmpegPipe(BuildInputArgs(format, device), fps,
-            decodeMemoryBudgetMB: decodeMemoryBudgetMB, cancellationToken: cancellationToken);
+            decodeMemoryBudgetMB: decodeMemoryBudgetMB, cancellationToken: cancellationToken,
+            ffmpegPath: ffmpegPath);
 
     /// <summary>ffmpeg input arguments for the platform's capture framework.</summary>
     internal static string[] BuildInputArgs(string? format, string device)

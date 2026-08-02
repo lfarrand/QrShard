@@ -176,9 +176,20 @@ var data = new byte[120_000];
 new Random(7).NextBytes(data);
 File.WriteAllBytes(input, data);
 
-var codec = new QrShardCodec();
-codec.EncodeFile(input, Path.Combine(dir, "shards"));
-codec.DecodeImages(Directory.GetFiles(Path.Combine(dir, "shards"), "*.png"), Path.Combine(dir, "out.bin"));
+// A library must not claim a generic host's ordinary appsettings.json. Older QrShard.Core
+// constructors parsed this adjacent file and rejected unrelated Logging/ConnectionStrings keys.
+string hostSettings = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+File.WriteAllText(hostSettings, """{ "Logging": { "LogLevel": { "Default": "Information" } } }""");
+try
+{
+    var codec = new QrShardCodec();
+    codec.EncodeFile(input, Path.Combine(dir, "shards"));
+    codec.DecodeImages(Directory.GetFiles(Path.Combine(dir, "shards"), "*.png"), Path.Combine(dir, "out.bin"));
+}
+finally
+{
+    File.Delete(hostSettings);
+}
 
 bool identical = File.ReadAllBytes(input).AsSpan().SequenceEqual(File.ReadAllBytes(Path.Combine(dir, "out.bin")));
 Directory.Delete(dir, true);

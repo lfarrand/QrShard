@@ -49,7 +49,13 @@ methods — construct it once and reuse it.
 
 For capture that arrives over time, `QrShardDecodeSession` decodes incrementally: feed images
 (paths or in-memory bytes) as they land, ask which are still missing, and assemble the moment the
-set becomes recoverable.
+set becomes recoverable. Status keeps an exact `MissingImageCount` while bounding the diagnostic
+`MissingImages` prefix to 256 ordinals. Differing CRC-valid copies from the same family make that
+ordinal a terminal erasure; inconsistent family metadata is rejected. Retained valid shards have
+a byte and metadata-aware count ceiling (4,000 decimal MB by default). A lower embedding-specific
+bound can be selected with
+`new QrShardDecodeSession(password: null, decodeMemoryBudgetMB: 512)`; a resource refusal is returned
+in `QrShardAddResult.Error` without changing the session.
 
 Shards are order-independent, duplicate-tolerant and filename-agnostic, and shards belonging to
 different files can share a folder without being confused for one another.
@@ -72,8 +78,8 @@ per entry, and 200,000 distinct path nodes. Single-file and prepared-archive pay
 - **Cross-shard parity** or **fountain coding** so whole missing images are rebuilt without
   recapture
 - **Multi-capture fusion** — several photos that each fail on their own combined into one good read
-- **AES-256-GCM** encryption, binding original length, SHA-256, and filename—not the whole
-  header—as associated data
+- **AES-256-GCM** encryption with versioned AAD binding original length, SHA-256, filename, and
+  transformation/archive semantics
 - **Camera capture** — finder patterns, homography, and rectification for photos and handheld video
 
 The wire format is fully specified in [SPEC.md](https://github.com/lfarrand/QrShard/blob/main/SPEC.md);

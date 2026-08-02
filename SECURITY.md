@@ -37,14 +37,12 @@ bit-exactness is verified rather than assumed. Beneath that sit a CRC-32 per pay
 CRC-32-protected headers.
 
 Header integrity is a **checksum, not a MAC**: CRC-32 detects accidental corruption, and an
-attacker who rewrites a header can recompute it. For encrypted payloads, AES-GCM associated data
-binds exactly the original size, SHA-256, and file name, so changing one of those identity fields
-fails authentication. Other header fields — including archive, compression, and recovery flags —
-remain CRC-only even when the payload is encrypted. Rewriting them normally causes transform,
-family-consistency, or final-SHA failure, but changing the Archive flag on plaintext that is itself
-a valid tar can change whether verified bytes are returned as one file or safely extracted as a
-tree. The extraction boundaries below still apply. Encryption therefore protects payload
-confidentiality and the three listed identity fields; it is not a MAC over the whole header.
+attacker who rewrites a header can recompute it. Current encrypted shards use the AuthMetaV2
+AES-GCM associated-data suite: it domain-separates the cipher/KDF parameters and binds the original
+size, SHA-256, exact UTF-8 file name, and family-wide transformation flags. In particular, Archive
+cannot be toggled to turn an authenticated ordinary payload into an extraction operation.
+Per-image ordinal/payload fields and recovery geometry remain CRC/family/final-SHA checked rather
+than MACed. Legacy encrypted shards retain their documented older AAD behavior.
 **Treat every shard set as attacker-modifiable in transit at the unbound-header level**; for an
 unencrypted set, no header field has cryptographic authentication.
 
@@ -53,10 +51,10 @@ and nonce.
 
 ### Password handling
 
-`-p/--password` is a command-line argument. Depending on the operating system and shell, its value
-can be retained in shell history or visible to other local users through process inspection. The
-CLI currently has no prompt, environment-variable, or password-file input, so do not put a
-high-value reusable secret on the command line. Wrong-password or authentication failure does not
+`-p/--password` can be retained in shell history or visible through process inspection. Prefer
+`--password-file` (strict UTF-8, optional UTF-8 BOM, 64 KiB/4096-character cap) with suitable local
+permissions, or `--password-stdin` (one bounded line). The three sources are mutually exclusive;
+there is deliberately no environment-variable source. Wrong-password or authentication failure does not
 publish plaintext, but encryption does not hide the shard geometry, file name, original length,
 image count, or other cleartext header metadata.
 
@@ -65,9 +63,14 @@ Unicode normalization. Visually identical composed and decomposed strings are th
 passwords.
 
 Session files contain the captured shard payloads themselves. For an unencrypted transfer that is
-plaintext, not merely metadata. Saves use same-directory atomic replacement and private permissions
-(requested Unix 0600, or stricter after the process umask, or a protected owner-only Windows DACL),
-but the session path and its backups still need the same protection as the source file.
+plaintext, not merely metadata. A v2 session is atomically initialized with private permissions,
+then updated under an exclusive persistent `.lock` sidecar as an append-only CRC-framed journal.
+The final incomplete record can be recovered; interior corruption fails closed. Same-family valid
+candidates that disagree for one ordinal become a compact durable erasure, so neither arrival order
+selects a winner; inconsistent family metadata is rejected instead of persisted. Cleanup quarantines
+and authenticates the exact opened object before deletion. Protect the
+session and its reserved `.lock` sidecar like the source; session-backed explicit output must be a
+fresh path.
 
 ### Verified output and archive boundaries
 
@@ -123,11 +126,26 @@ Single-file and prepared-archive payloads are capped at 1.5 GB. Ordinary image l
 500-million-pixel ceiling and a separate pre-load admission charge of roughly 6 bytes/pixel against
 `DecodeMemoryBudgetMB`. Batch worker planning uses the largest identifiable input at roughly
 40 bytes/pixel; with the 4000 MB default this is about 332 MB/worker and 12 workers for 4K, or
-1.92 GB/worker and 2 workers for 48 MP. This throttles concurrency but is not a hard process-memory
-ceiling. APNG slideshow creation and native animated-image recording decode are capped at 256 MiB
+1.92 GB/worker and 2 workers for 48 MP. The same setting also bounds actual path/input
+materialization, retained CRC-valid payloads/count, fusion salvage/work, lifetime watch/video
+state, retained CLI journal state, and the public incremental session's default retained state.
+Embeddings can give `QrShardDecodeSession` a smaller explicit decimal-MB ceiling; rejected additions
+do not mutate it. These are independent conservative admission ceilings, not one subtractive pool
+or a hard process-working-set limit. Photo fusion admits at most eight compatible captures per layout,
+1024 layouts and 512 MiB of work, with retained cells limited to one eighth of the decode budget.
+Sessions admit at most one million unique keys/two million frames, and the physical journal is
+capped at three times the decoded-byte budget. APNG slideshow creation and native animated-image recording decode are capped at 256 MiB
 of decoded RGB frames; animated recording input is additionally capped at 4096 frames. Archive
 encode/decode is capped at 100,000 entries and 128 path segments per entry; decode also caps its
 collision-checking trie at 200,000 distinct path nodes.
+
+External helpers are never shell-invoked. A configured helper must be absolute; otherwise QrShard
+uses an absolute PATH lookup that skips relative, current, and application directories (and
+requires an executable file on Unix). ffmpeg receives structured arguments, a restricted child
+PATH, `-nostdin`, one worker/filter thread, protocol/pixel limits, bounded stderr and termination
+waits. `xrandr` and browser launchers use the same trusted-resolution policy and bounded execution
+where output is consumed. Terminal diagnostics replace control, bidi-format, line/paragraph
+separator, and invalid-surrogate characters and cap hostile names/messages; JSON uses JSON escaping.
 
 ### Release artifacts
 
@@ -142,6 +160,13 @@ archives use their RID-specific restore graph, including the corresponding runti
 tool/core packages use their ordinary framework-dependent graphs. Verify them using the constrained
 commands in README. Releases produced by this workflow are immutable, so GitHub locks their assets
 and tag and creates an additional release attestation. Older releases predate these controls.
+
+Write-enabled promotion jobs never check out or build repository code. Package publication first
+validates the exact Tool/Core candidates, bounded ZIP structure, and every existing version across
+NuGet.org and GitHub Packages. NuGet.org copies must be repository-signed and semantically match
+apart from that signature; GitHub copies must match byte-for-byte. Only after all present copies
+pass are missing immutable versions pushed and downloaded again, making an ambiguous partial
+publication safely rerunnable. Draft assets use the same fail-closed exact-inventory policy.
 
 These attestations authenticate artifact digests and workflow provenance, not platform publisher
 identity. The Windows executable is not Authenticode-signed. The workflow does not inspect the

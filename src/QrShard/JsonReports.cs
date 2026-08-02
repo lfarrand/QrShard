@@ -9,6 +9,7 @@ namespace QrShard;
 /// </summary>
 internal sealed class JsonReports
 {
+    internal const int MaxReportedMissingImages = 256;
     public string DryRunReport(EncodePlan plan, string outputDir)
     {
         using var ms = new MemoryStream();
@@ -90,23 +91,28 @@ internal sealed class JsonReports
     /// before throwing on an incomplete sibling, and that partial list does not survive the throw,
     /// so claiming a restored set here would be a guess.
     /// </summary>
-    public string DecodeIncompleteReport(List<DecodedShard> shards, IParityReassembler parity) =>
-        SetStatusReport(shards, parity);
+    public string DecodeIncompleteReport(List<DecodedShard> shards, IParityReassembler parity,
+        int terminalConflicts = 0) => SetStatusReport(shards, parity, terminalConflicts);
 
-    public string VerifyReport(List<DecodedShard> shards, IParityReassembler parity) =>
-        SetStatusReport(shards, parity);
+    public string VerifyReport(List<DecodedShard> shards, IParityReassembler parity,
+        int terminalConflicts = 0) => SetStatusReport(shards, parity, terminalConflicts);
 
-    private static string SetStatusReport(List<DecodedShard> shards, IParityReassembler parity)
+    private static string SetStatusReport(List<DecodedShard> shards, IParityReassembler parity,
+        int terminalConflicts)
     {
         using var ms = new MemoryStream();
         using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
         {
             w.WriteStartObject();
             w.WriteBoolean("complete", shards.Count > 0 && parity.IsSetComplete(shards));
+            w.WriteNumber("terminalConflicts", terminalConflicts);
             w.WriteStartArray("files");
             foreach (var group in shards.GroupBy(s => s.Header.FileId))
             {
                 var first = group.First().Header;
+                if (group.Any(s => !first.HasSameFamilyAs(s.Header)))
+                    throw new ShardDecodeException(
+                        $"Shard set contains inconsistent metadata for file {first.FileId:x16}.");
                 var have = group.Where(s => !s.Header.IsParity).Select(s => s.Header.Index).ToHashSet();
                 w.WriteStartObject();
                 w.WriteString("fileName", first.FileName);
@@ -115,9 +121,17 @@ internal sealed class JsonReports
                 w.WriteNumber("dataTotal", first.Count);
                 w.WriteNumber("parityPresent", group.Count(s => s.Header.IsParity));
                 w.WriteBoolean("recoverable", parity.IsSetComplete([.. group]));
+                int missingCount = first.Count - have.Count;
+                w.WriteNumber("missingCount", missingCount);
+                w.WriteBoolean("missingTruncated", missingCount > MaxReportedMissingImages);
                 w.WriteStartArray("missing");
-                foreach (int i in Enumerable.Range(0, first.Count).Where(i => !have.Contains(i)))
-                    w.WriteNumberValue(i + 1);
+                int reported = 0;
+                for (int i = 0; i < first.Count && reported < MaxReportedMissingImages; i++)
+                    if (!have.Contains(i))
+                    {
+                        w.WriteNumberValue((long)i + 1);
+                        reported++;
+                    }
                 w.WriteEndArray();
                 w.WriteEndObject();
             }

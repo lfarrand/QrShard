@@ -190,7 +190,15 @@ public class FuzzTests
             byte[] data = rng.Next(2) == 0 ? Mutate(valid, rng) : Mutate(new byte[rng.Next(512)], rng);
             string path = tmp.File("fuzz.qrsession");
             File.WriteAllBytes(path, data);
-            store.Load(path);
+            try
+            {
+                store.Load(path);
+            }
+            catch (InvalidDataException)
+            {
+                // Strict session parsing rejects corruption visibly. Unlike the former empty-list
+                // fallback, this is the domain result that protects a foreign file from overwrite.
+            }
         });
     }
 

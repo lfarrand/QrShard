@@ -8,9 +8,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
       QRSHARD_FUZZ_ITERATIONS: '20000'
       DOTNET_NOLOGO: true

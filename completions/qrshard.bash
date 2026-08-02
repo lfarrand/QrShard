@@ -13,13 +13,13 @@ _qrshard() {
 
     case "${COMP_WORDS[1]}" in
         encode|send)
-            COMPREPLY=( $(compgen -W "-o --out -r --resolution -c --cell -b --bits -e --ecc -R --recovery -F --fountain -p --password -f --format -i --interval --slideshow --profile --camera --video --open --no-compress --interleave2 --json --dry-run" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "-o --out -r --resolution -c --cell -b --bits -e --ecc -R --recovery -F --fountain -p --password --password-file --password-stdin -f --format -i --interval --slideshow --profile --camera --video --open --no-compress --interleave2 --json --dry-run" -- "${cur}") )
             ;;
         decode)
-            COMPREPLY=( $(compgen -W "-o --out -p --password --session --watch --clipboard --fps --json" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "-o --out -p --password --password-file --password-stdin --session --watch --clipboard --fps --json" -- "${cur}") )
             ;;
         receive)
-            COMPREPLY=( $(compgen -W "--device --format --screen --region --fps -o --out -p --password" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "--device --format --screen --region --fps -o --out -p --password --password-file --password-stdin" -- "${cur}") )
             ;;
         verify)
             COMPREPLY=( $(compgen -W "--session --json" -- "${cur}") )
@@ -31,7 +31,7 @@ _qrshard() {
             COMPREPLY=( $(compgen -W "-o --out -r --resolution --camera" -- "${cur}") )
             ;;
         test)
-            COMPREPLY=( $(compgen -W "-r --resolution -c --cell -b --bits -e --ecc -R --recovery -F --fountain -p --password -f --format --profile --camera --no-compress --interleave2" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "-r --resolution -c --cell -b --bits -e --ecc -R --recovery -F --fountain -p --password --password-file --password-stdin -f --format --profile --camera --no-compress --interleave2" -- "${cur}") )
             ;;
     esac
 

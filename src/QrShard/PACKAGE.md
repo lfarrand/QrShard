@@ -60,14 +60,16 @@ qrshard decode captures/ --json            # machine-readable result, for script
 ```
 
 The HTML slideshow is a relative manifest: keep `slideshow.html` beside its shard images and any
-generated PNG sidecars. `--slideshow apng` makes a single file but refuses a set above 256 MiB of
-decoded RGB frames; use HTML for larger transfers.
+generated PNG sidecars, then use its **Start fullscreen** button. Missing frame files are skipped as
+erasures. `--slideshow apng` makes a single file but refuses a set above 256 MiB of decoded RGB
+frames; use HTML for larger transfers.
 
 Density ranges from ~212 KB per image at the robust default to ~4.9 MB with the Max4K profile and
 ~6.5 MB at 8-bit density on a 4K display, so a 100 MB file fits in 22 Max4K screenshots. Add
 `-R 10` for per-stripe parity, `-p <password>` for AES-256-GCM encryption, or `--camera` to make
-shards decode from photos. Passwords passed with `-p` may be visible in shell history and process
-listings.
+shards decode from photos. Prefer `--password-file` (strict UTF-8) or `--password-stdin` when argv
+exposure matters. Session-backed restores use an owner-only append journal, persist conflicting
+valid copies as terminal erasures, and require an explicit output to be a fresh path.
 
 Decoded single files are staged, length/SHA-256-verified, and atomically moved into place. Archive
 destinations must be absent or empty; extraction never merges into an existing tree, and the

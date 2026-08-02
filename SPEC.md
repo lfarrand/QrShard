@@ -10,9 +10,10 @@ field and unknown values are rejected rather than guessed at, so a shard written
 encoder will not decode on an older build. That is the intended direction — old shards keep
 working forever, new ones need a current reader.
 
-Header *flags* (§4.1) provide separate feature signalling: flags outside the known set are rejected,
-so the set can grow without changing the metadata layout version. A shard using a new flag still
-requires a decoder that understands that flag.
+Header *flags* (§4.1) provide separate feature signalling, but the one-byte field is now exhausted:
+all eight bits have assigned meanings. A future capability that cannot be expressed by their valid
+combinations requires a new metadata/header version or another explicitly specified extension;
+current decoders must not guess at it.
 
 This document specifies the on-image format completely enough to build an independent
 encoder/decoder. Everything a receiver needs is carried in the images themselves; the two
@@ -24,6 +25,10 @@ attacker who can replace the whole set can supply different content and its matc
 All multi-byte header integers are **little-endian** (C# `BinaryWriter`). Metadata-strip
 fields are **MSB-first bit-packed**. "Byte k of the cell stream" means the k-th byte of the
 de-imaged bitstream defined in §5.
+
+Unless an equation explicitly says integer division, `round(x)` means IEEE 754 round-to-nearest
+with ties to even (the default `Math.Round` midpoint rule in .NET). Unsigned 64-bit additions and
+multiplications in the pseudorandom generators wrap modulo 2⁶⁴.
 
 ## 1. Image geometry
 
@@ -95,7 +100,7 @@ Three versions exist. **Encoders SHOULD emit version 4**; decoders MUST read all
 | innerW | 16 | inner area width, px |
 | innerH | 16 | inner area height, px |
 | eccParity | 8 | RS parity symbols per codeword (even, 0–64; 0 = no ECC) |
-| crc16 | 16 | CRC-16/CCITT (poly 0x1021, init 0xFFFF) over the preceding 14 bytes |
+| crc16 | 16 | CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, refin=false, refout=false, xorout=0) over the preceding 14 bytes |
 
 Every one of the 128 modules is load-bearing: a single flipped module fails the CRC and the image
 is lost, **before** the Reed-Solomon protecting the data grid is ever consulted.
@@ -107,7 +112,7 @@ Same 128 modules, reallocated so the strip survives damage:
 | Bytes | Contents |
 |---:|---|
 | 0–8 | fields, 72 bits (below) |
-| 9–10 | CRC-16/CCITT over bytes 0–8 |
+| 9–10 | CRC-16/CCITT-FALSE (parameters above) over bytes 0–8 |
 | 11–15 | Reed-Solomon parity over bytes 0–10 |
 
 | Field | Bits | Meaning |
@@ -176,15 +181,23 @@ Carried at the front of every image's data stream (before ECC). Little-endian:
 | 14 | 4 | index — data: 0..count−1; parity/fountain: ordinal (§7, §8) |
 | 18 | 4 | count — number of DATA images |
 | 22 | 4 | payloadLength — bytes of payload in THIS image |
-| 26 | 4 | payloadCrc32 — CRC-32/IEEE (poly 0xEDB88320, reflected) of the payload |
+| 26 | 4 | payloadCrc32 — CRC-32/ISO-HDLC (reflected poly 0xEDB88320, init/xorout 0xFFFFFFFF, refin/refout=true) of the payload |
 | 30 | 8 | totalLength — length of the (transformed) stream that was split |
 | 38 | 8 | originalLength — length of the original source stream (file bytes, or tar bytes for Archive) |
 | 46 | 4 | stripeData — data images per stripe (0 = no cross-shard code) |
 | 50 | 4 | stripeParity — parity/coded images per stripe |
 | 54 | 32 | sha256 — of the original source stream (pre-compression, pre-encryption) |
 | 86 | 2 | nameLen (≤ 4096) |
-| 88 | nameLen | fileName, UTF-8 |
-| 88+n | 4 | headerCrc32 — CRC-32/IEEE over bytes 0..88+n |
+| 88 | nameLen | fileName, well-formed UTF-8 (invalid byte sequences are rejected) |
+| 88+n | 4 | headerCrc32 — CRC-32/ISO-HDLC over the half-open byte range `[0, 88+n)` |
+
+All signed header fields use their stated little-endian two's-complement width. `index`, `count`,
+`payloadLength`, `stripeData`, and `stripeParity` MUST be non-negative; `count` is 1–5,000,000,
+and a data-image `index` is less than `count`. `totalLength` and `originalLength` are 0–1,500,000,000
+in the reference profile, including any encryption overhead in `totalLength`. `nameLen` is at most
+4096 bytes. A parity/fountain `index` may occupy the full non-negative signed-32-bit range, although
+the declared ordinal space `ceil(count/stripeData)·stripeParity` is capped at 100,000,000. Values
+outside these domains are malformed rather than implementation-defined.
 
 ### 4.1 Flags
 
@@ -197,13 +210,15 @@ Carried at the front of every image's data stream (before ECC). Little-endian:
 | 0x10 | Archive | source stream is a PAX/POSIX tar of a directory or multi-input bundle (§9.1) |
 | 0x20 | Fountain | the parity images are random-linear fountain frames (§8) |
 | 0x40 | AuthMeta | with 0x08: the identity fields are bound as AES-GCM associated data (§9.3) |
-
-Bit 0x80 is unassigned. A decoder MUST refuse flag bits it does not know — i.e. any bit outside
-`0x7F`.
+| 0x80 | AuthMetaV2 | with 0x08/0x40: the current AAD suite also binds transformation/archive semantics (§9.3) |
 
 0x40 is only meaningful together with 0x08; on an unencrypted shard it has no meaning and a
 decoder MUST refuse it. Encoders from v1.3.4 onward set it on every encrypted shard, so a decoder
 that rejects it cannot read any current encrypted set.
+
+0x80 is only meaningful together with both 0x08 and 0x40; a decoder MUST refuse any other
+combination. Current encoders set all three bits on encrypted shards. Older authenticated sets that
+have 0x40 but not 0x80 use the legacy AAD layout below.
 
 ## 5. Cell stream, packing, and ECC
 
@@ -239,6 +254,8 @@ next(): state += 0x9E3779B97F4A7C15
         return z ^ (z >> 31)
 for i = length-1 down to 1: swap(perm[i], perm[next() mod (i+1)])
 ```
+
+Every addition and multiplication in this block wraps modulo 2⁶⁴; right shifts are logical.
 
 Padding bytes stay in place. Metadata version 3, and version 4 with `interleave2 = 1`, require
 `eccParity > 0`.
@@ -280,7 +297,9 @@ seed = fileId XOR (0x9E3779B97F4A7C15 * ((g as u32)·1000003 + (s as u32) + 1))
 of frames — identity rows for present data images plus coefficient rows for coded frames —
 whose rows reach rank `k`. Unlike Cauchy parity, fountain coding has no 255-row or
 originally-emitted-frame ceiling: a sender may mint additional distinct equations later. The
-resulting parity ordinal must still fit the header's non-negative signed 32-bit `index` field.
+resulting parity ordinal must still fit the header's non-negative signed 32-bit `index` field and
+the 100,000,000-element declared ordinal-space safety ceiling in §4. Arithmetic in the seed
+expression wraps modulo 2⁶⁴; the `u32` casts are zero-extension of the signed non-negative inputs.
 
 ## 9. Payload transforms
 
@@ -303,7 +322,9 @@ Entry names MUST be safe relative paths: no absolute paths, `.`/`..` segments, b
 separators, unsafe/non-portable platform names, or path components that collide after Unicode NFC
 normalization followed by invariant uppercase mapping (`ToUpperInvariant` in .NET). A decoder MUST
 reject links, devices, and any other non-regular/non-directory entry type, and MUST guard the
-resolved target against escaping the destination.
+resolved target against escaping the destination. An implementation whose globalization runtime
+cannot perform full Unicode normalization/casing MUST reject non-ASCII archive names rather than
+silently using reduced invariant-globalization tables.
 
 For an Archive payload, `originalLength` and `sha256` describe the exact **tar byte stream**, not
 the sum/hash of extracted files. A decoder verifies those tar bytes before extraction.
@@ -317,8 +338,8 @@ After optional archive packaging, transforms are applied to the whole source str
 2. **Encryption** (flag 0x08): AES-256-GCM. The encrypted stream is
    `salt(16) ‖ nonce(12) ‖ tag(16) ‖ ciphertext`; key = PBKDF2-HMAC-SHA256(password, salt,
    600 000 iterations, 32 bytes). Salt and nonce are freshly random per encode. The password is
-   encoded as UTF-8 exactly as supplied, with **no Unicode normalization**. When flag 0x40 is also
-   set, the GCM associated data is as in §9.3; when it is not, the associated data is empty.
+    encoded as UTF-8 exactly as supplied, with **no Unicode normalization**. Flags 0x40/0x80 select
+    the GCM associated-data suite in §9.3; without 0x40, the associated data is empty.
 
 `totalLength` is the final transformed stream's length. For a non-archive it is reversed as
 decrypt → decompress → length/SHA-256 verification. For an archive it is reversed as decrypt →
@@ -326,7 +347,7 @@ decompress → tar-byte length/SHA-256 verification → extraction. Thus `origin
 `sha256` always describe the stream immediately before compression/encryption: ordinary file bytes
 or, when 0x10 is set, the packaged tar bytes.
 
-### 9.3 Authenticated metadata (flag 0x40)
+### 9.3 Authenticated metadata (flags 0x40 and 0x80)
 
 The header is protected by a CRC-32, which is an error check and not a MAC: anyone who alters a
 header can recompute it. The original length, SHA-256, and file name are therefore bound into the
@@ -334,7 +355,8 @@ encryption itself, so rewriting any of those identity fields fails authenticatio
 decoding to the right bytes under the wrong name or length. This does not authenticate the whole
 header; the exact exclusions and their consequences are stated below.
 
-When flags 0x08 and 0x40 are both set, the AES-GCM **associated data** is the concatenation
+For legacy authenticated shards with 0x08/0x40 set and 0x80 clear, the AES-GCM **associated data**
+is the concatenation
 
 | Offset | Size | Field |
 |---|---|---|
@@ -342,27 +364,36 @@ When flags 0x08 and 0x40 are both set, the AES-GCM **associated data** is the co
 | 8 | 32 | `sha256` of the original source stream (file or archive tar) |
 | 40 | *n* | `fileName`, UTF-8, exactly the header's bytes, no terminator |
 
-giving `40 + n` bytes total. The values are those in this shard's header (§4); the encoder writes
-the same bytes it puts there. Nothing else is bound — not `fileId`, `index`, `count`,
-`totalLength`, `payloadLength` or the flags themselves.
+giving `40 + n` bytes total.
 
-Consequently, encryption does not provide semantic integrity for those excluded fields. Most
-flag changes fail later transform/family/SHA checks or affect only recovery availability. One
-important edge case remains: if the authenticated plaintext bytes already form a valid tar,
-rewriting and re-checksumming the Archive flag can change whether those same verified bytes are
-returned as one file or extracted as an archive. A decoder MUST apply §9.1 path/type rules and the
-verification-before-publication and non-merging rules in §10 regardless of authentication.
+For current shards with 0x08/0x40/0x80 set, the AAD is:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 48 | UTF-8/ASCII domain `QrShard-AAD-v2:AES-256-GCM:PBKDF2-SHA256-600000` followed by NUL |
+| 48 | 1 | the complete flags byte with only the per-image Parity bit (0x02) cleared |
+| 49 | 8 | `originalLength`, little-endian signed 64-bit |
+| 57 | 32 | `sha256` of the original source stream |
+| 89 | 4 | UTF-8 file-name byte length, little-endian signed 32-bit |
+| 93 | *n* | `fileName`, UTF-8, exactly the header's bytes, no terminator |
+
+This domain fixes the cipher/KDF interpretation and binds compression, archive, fountain, and AAD
+suite flags. Rewriting and re-checksumming Archive can therefore no longer turn one authenticated
+ordinary file into an extraction operation (or vice versa). `fileId`, ordinal/count, recovery
+geometry, `totalLength`, and per-image payload length/CRC remain outside the AAD; family,
+reassembly-length, payload CRC, and final SHA checks validate them before publication.
 
 For an empty non-archive file the encoder encrypts an empty plaintext with `originalLength = 0` and
 the SHA-256 of zero bytes, so the construction is unchanged.
 
-**Backward compatibility.** Shards written before v1.3.4 set 0x08 without 0x40. A decoder MUST
-decide from the flag, not from the presence of a password: with 0x40, use the associated data
-above; without it, use empty associated data. GCM treats empty and absent associated data
-identically, so an implementation may simply pass a zero-length buffer.
+**Backward compatibility.** Shards written before v1.3.4 set 0x08 without 0x40 and use empty AAD.
+Shards with 0x40 but not 0x80 use the legacy 40+*n* layout; shards with both use the current layout.
+A decoder MUST decide from the flags, not from the presence of a password. GCM treats empty and
+absent associated data identically, so an implementation may pass a zero-length buffer for the
+oldest suite.
 
-A decoder MUST NOT fall back to empty associated data when authenticated decryption fails with
-0x40 set — a tampered header is exactly what that failure means.
+A decoder MUST NOT fall back to an older/empty associated-data suite when authenticated decryption
+fails — a tampered header is exactly what that failure means.
 
 ## 10. Reassembly and verification
 
@@ -371,6 +402,11 @@ are irrelevant). Data payload lengths are the full capacity except the last imag
 via §7/§8 when images are missing, concatenate to `totalLength`, undo §9, then verify length
 = `originalLength` and SHA-256. Any mismatch is a decode failure — partial or unverified
 output MUST NOT be reported as success.
+
+For a data set with per-image payload capacity `cap`, `totalLength` MUST satisfy
+`(count−1)·cap < totalLength ≤ count·cap`, except that a one-image untransformed empty stream may
+have `totalLength = 0`. Every data image before the last has payload length `cap`; the last has
+`totalLength − (count−1)·cap`. This floor is checked before allocating or concatenating chunks.
 
 The QrShard reference decoder writes a single-file result to an unpredictable same-filesystem
 staging path and atomically publishes it only after successful verification. Archive extraction is

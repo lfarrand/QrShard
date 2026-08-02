@@ -65,8 +65,14 @@ internal interface IShardRenderer
 {
     ShardImageWriter CreateWriter(string format, Layout layout, AppSettings cfg);
 
+    /// <summary>
+    /// Acquires the deterministic permutation once for an encode operation. Keeping this return
+    /// value alive shares one large allocation across every render worker.
+    /// </summary>
+    int[]? PrepareInterleave(Layout layout);
+
     void RenderShard(Layout layout, Rgb24[] palette, byte[] metaModules, byte[] stream, int streamLength,
-        string outPath, RenderScratch scratch, ShardImageWriter writer);
+        string outPath, RenderScratch scratch, ShardImageWriter writer, int[]? interleavePermutation = null);
 }
 
 /// <summary>
@@ -83,9 +89,17 @@ internal sealed class ShardRenderer(Fec fec, BitStream bitStream, FastPng fastPn
     public ShardImageWriter CreateWriter(string format, Layout layout, AppSettings cfg) =>
         new(format, layout, cfg, fastPng, formats);
 
+    public int[]? PrepareInterleave(Layout layout)
+    {
+        if (!layout.Interleave2)
+            return null;
+        int protectedLength = checked(layout.CodewordCount * Fec.CodewordLength);
+        return interleaver.Permutation(protectedLength);
+    }
+
     /// <summary>The stream buffer holds [0..headerSize) header then payload, streamLength bytes total.</summary>
     public void RenderShard(Layout layout, Rgb24[] palette, byte[] metaModules, byte[] stream, int streamLength,
-        string outPath, RenderScratch scratch, ShardImageWriter writer)
+        string outPath, RenderScratch scratch, ShardImageWriter writer, int[]? interleavePermutation = null)
     {
         byte[] cellBuffer;
         if (layout.EccParity > 0)
@@ -102,7 +116,8 @@ internal sealed class ShardRenderer(Fec fec, BitStream bitStream, FastPng fastPn
             {
                 // v2 interleave: scatter the classic layout through the seeded permutation.
                 byte[] scattered = scratch.ScatterBuffer(cellLength);
-                interleaver.Scatter(cellBuffer, scattered, protectedLength);
+                int[] permutation = interleavePermutation ?? interleaver.Permutation(protectedLength);
+                Interleaver2.Scatter(cellBuffer, scattered, protectedLength, permutation);
                 Array.Copy(cellBuffer, protectedLength, scattered, protectedLength, cellLength - protectedLength);
                 cellBuffer = scattered;
             }

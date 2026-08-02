@@ -82,7 +82,8 @@ public class SessionAndDiagnosticsTests
         if (OperatingSystem.IsWindows())
             return;
         using var tmp = new TempDir();
-        string session = tmp.WriteFile("permissive.qrsession", "old"u8.ToArray());
+        string session = tmp.File("permissive.qrsession");
+        new SessionStore().Save(session, Array.Empty<DecodedShard>());
         File.SetUnixFileMode(session, ShardAssembler.PortableUnixFileModeMask |
             UnixFileMode.SetUser | UnixFileMode.SetGroup | UnixFileMode.StickyBit);
 
@@ -99,7 +100,8 @@ public class SessionAndDiagnosticsTests
         if (!OperatingSystem.IsWindows())
             return;
         using var tmp = new TempDir();
-        string session = tmp.WriteFile("permissive.qrsession", "old"u8.ToArray());
+        string session = tmp.File("permissive.qrsession");
+        new SessionStore().Save(session, Array.Empty<DecodedShard>());
         using WindowsIdentity identity = WindowsIdentity.GetCurrent();
         SecurityIdentifier current = identity.User!;
         var permissive = new FileSecurity();
@@ -152,7 +154,7 @@ public class SessionAndDiagnosticsTests
         }
 
         long before = GC.GetAllocatedBytesForCurrentThread();
-        Assert.Empty(new SessionStore().Load(path));
+        Assert.Throws<InvalidDataException>(() => new SessionStore().Load(path));
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.True(allocated < 1_000_000, $"malformed session allocated {allocated:N0} bytes");
     }
@@ -187,7 +189,7 @@ public class SessionAndDiagnosticsTests
             writer.Write(0);
         }
 
-        Assert.Empty(new SessionStore().Load(path));
+        Assert.Throws<InvalidDataException>(() => new SessionStore().Load(path));
     }
 
     [Fact]

@@ -13,6 +13,20 @@ public class AppSettingsTests
     }
 
     [Fact]
+    public void FfmpegPathMustBeAbsolute()
+    {
+        using var tmp = new TempDir();
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            LoadJson(tmp, """{ "FfmpegPath": "ffmpeg" }"""));
+        Assert.Contains("FfmpegPath", ex.Message);
+
+        string absolute = Path.GetFullPath(tmp.File(OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg"));
+        string jsonPath = tmp.File("absolute-settings.json");
+        File.WriteAllText(jsonPath, System.Text.Json.JsonSerializer.Serialize(new { FfmpegPath = absolute }));
+        Assert.Equal(absolute, AppSettings.Load(jsonPath).FfmpegPath);
+    }
+
+    [Fact]
     public void FileWithCommentsAndTrailingComma_Parses()
     {
         using var tmp = new TempDir();

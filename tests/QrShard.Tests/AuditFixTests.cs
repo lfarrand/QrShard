@@ -160,6 +160,15 @@ public class AuditFixTests
         Assert.Contains("-frame-000001.png", html);
         Assert.Single(Directory.GetFiles(tmp.File("shards"), ".slideshow-*-frame-000001.png"));
         Assert.DoesNotContain(";base64,", html);
+        Assert.Contains("requestFullscreen", html);
+        Assert.Contains("Start fullscreen playback", html);
+        Assert.Contains("i = nextIndex;", html);
+        Assert.Contains("queueNext(skipped + 1)", html);
+        Assert.Contains("loadFirst((index + 1) % images.length, remaining - 1)", html);
+        Assert.Contains("No shard image could be loaded", html);
+        Assert.Contains("controls.className = \"hidden\"", html);
+        Assert.Contains("const loader = new Image()", html);
+        Assert.DoesNotContain("F11 fullscreen", html);
     }
 
     // ---- Finding: public decode API leaks raw file-IO exceptions ----

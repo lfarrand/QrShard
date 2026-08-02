@@ -224,8 +224,10 @@ public class DecoderRobustnessTests
         byte[] contentA = TestData.Random(20_000, seed: 1);
         byte[] contentB = TestData.Random(20_000, seed: 2);
         string shardDir = tmp.Sub("shards");
-        new ShardEncoder().Encode(tmp.WriteFile("a.bin", contentA), shardDir, Fast);
-        new ShardEncoder().Encode(tmp.WriteFile("b.bin", contentB), shardDir, Fast);
+        var a = new ShardEncoder().Encode(tmp.WriteFile("a.bin", contentA), tmp.Sub("a-shards"), Fast);
+        var b = new ShardEncoder().Encode(tmp.WriteFile("b.bin", contentB), tmp.Sub("b-shards"), Fast);
+        foreach (string file in a.Files.Concat(b.Files))
+            File.Copy(file, Path.Combine(shardDir, Path.GetFileName(file)));
 
         string cwd = Environment.CurrentDirectory;
         Environment.CurrentDirectory = tmp.Sub("out");
@@ -247,8 +249,10 @@ public class DecoderRobustnessTests
     {
         using var tmp = new TempDir();
         string shardDir = tmp.Sub("shards");
-        new ShardEncoder().Encode(tmp.WriteFile("a.bin", TestData.Random(5_000, 1)), shardDir, Fast);
-        new ShardEncoder().Encode(tmp.WriteFile("b.bin", TestData.Random(5_000, 2)), shardDir, Fast);
+        var a = new ShardEncoder().Encode(tmp.WriteFile("a.bin", TestData.Random(5_000, 1)), tmp.Sub("a-shards"), Fast);
+        var b = new ShardEncoder().Encode(tmp.WriteFile("b.bin", TestData.Random(5_000, 2)), tmp.Sub("b-shards"), Fast);
+        foreach (string file in a.Files.Concat(b.Files))
+            File.Copy(file, Path.Combine(shardDir, Path.GetFileName(file)));
 
         var ex = Assert.Throws<ShardDecodeException>(() =>
             new ShardDecoder().DecodeFolder(Directory.EnumerateFiles(shardDir, "*.png"), tmp.File("out.bin"), _ => { }));

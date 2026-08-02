@@ -83,6 +83,24 @@ public class SendCalibrateClipboardTests
         Assert.Null(ClipboardReader.ParseDib(junk));
     }
 
+    [Fact]
+    public void CalibrateAnalyze_BoundsCapturePathMaterializationBeforeDiagnosis()
+    {
+        using var tmp = new TempDir();
+        string captures = tmp.Sub("many-captures");
+        int limit = ShardDecoder.SuccessfulShardRetentionBudget.MaximumInputCount(
+            decodeMemoryBudgetMB: 1);
+        for (int i = 0; i <= limit; i++)
+            File.WriteAllBytes(Path.Combine(captures, $"capture-{i:D4}.png"), []);
+        var calibration = new CalibrationRunner(new ShardEncoder(), new ShardDecoder(),
+            decodeMemoryBudgetMB: 1);
+
+        var ex = Assert.Throws<ShardResourceLimitException>(() =>
+            calibration.Analyze(captures, TextWriter.Null));
+
+        Assert.Contains("bounded image/path metadata allowance", ex.Message);
+    }
+
     /// <summary>Packs pixels as a CF_DIB: 40-byte BITMAPINFOHEADER + 24-bit BGR rows, 4-byte padded.</summary>
     private static byte[] BuildDib(Rgb24[] px, int width, int height, bool bottomUp)
     {

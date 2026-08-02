@@ -39,6 +39,29 @@ public class Interleave2Tests
     }
 
     [Fact]
+    public async Task LargePermutation_IsSingleFlightAndOnlyWeaklyRetained()
+    {
+        // Just above the 32 MiB strong-cache ceiling. Before the single-flight gate, simultaneous
+        // encode workers each built and retained their own ~34 MiB int array.
+        const int n = 8_400_000;
+        var interleaver = new Interleaver2();
+        using var start = new ManualResetEventSlim(false);
+        Task<int[]>[] callers = Enumerable.Range(0, 8).Select(_ => Task.Run(() =>
+        {
+            start.Wait();
+            return interleaver.Permutation(n);
+        })).ToArray();
+
+        start.Set();
+        int[][] results = await Task.WhenAll(callers);
+
+        Assert.All(results, permutation => Assert.Same(results[0], permutation));
+        Assert.Equal(1, interleaver.PermutationBuilds);
+        Assert.Equal(0, interleaver.CachedBytes); // large result is a weak hand-off, not a process-lifetime pin
+        Assert.Equal(n, results[0].Length);
+    }
+
+    [Fact]
     public void GatherStreams_ReusesOnePermutationForAllConfidenceInputs()
     {
         const int n = 10_000;

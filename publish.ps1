@@ -51,8 +51,7 @@ try {
         New-Item -ItemType Directory -Path $stage | Out-Null
         try {
             dotnet publish src/QrShard -c Release -r $rid --self-contained `
-                -p:PublishSingleFile=true -p:InvariantGlobalization=true `
-                -o $stage
+                -p:PublishSingleFile=true -o $stage
             if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for $rid (exit $LASTEXITCODE)" }
 
             if (Test-Path -LiteralPath $target) {

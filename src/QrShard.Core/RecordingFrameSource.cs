@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
-using System.Text;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats;
 using SixLabors.ImageSharp.PixelFormats;
@@ -18,18 +17,21 @@ internal sealed class RecordingFrameSource : IFrameSource
     internal const long MaxAnimatedDecodedBytes = 256L * 1024 * 1024;
     internal const int MaxAnimatedFrames = 4096;
     private readonly int decodeMemoryBudgetMB;
+    private readonly string? ffmpegPath;
 
-    public RecordingFrameSource() : this(AppSettings.Current)
+    public RecordingFrameSource() : this(AppSettings.BuiltIn)
     {
     }
 
-    public RecordingFrameSource(AppSettings settings) : this(settings.DecodeMemoryBudgetMB)
+    public RecordingFrameSource(AppSettings settings)
+        : this(settings.DecodeMemoryBudgetMB, settings.FfmpegPath)
     {
     }
 
-    internal RecordingFrameSource(int decodeMemoryBudgetMB)
+    internal RecordingFrameSource(int decodeMemoryBudgetMB, string? ffmpegPath = null)
     {
         this.decodeMemoryBudgetMB = decodeMemoryBudgetMB;
+        this.ffmpegPath = ffmpegPath;
     }
 
     public IEnumerable<Bitmap> Frames(string path, double fps, CancellationToken cancellationToken = default) =>
@@ -87,7 +89,7 @@ internal sealed class RecordingFrameSource : IFrameSource
         catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException
                                        and not ShardDecodeException)
         {
-            throw new ShardDecodeException($"'{Path.GetFileName(path)}' is not a readable image ({ex.Message}).");
+            throw new ShardDecodeException($"'{ShardHeader.Display(Path.GetFileName(path))}' is not a readable image ({ShardHeader.Display(ex.Message)}).");
         }
         using (image)
         for (int i = 0; i < image.Frames.Count; i++)
@@ -100,9 +102,13 @@ internal sealed class RecordingFrameSource : IFrameSource
         }
     }
 
-    private IEnumerable<Bitmap> FfmpegFrames(string path, double fps, CancellationToken cancellationToken) =>
-        FfmpegPipe(["-i", path], fps, decodeMemoryBudgetMB: decodeMemoryBudgetMB,
-            cancellationToken: cancellationToken);
+    private IEnumerable<Bitmap> FfmpegFrames(string path, double fps, CancellationToken cancellationToken)
+    {
+        string recording = Path.GetFullPath(path);
+        return FfmpegPipe(["-protocol_whitelist", "file,pipe", "-i", recording], fps,
+            decodeMemoryBudgetMB: decodeMemoryBudgetMB, cancellationToken: cancellationToken,
+            ffmpegPath: ffmpegPath);
+    }
 
     /// <summary>
     /// Streams frames out of anything ffmpeg can open — a file, or a live capture device —
@@ -112,11 +118,20 @@ internal sealed class RecordingFrameSource : IFrameSource
     /// </summary>
     internal static IEnumerable<Bitmap> FfmpegPipe(IReadOnlyList<string> inputArgs, double fps,
         string? extraFilter = null, int? decodeMemoryBudgetMB = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string? ffmpegPath = null)
     {
+        int budgetMB = decodeMemoryBudgetMB ?? AppSettings.BuiltIn.DecodeMemoryBudgetMB;
         string filter = $"fps={fps.ToString(System.Globalization.CultureInfo.InvariantCulture)}"
                         + (extraFilter is null ? "" : "," + extraFilter);
-        ProcessStartInfo psi = BuildFfmpegStartInfo(inputArgs, filter);
+        string? executable = ExternalToolResolver.Resolve("ffmpeg", ffmpegPath);
+        if (executable is null)
+            throw new ShardDecodeException(
+                ffmpegPath is null
+                    ? "Decoding video files requires ffmpeg on an absolute PATH entry (https://ffmpeg.org), " +
+                      "or set FfmpegPath in appsettings.json. Alternatively, extract frames yourself and decode the folder."
+                    : $"The configured ffmpeg executable does not exist or is not executable: " +
+                      $"{ShardHeader.Display(ffmpegPath)}");
+        ProcessStartInfo psi = BuildFfmpegStartInfo(executable, inputArgs, filter, budgetMB);
 
         Process process;
         try
@@ -126,14 +141,12 @@ internal sealed class RecordingFrameSource : IFrameSource
         catch (System.ComponentModel.Win32Exception)
         {
             throw new ShardDecodeException(
-                "Decoding video files requires ffmpeg on PATH (https://ffmpeg.org). " +
-                "Alternatively, extract frames yourself and decode the folder.");
+                $"Could not start the configured ffmpeg executable: {ShardHeader.Display(executable)}");
         }
 
         // This method is an iterator, so process creation is deferred until the caller actually
         // enumerates and the child is immediately owned by ReadFrames' try/finally.
-        foreach (Bitmap frame in ReadFrames(process,
-                     decodeMemoryBudgetMB ?? AppSettings.Current.DecodeMemoryBudgetMB, cancellationToken))
+        foreach (Bitmap frame in ReadFrames(process, budgetMB, cancellationToken))
             yield return frame;
     }
 
@@ -155,21 +168,36 @@ internal sealed class RecordingFrameSource : IFrameSource
     /// argument string. A quote in a legal Unix filename used to split one -i value into injected
     /// ffmpeg options even though no shell was involved.
     /// </summary>
-    internal static ProcessStartInfo BuildFfmpegStartInfo(IReadOnlyList<string> inputArgs, string filter)
+    internal static ProcessStartInfo BuildFfmpegStartInfo(string ffmpegExecutable,
+        IReadOnlyList<string> inputArgs, string filter, int decodeMemoryBudgetMB)
     {
-        var psi = new ProcessStartInfo("ffmpeg")
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        foreach (string argument in new[] { "-hide_banner", "-loglevel", "error" })
+        ProcessStartInfo psi = ExternalToolResolver.CreateStartInfo(ffmpegExecutable);
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        foreach (string argument in new[]
+                 {
+                     "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1",
+                     "-filter_threads", "1", "-max_pixels", MaxFfmpegPixels(decodeMemoryBudgetMB).ToString(
+                         System.Globalization.CultureInfo.InvariantCulture),
+                 })
             psi.ArgumentList.Add(argument);
         foreach (string argument in inputArgs)
             psi.ArgumentList.Add(argument);
-        foreach (string argument in new[] { "-vf", filter, "-c:v", "bmp", "-f", "image2pipe", "-" })
+        foreach (string argument in new[]
+                 {
+                     "-an", "-sn", "-dn", "-vf", filter, "-threads", "1", "-c:v", "bmp",
+                     "-f", "image2pipe", "-",
+                 })
             psi.ArgumentList.Add(argument);
         return psi;
+    }
+
+    internal static long MaxFfmpegPixels(int decodeMemoryBudgetMB)
+    {
+        const long ProtocolPixelCap = 500_000_000;
+        const int ConservativeBytesPerPixel = 10; // BMP plus two managed RGB24 surfaces and overhead
+        return Math.Max(1, Math.Min(ProtocolPixelCap,
+            checked(decodeMemoryBudgetMB * 1_000_000L) / ConservativeBytesPerPixel));
     }
 
     private static IEnumerable<Bitmap> ReadFrames(Process process, int decodeMemoryBudgetMB,
@@ -177,26 +205,17 @@ internal sealed class RecordingFrameSource : IFrameSource
     {
         using CancellationTokenRegistration cancellationRegistration = cancellationToken.Register(
             static state => TryStopProcess((Process)state!), process);
+        using var errorDrainCancellation = new CancellationTokenSource();
+        Task<string> errorDrain = ReadBoundedErrorTailAsync(
+            process.StandardError, MaxErrorTailChars, errorDrainCancellation.Token);
         try
         {
             // Both streams are redirected. If stderr is not drained while stdout is read, ffmpeg
-            // eventually fills its stderr pipe and blocks forever waiting for space. Keep only a
-            // bounded tail for diagnostics; the asynchronous handler continuously drains the rest.
-            const int MaxErrorTailChars = 4096;
-            var errorTail = new StringBuilder();
-            object errorLock = new();
-            process.ErrorDataReceived += (_, e) =>
-            {
-                if (e.Data is null)
-                    return;
-                lock (errorLock)
-                {
-                    errorTail.AppendLine(e.Data);
-                    if (errorTail.Length > MaxErrorTailChars)
-                        errorTail.Remove(0, errorTail.Length - MaxErrorTailChars);
-                }
-            };
-            process.BeginErrorReadLine();
+            // eventually fills its stderr pipe and blocks forever waiting for space. Do not use
+            // BeginErrorReadLine here: its internal line accumulator is unbounded until a newline
+            // arrives, so one hostile/helper-generated line can consume arbitrary memory before a
+            // DataReceived handler gets a chance to trim it. The fixed-buffer drain retains only a
+            // small tail regardless of line boundaries while continuously emptying the pipe.
 
             var stdout = process.StandardOutput.BaseStream;
             const int BmpHeaderBytes = 54; // ffmpeg's bmp encoder emits BITMAPINFOHEADER
@@ -252,20 +271,132 @@ internal sealed class RecordingFrameSource : IFrameSource
                 yield return decoded;
             }
 
-            process.WaitForExit(); // also waits for the asynchronous stderr drain to finish
-            if (!cancellationToken.IsCancellationRequested && !producedFrame && process.ExitCode != 0)
+            const int ExitTimeoutMs = 5_000;
+            if (!process.WaitForExit(ExitTimeoutMs))
             {
-                string detail;
-                lock (errorLock)
-                    detail = errorTail.ToString().Trim();
-                throw new ShardDecodeException("ffmpeg could not decode the recording" +
+                TryStopProcess(process);
+                bool stopped = process.WaitForExit(2_000);
+                if (!cancellationToken.IsCancellationRequested)
+                    throw new ShardDecodeException("ffmpeg did not exit after closing its frame stream.");
+                if (!stopped)
+                    yield break;
+            }
+            else
+            {
+                process.WaitForExit();
+            }
+            string errorTail = CompleteErrorDrain(errorDrain, errorDrainCancellation,
+                ErrorDrainCompletionTimeoutMs);
+            if (!cancellationToken.IsCancellationRequested && process.ExitCode != 0)
+            {
+                string detail = errorTail.Trim();
+                throw new ShardDecodeException((producedFrame
+                    ? "ffmpeg stopped with an error after decoding part of the recording"
+                    : "ffmpeg could not decode the recording") +
                     (detail.Length == 0 ? "." : $": {ShardHeader.Display(detail)}"));
             }
         }
         finally
         {
             TryStopProcess(process); // early stop: no need to demux the rest of the recording
+            WaitForStoppedProcess(process, milliseconds: 2_000);
+            _ = CompleteErrorDrain(errorDrain, errorDrainCancellation,
+                ErrorDrainCompletionTimeoutMs);
             process.Dispose();
+        }
+    }
+
+    private const int MaxErrorTailChars = 4096;
+    private const int ErrorDrainCompletionTimeoutMs = 2_000;
+
+    /// <summary>
+    /// Continuously drains a helper's stderr through a fixed-size read buffer and retains only the
+    /// final <paramref name="retainedChars"/> characters. Reading characters directly is important:
+    /// line-oriented Process APIs buffer a complete line internally before notifying the caller,
+    /// which makes an aggregate tail cap ineffective for a stream without newlines.
+    /// </summary>
+    internal static async Task<string> ReadBoundedErrorTailAsync(TextReader reader, int retainedChars,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(retainedChars);
+        char[] readBuffer = new char[4096];
+        char[] tail = new char[retainedChars];
+        int start = 0, count = 0;
+        try
+        {
+            while (true)
+            {
+                int read = await reader.ReadAsync(readBuffer.AsMemory(), cancellationToken)
+                    .ConfigureAwait(false);
+                if (read == 0)
+                    break;
+                AppendTail(tail, ref start, ref count, readBuffer.AsSpan(0, read));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException ||
+                                   ex is OperationCanceledException && cancellationToken.IsCancellationRequested)
+        {
+            // Process exit/kill closes redirected pipes. Diagnostics are best-effort; retain the
+            // bounded bytes already observed rather than replacing the decode's real outcome.
+        }
+
+        if (count == 0)
+            return string.Empty;
+        var result = new char[count];
+        int first = Math.Min(count, tail.Length - start);
+        tail.AsSpan(start, first).CopyTo(result);
+        if (first < count)
+            tail.AsSpan(0, count - first).CopyTo(result.AsSpan(first));
+        return new string(result);
+    }
+
+    private static void AppendTail(char[] tail, ref int start, ref int count,
+        ReadOnlySpan<char> value)
+    {
+        if (tail.Length == 0 || value.Length == 0)
+            return;
+        if (value.Length >= tail.Length)
+        {
+            value[^tail.Length..].CopyTo(tail);
+            start = 0;
+            count = tail.Length;
+            return;
+        }
+
+        int overflow = Math.Max(0, count + value.Length - tail.Length);
+        start = (start + overflow) % tail.Length;
+        count -= overflow;
+        int end = (start + count) % tail.Length;
+        int first = Math.Min(value.Length, tail.Length - end);
+        value[..first].CopyTo(tail.AsSpan(end));
+        if (first < value.Length)
+            value[first..].CopyTo(tail);
+        count += value.Length;
+    }
+
+    internal static string CompleteErrorDrain(Task<string> drain, CancellationTokenSource cancellation,
+        int milliseconds)
+    {
+        try
+        {
+            return drain.WaitAsync(TimeSpan.FromMilliseconds(milliseconds)).GetAwaiter().GetResult();
+        }
+        catch (TimeoutException)
+        {
+            cancellation.Cancel();
+            try
+            {
+                return drain.WaitAsync(TimeSpan.FromMilliseconds(milliseconds)).GetAwaiter().GetResult();
+            }
+            catch (Exception ex) when (ex is TimeoutException or OperationCanceledException or IOException or
+                                           ObjectDisposedException)
+            {
+                return string.Empty;
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+        {
+            return string.Empty;
         }
     }
 
@@ -274,12 +405,27 @@ internal sealed class RecordingFrameSource : IFrameSource
         try
         {
             if (!process.HasExited)
-                process.Kill();
+                process.Kill(entireProcessTree: true);
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or
                                          NotSupportedException or ObjectDisposedException)
         {
             // Best effort: cancellation may race natural process exit or final disposal.
+        }
+    }
+
+    private static void WaitForStoppedProcess(Process process, int milliseconds)
+    {
+        try
+        {
+            if (process.WaitForExit(milliseconds))
+                process.WaitForExit();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or
+                                         NotSupportedException or ObjectDisposedException)
+        {
+            // Best effort after a bounded wait. The iterator must retain its original decode result
+            // or exception even if a misbehaving helper cannot be reaped synchronously.
         }
     }
 

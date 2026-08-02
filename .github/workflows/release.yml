@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+  pull_request:
+  workflow_dispatch:
 
 # Build/test jobs are read-only. Write/OIDC permissions exist only in the small promotion jobs
 # that consume already-tested workflow artifacts; no repository code is built with a write token.
@@ -13,15 +15,19 @@ permissions:
 # failed creator can race with or clean up the other run's draft release.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
+  # Pull requests and manual runs exercise the complete read-only candidate path. Promotion jobs
+  # remain tag-only. PR ref names contain '/', so use a filesystem-safe label for SBOM assets.
+  ASSET_LABEL: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('candidate-{0}', github.sha) }}
 
 jobs:
   preflight:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       actions: read
       contents: read
@@ -31,7 +37,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Validate tag ancestry, version, and package availability before secrets
+      - name: Validate tag ancestry and canonical project version before secrets
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           set -euo pipefail
@@ -55,15 +62,12 @@ jobs:
               echo "::error::tag version $version does not match $project version $project_version"; exit 1;
             }
           done
-          for package in qrshard.tool qrshard.core; do
-            versions="$(curl --fail --silent --show-error "https://api.nuget.org/v3-flatcontainer/$package/index.json")"
-            if jq -e --arg version "$version" '.versions | index($version) != null' <<< "$versions" >/dev/null; then
-              echo "::error::$package $version already exists on nuget.org; refusing an ambiguous retry"
-              exit 1
-            fi
-          done
+          # Package existence is reconciled against the exact tested candidates in publish-nuget.
+          # Checking only a version here made a safe retry impossible after one of the two
+          # immutable package pushes succeeded and the next remote write failed.
 
       - name: Protected release gate must exist
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -129,6 +133,7 @@ jobs:
             rid: osx-arm64
             asset: qrshard-osx-arm64.tar.gz
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
     permissions:
       contents: read
     steps:
@@ -153,7 +158,11 @@ jobs:
       - name: Publish (Native AOT)
         env:
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
-        run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false -p:InvariantGlobalization=true -warnaserror
+        # One packages.lock.json cannot represent four mutually exclusive RID-specific AOT
+        # graphs. The SDK/runtime/compiler packs are version-pinned by global.json/.NET 10.0.10
+        # and semantically checked in the per-RID SBOM below; disable locked mode only for this
+        # matrix restore while keeping every framework-dependent restore locked.
+        run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false -p:RestoreLockedMode=false -warnaserror
 
       - name: Include redistribution notices
         shell: bash
@@ -186,7 +195,8 @@ jobs:
           [ -x "$bin" ] || chmod +x "$bin"
 
           actual="$("$bin" --version)"
-          expected="qrshard ${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard/QrShard.csproj | head -1)"
+          expected="qrshard $version"
           [ "$actual" = "$expected" ] || {
             echo "::error::binary reports '$actual' but tag expects '$expected'"; exit 1;
           }
@@ -210,6 +220,23 @@ jobs:
             echo "::error::parity round trip did not reproduce the input"; exit 1;
           }
 
+          # Archive path-collision checks depend on full globalization. Exercise the exact AOT
+          # binary with canonically equivalent names; it must reject the archive before output.
+          mkdir -p "$work/archive"
+          printf composed > "$work/archive/é.txt"
+          printf decomposed > "$work/archive/$(printf 'e\314\201').txt"
+          alias_count="$(find "$work/archive" -maxdepth 1 -type f | wc -l)"
+          if [ "$alias_count" -eq 2 ]; then
+            if "$bin" encode "$work/archive" -o "$work/archive-shards" -r 900 > "$work/archive.log" 2>&1; then
+              echo "::error::exact binary accepted canonically colliding archive paths"; exit 1;
+            fi
+            grep -qiE 'collid|duplicate|same .*path' "$work/archive.log" || {
+              echo "::error::archive alias rejection was not diagnostic"; cat "$work/archive.log"; exit 1;
+            }
+          elif [ "$alias_count" -ne 1 ]; then
+            echo "::error::could not construct archive normalization smoke input"; exit 1;
+          fi
+
       - name: Archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -223,7 +250,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard/QrShard.csproj | head -1)"
           tool_dir="$RUNNER_TEMP/sbom-tool"
           input_dir="$RUNNER_TEMP/sbom-input"
           output_dir="$RUNNER_TEMP/sbom-output"
@@ -265,20 +292,21 @@ jobs:
             ' "$manifest" >/dev/null || {
               echo "::error::${{ matrix.rid }} SBOM has a wrong-RID, stale, or non-production graph"; exit 1;
             }
-          cp "$manifest" "qrshard-${{ matrix.rid }}-$GITHUB_REF_NAME.spdx.json"
+          cp "$manifest" "qrshard-${{ matrix.rid }}-$ASSET_LABEL.spdx.json"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binary-${{ matrix.rid }}
           path: |
             ${{ matrix.asset }}
-            qrshard-${{ matrix.rid }}-${{ github.ref_name }}.spdx.json
+            qrshard-${{ matrix.rid }}-${{ env.ASSET_LABEL }}.spdx.json
           if-no-files-found: error
           retention-days: 7
 
   packages:
     needs: preflight
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -293,16 +321,15 @@ jobs:
         env:
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard/QrShard.csproj | head -1)"
           dotnet pack src/QrShard/QrShard.csproj -c Release -o nupkg -p:Version="$version" -warnaserror
           dotnet pack src/QrShard.Core/QrShard.Core.csproj -c Release -o nupkg -p:Version="$version" -warnaserror
 
       - name: Consumer-test those exact package bytes
         env:
           QRSHARD_PREBUILT_FEED: ${{ github.workspace }}/nupkg
-          QRSHARD_PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
-          export QRSHARD_PACKAGE_VERSION="${QRSHARD_PACKAGE_VERSION#v}"
+          export QRSHARD_PACKAGE_VERSION="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard/QrShard.csproj | head -1)"
           tests/verify-package-consumer.sh
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -315,6 +342,7 @@ jobs:
   sbom:
     needs: packages
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -333,7 +361,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard/QrShard.csproj | head -1)"
           mkdir -p release-inputs/tool-package release-inputs/core-package release-sbom sbom-output
           [ -f "release-inputs/packages/QrShard.Tool.$version.nupkg" ] || {
             echo "::error::missing exact QrShard.Tool package"; exit 1;
@@ -351,7 +379,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard/QrShard.csproj | head -1)"
           tool_dir="$RUNNER_TEMP/sbom-tool"
           dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.5 --tool-path "$tool_dir"
           sbom_tool="$tool_dir/sbom-tool"
@@ -408,7 +436,7 @@ jobs:
             "$tool_manifest" >/dev/null || {
               echo "::error::tool-package SBOM inherited a Native-AOT runtime graph"; exit 1;
             }
-          cp "$tool_manifest" "release-sbom/qrshard-tool-$GITHUB_REF_NAME.spdx.json"
+          cp "$tool_manifest" "release-sbom/qrshard-tool-$ASSET_LABEL.spdx.json"
 
           dotnet restore src/QrShard.Core/QrShard.Core.csproj -p:PublishAot=false --force
           core_output="sbom-output/core-package"
@@ -422,7 +450,7 @@ jobs:
           ' "$core_manifest" >/dev/null || {
             echo "::error::Core package SBOM has the wrong production dependency graph"; exit 1;
           }
-          cp "$core_manifest" "release-sbom/qrshard-core-$GITHUB_REF_NAME.spdx.json"
+          cp "$core_manifest" "release-sbom/qrshard-core-$ASSET_LABEL.spdx.json"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -433,7 +461,9 @@ jobs:
 
   create-draft:
     needs: [binaries, packages, sbom]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     environment:
       name: release
     permissions:
@@ -569,26 +599,49 @@ jobs:
             echo "::error::$GITHUB_REF_NAME moved before draft creation"; exit 1;
           }
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "::error::release $GITHUB_REF_NAME already exists; refusing to replace assets"
-            exit 1
+            [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true" ] || {
+              echo "::error::release $GITHUB_REF_NAME already exists and is public; refusing mutation"
+              exit 1
+            }
+          else
+            # Leave a partial draft in place on a lost/failed upload response. A rerun reconciles
+            # it below; deleting it could discard the only exact candidate after a partial NuGet
+            # publication and sever the release's byte-provenance chain.
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --generate-notes
           fi
-          created=0
-          cleanup() {
-            if [ "$created" -eq 1 ]; then
-              gh release delete "$GITHUB_REF_NAME" --yes || true
-            fi
-          }
-          trap cleanup ERR
-          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --generate-notes
-          created=1
-          for asset in release-assets/*; do
-            gh release upload "$GITHUB_REF_NAME" "$asset"
+
+          mapfile -t expected_assets < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t remote_assets < <(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | sort)
+          for remote in "${remote_assets[@]}"; do
+            printf '%s\n' "${expected_assets[@]}" | grep -Fqx -- "$remote" || {
+              echo "::error::draft contains unexpected asset '$remote'; refusing automatic mutation"
+              exit 1
+            }
           done
-          trap - ERR
+
+          mkdir existing-draft
+          if [ "${#remote_assets[@]}" -gt 0 ]; then
+            gh release download "$GITHUB_REF_NAME" --dir existing-draft
+          fi
+          for asset in release-assets/*; do
+            name="$(basename "$asset")"
+            if [ -f "existing-draft/$name" ]; then
+              cmp -s "$asset" "existing-draft/$name" || {
+                echo "::error::existing draft asset '$name' differs from this run's tested candidate"
+                exit 1
+              }
+            else
+              gh release upload "$GITHUB_REF_NAME" "$asset"
+            fi
+          done
 
   publish-nuget:
     needs: [binaries, packages, create-draft]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: release
     permissions:
       contents: read
       id-token: write
@@ -613,40 +666,289 @@ jobs:
         with:
           user: ${{ secrets.NUGET_USER }}
 
-      - name: Push the tested bytes to NuGet
+      - name: Reconcile the tested packages with NuGet.org
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t packages < <(find nupkg -maxdepth 1 -type f -name '*.nupkg' -print | sort)
-          [ "${#packages[@]}" -eq 2 ] || {
-            echo "::error::expected exactly two tested packages, found ${#packages[@]}"; exit 1;
+          version="${GITHUB_REF_NAME#v}"
+          expected=("nupkg/QrShard.Core.$version.nupkg" "nupkg/QrShard.Tool.$version.nupkg")
+          [ "${packages[*]}" = "${expected[*]}" ] || {
+            echo "::error::expected only QrShard.Core/Tool $version candidates"; printf '%s\n' "${packages[@]}"; exit 1;
           }
+
+          # This bounded comparator is part of the protected workflow itself. The credentialed
+          # job intentionally has no checkout and executes no repository-controlled scripts.
+          compare_package() {
+            python3 - "$1" "$2" "$3" <<'PY'
+          import hashlib, pathlib, sys, zipfile
+          MAX_ENTRIES=10000; MAX_NAME=4096; MAX_ENTRY=256*1024*1024
+          MAX_TOTAL=512*1024*1024; MAX_SIGNATURE=1024*1024; SIGNATURE='.signature.p7s'
+          def fail(message): raise SystemExit('package comparison failed: '+message)
+          def inventory(raw, signature_required):
+              path=pathlib.Path(raw); result={}; folded=set(); signatures=0; total=0
+              try: archive=zipfile.ZipFile(path, 'r')
+              except (OSError, zipfile.BadZipFile) as error: fail(f'{path.name} is not a readable ZIP: {error}')
+              with archive:
+                  entries=archive.infolist()
+                  if len(entries)>MAX_ENTRIES: fail(f'{path.name} has too many entries')
+                  for entry in entries:
+                      name=entry.filename
+                      if not name or len(name)>MAX_NAME or '\\' in name or '\0' in name:
+                          fail(f'{path.name} contains an unsafe ZIP entry name')
+                      pure=pathlib.PurePosixPath(name)
+                      if pure.is_absolute() or '..' in pure.parts: fail(f'{path.name} contains an unsafe ZIP path')
+                      folded_name=name.casefold()
+                      if folded_name in folded: fail(f'{path.name} contains duplicate/case-colliding entries')
+                      folded.add(folded_name)
+                      if entry.flag_bits & 1: fail(f'{path.name} contains an encrypted ZIP entry')
+                      if entry.file_size>MAX_ENTRY: fail(f'{path.name} contains an oversized entry')
+                      total += entry.file_size
+                      if total>MAX_TOTAL: fail(f'{path.name} exceeds the uncompressed-size limit')
+                      if folded_name==SIGNATURE:
+                          if name!=SIGNATURE or entry.is_dir() or entry.file_size>MAX_SIGNATURE:
+                              fail(f'{path.name} has an invalid signature entry')
+                          signatures += 1
+                          with archive.open(entry) as stream:
+                              while stream.read(1024*1024): pass
+                          continue
+                      kind=(entry.external_attr >> 16) & 0o170000
+                      if kind==0o120000: fail(f'{path.name} contains a symbolic-link entry')
+                      digest=hashlib.sha256()
+                      with archive.open(entry) as stream:
+                          while chunk:=stream.read(1024*1024): digest.update(chunk)
+                      result[name]=(entry.file_size,digest.hexdigest(),entry.external_attr,entry.flag_bits,entry.is_dir())
+              if signatures != (1 if signature_required else 0):
+                  fail(f'{path.name} has {signatures} signature entries')
+              return result
+          expected=inventory(sys.argv[1], False); actual=inventory(sys.argv[2], sys.argv[3]=='required')
+          if expected!=actual:
+              missing=sorted(expected.keys()-actual.keys()); extra=sorted(actual.keys()-expected.keys())
+              changed=sorted(k for k in expected.keys()&actual.keys() if expected[k]!=actual[k])
+              def brief(label,names): return f'{label}={len(names)} {names[:20]!r}'
+              fail('content differs ('+', '.join((brief('missing',missing),brief('extra',extra),brief('changed',changed)))+')')
+          PY
+          }
+
+          # Validate every candidate before the first irreversible registry write.
+          for package in "${packages[@]}"; do compare_package "$package" "$package" forbidden; done
+
+          service="$(curl --fail --silent --show-error --retry 5 --retry-all-errors --location \
+            --proto '=https' --proto-redir '=https' \
+            https://api.nuget.org/v3/index.json)"
+          package_base="$(jq -r '.resources[] | select((."@type" | tostring) | contains("PackageBaseAddress")) | ."@id"' \
+            <<< "$service" | head -1)"
+          [ -n "$package_base" ] && [ "$package_base" != null ] || {
+            echo "::error::NuGet.org service index has no PackageBaseAddress"; exit 1;
+          }
+          package_base="${package_base%/}/"
+
+          github_service="$(curl --fail --silent --show-error --retry 5 --retry-all-errors --location \
+            --proto '=https' --proto-redir '=https' -u "$GITHUB_ACTOR:$GH_PACKAGES_TOKEN" \
+            "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json")"
+          github_base="$(jq -r '.resources[] | select((."@type" | tostring) | contains("PackageBaseAddress")) | ."@id"' \
+            <<< "$github_service" | head -1)"
+          [ -n "$github_base" ] && [ "$github_base" != null ] || {
+            echo "::error::GitHub Packages service index has no PackageBaseAddress"; exit 1;
+          }
+          github_base="${github_base%/}/"
+
+          # Phase one is read-only across BOTH immutable registries. Validate every version that
+          # already exists before publishing either missing package anywhere, so a conflicting
+          # retry cannot cause a new partial release before it is detected.
+          declare -A nuget_missing
           for package in "${packages[@]}"; do
-            dotnet nuget push "$package" --source https://api.nuget.org/v3/index.json
+            name="$(basename "$package")"
+            id="${name%.$version.nupkg}"
+            lower_id="$(tr '[:upper:]' '[:lower:]' <<< "$id" | tr -d '\n')"
+
+            index_file="$(mktemp)"
+            status="$(curl --silent --show-error --retry 5 --retry-all-errors --location \
+              --proto '=https' --proto-redir '=https' -o "$index_file" -w '%{http_code}' \
+              "${package_base}${lower_id}/index.json")"
+            case "$status" in
+              200)
+                jq -e '.versions | type == "array" and all(.[]; type == "string")' "$index_file" >/dev/null || {
+                  echo "::error::NuGet.org returned a malformed package index"; exit 1;
+                }
+                if jq -e --arg version "$version" '.versions | index($version) != null' "$index_file" >/dev/null; then
+                  remote="$(mktemp)"
+                  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                    --max-filesize 200000000 \
+                    "${package_base}${lower_id}/${version}/${lower_id}.${version}.nupkg" -o "$remote"
+                  dotnet nuget verify "$remote" --all
+                  compare_package "$package" "$remote" required
+                  rm -f "$remote"
+                else
+                  nuget_missing["$package"]=1
+                fi
+                ;;
+              404) nuget_missing["$package"]=1 ;;
+              *) echo "::error::NuGet.org package index returned HTTP $status"; exit 1 ;;
+            esac
+            rm -f "$index_file"
+
+            index_file="$(mktemp)"
+            status="$(curl --silent --show-error --retry 5 --retry-all-errors --location \
+              --proto '=https' --proto-redir '=https' -o "$index_file" -w '%{http_code}' \
+              -u "$GITHUB_ACTOR:$GH_PACKAGES_TOKEN" "${github_base}${lower_id}/index.json")"
+            case "$status" in
+              200)
+                jq -e '.versions | type == "array" and all(.[]; type == "string")' "$index_file" >/dev/null || {
+                  echo "::error::GitHub Packages returned a malformed package index"; exit 1;
+                }
+                if jq -e --arg version "$version" '.versions | index($version) != null' "$index_file" >/dev/null; then
+                  remote="$(mktemp)"
+                  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                    --max-filesize 200000000 -u "$GITHUB_ACTOR:$GH_PACKAGES_TOKEN" \
+                    "${github_base}${lower_id}/${version}/${lower_id}.${version}.nupkg" -o "$remote"
+                  cmp -s "$package" "$remote" || {
+                    echo "::error::GitHub Packages copy of $id $version differs from the tested candidate"; exit 1;
+                  }
+                  rm -f "$remote"
+                fi
+                ;;
+              404) ;;
+              *) echo "::error::GitHub Packages index returned HTTP $status"; exit 1 ;;
+            esac
+            rm -f "$index_file"
           done
 
-      - name: Mirror the same bytes to GitHub Packages
+          # Phase two publishes only NuGet.org versions proven absent above, then reconciles the
+          # registry copy after any success, failure, or ambiguous network response.
+          for package in "${packages[@]}"; do
+            name="$(basename "$package")"
+            id="${name%.$version.nupkg}"
+            [ "$id" != "$name" ] || { echo "::error::unexpected package filename '$name'"; exit 1; }
+            lower_id="$(tr '[:upper:]' '[:lower:]' <<< "$id" | tr -d '\n')"
+            base="${package_base}${lower_id}/"
+            if [ "${nuget_missing[$package]:-0}" -eq 1 ]; then
+              # A failed response can be ambiguous: the immutable write may have succeeded. Poll
+              # and authenticate the registry copy below rather than blindly retrying/skip-duplicate.
+              dotnet nuget push "$package" --source https://api.nuget.org/v3/index.json || true
+            fi
+
+            remote="$(mktemp)"
+            found=0
+            for _ in {1..18}; do
+              if curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                   --max-filesize 200000000 \
+                   "${base}${version}/${lower_id}.${version}.nupkg" -o "$remote"; then
+                found=1
+                break
+              fi
+              sleep 10
+            done
+            [ "$found" -eq 1 ] || {
+              echo "::error::$id $version is still absent after the publication/recovery window"
+              exit 1
+            }
+            dotnet nuget verify "$remote" --all
+            compare_package "$package" "$remote" required
+            rm -f "$remote"
+          done
+
+      - name: Reconcile the exact same bytes with GitHub Packages
         env:
           NUGET_API_KEY: ${{ secrets.GITHUB_TOKEN }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t packages < <(find nupkg -maxdepth 1 -type f -name '*.nupkg' -print | sort)
-          [ "${#packages[@]}" -eq 2 ] || {
-            echo "::error::expected exactly two tested packages, found ${#packages[@]}"; exit 1;
+          version="${GITHUB_REF_NAME#v}"
+          expected=("nupkg/QrShard.Core.$version.nupkg" "nupkg/QrShard.Tool.$version.nupkg")
+          [ "${packages[*]}" = "${expected[*]}" ] || {
+            echo "::error::expected only QrShard.Core/Tool $version candidates"; exit 1;
           }
+          service="$(curl --fail --silent --show-error --retry 5 --retry-all-errors --location \
+            --proto '=https' --proto-redir '=https' \
+            -u "$GITHUB_ACTOR:$GH_PACKAGES_TOKEN" \
+            "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json")"
+          base="$(jq -r '.resources[] | select((."@type" | tostring) | contains("PackageBaseAddress")) | ."@id"' \
+            <<< "$service" | head -1)"
+          [ -n "$base" ] && [ "$base" != null ] || {
+            echo "::error::GitHub Packages service index has no PackageBaseAddress"; exit 1;
+          }
+          base="${base%/}/"
+
           for package in "${packages[@]}"; do
-            dotnet nuget push "$package" --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+            name="$(basename "$package")"
+            id="${name%.$version.nupkg}"
+            [ "$id" != "$name" ] || { echo "::error::unexpected package filename '$name'"; exit 1; }
+            lower_id="$(tr '[:upper:]' '[:lower:]' <<< "$id" | tr -d '\n')"
+            index_file="$(mktemp)"
+            status="$(curl --silent --show-error --retry 5 --retry-all-errors --location \
+              --proto '=https' --proto-redir '=https' -o "$index_file" \
+              -w '%{http_code}' -u "$GITHUB_ACTOR:$GH_PACKAGES_TOKEN" \
+              "${base}${lower_id}/index.json")"
+            exists=0
+            case "$status" in
+              200)
+                jq -e '.versions | type == "array" and all(.[]; type == "string")' "$index_file" >/dev/null || {
+                  echo "::error::GitHub Packages returned a malformed package index"; exit 1;
+                }
+                if jq -e --arg version "$version" '.versions | index($version) != null' "$index_file" >/dev/null; then
+                  exists=1
+                fi
+                ;;
+              404) ;;
+              *) echo "::error::GitHub Packages index returned HTTP $status"; exit 1 ;;
+            esac
+            rm -f "$index_file"
+            if [ "$exists" -eq 0 ]; then
+              dotnet nuget push "$package" \
+                --source https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json || true
+            fi
+
+            remote="$(mktemp)"
+            found=0
+            for _ in {1..18}; do
+              if curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                   --max-filesize 200000000 \
+                   -u "$GITHUB_ACTOR:$GH_PACKAGES_TOKEN" \
+                   "${base}${lower_id}/$version/$lower_id.$version.nupkg" -o "$remote"; then
+                found=1
+                break
+              fi
+              sleep 10
+            done
+            [ "$found" -eq 1 ] || {
+              echo "::error::$id $version is still absent from GitHub Packages after the recovery window"
+              exit 1
+            }
+            cmp -s "$package" "$remote" || {
+              echo "::error::GitHub Packages copy of $id $version differs from the tested candidate"
+              exit 1
+            }
+            rm -f "$remote"
           done
 
   publish-release:
-    needs: [create-draft, publish-nuget]
+    needs: [binaries, packages, sbom, create-draft, publish-nuget]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: binary-*
+          path: expected-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nuget-packages
+          path: expected-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-sbom
+          path: expected-assets
+
       - name: Publish one complete release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -670,5 +972,41 @@ jobs:
           }
           [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true" ] || {
             echo "::error::$GITHUB_REF_NAME is missing or is not the draft built by this run"; exit 1;
+          }
+
+          version="${GITHUB_REF_NAME#v}"
+          expected=(
+            qrshard-win-x64.zip
+            qrshard-linux-x64.tar.gz
+            qrshard-linux-arm64.tar.gz
+            qrshard-osx-arm64.tar.gz
+            "QrShard.Tool.$version.nupkg"
+            "QrShard.Core.$version.nupkg"
+            "qrshard-win-x64-$ASSET_LABEL.spdx.json"
+            "qrshard-linux-x64-$ASSET_LABEL.spdx.json"
+            "qrshard-linux-arm64-$ASSET_LABEL.spdx.json"
+            "qrshard-osx-arm64-$ASSET_LABEL.spdx.json"
+            "qrshard-tool-$ASSET_LABEL.spdx.json"
+            "qrshard-core-$ASSET_LABEL.spdx.json"
+          )
+          [ "$(find expected-assets -maxdepth 1 -type f | wc -l)" -eq "${#expected[@]}" ] || {
+            echo "::error::workflow artifacts changed before publication"; exit 1;
+          }
+          mkdir released-assets
+          gh release download "$GITHUB_REF_NAME" --dir released-assets
+          [ "$(find released-assets -maxdepth 1 -type f | wc -l)" -eq "$((${#expected[@]} + 1))" ] || {
+            echo "::error::draft release asset count changed before publication"; exit 1;
+          }
+          for asset in "${expected[@]}"; do
+            [ -f "expected-assets/$asset" ] && [ -f "released-assets/$asset" ] || {
+              echo "::error::missing expected draft asset $asset"; exit 1;
+            }
+            cmp -s "expected-assets/$asset" "released-assets/$asset" || {
+              echo "::error::draft asset $asset differs from this run's tested artifact"; exit 1;
+            }
+          done
+          (cd expected-assets && sha256sum "${expected[@]}") > expected-SHA256SUMS
+          cmp -s expected-SHA256SUMS released-assets/SHA256SUMS || {
+            echo "::error::draft SHA256SUMS differs from the tested workflow artifacts"; exit 1;
           }
           gh release edit "$GITHUB_REF_NAME" --draft=false

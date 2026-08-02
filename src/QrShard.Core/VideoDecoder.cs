@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats;
 
@@ -39,13 +40,13 @@ internal sealed class VideoDecoder(
 
     /// <summary>Default wiring for tests and non-DI callers.</summary>
     public VideoDecoder() : this(new ShardDecoder(), new RecordingFrameSource(),
-        new ShardAssembler(), new ParityReassembler(), new CameraRectifier(), AppSettings.Current)
+        new ShardAssembler(), new ParityReassembler(), new CameraRectifier(), AppSettings.BuiltIn)
     {
     }
 
     public VideoDecoder(IShardDecoder decoder, IFrameSource frameSource, IShardAssembler assembler,
         IParityReassembler parityReassembler, ICameraRectifier cameraRectifier)
-        : this(decoder, frameSource, assembler, parityReassembler, cameraRectifier, AppSettings.Current)
+        : this(decoder, frameSource, assembler, parityReassembler, cameraRectifier, AppSettings.BuiltIn)
     {
     }
 
@@ -79,7 +80,8 @@ internal sealed class VideoDecoder(
         out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1, bool escalateFps = false)
     {
         var shards = new List<DecodedShard>();
-        var seen = new HashSet<(ulong FileId, int Index, bool Parity)>();
+        var seen = new Dictionary<(ulong FileId, int Index, bool Parity), DecodedShard?>();
+        var successful = new ShardDecoder.SuccessfulShardRetentionBudget(settings.DecodeMemoryBudgetMB);
         int totalExamined = 0, totalDecoded = 0;
         bool stoppedEarly = false;
 
@@ -96,8 +98,8 @@ internal sealed class VideoDecoder(
             int shardsBefore = shards.Count;
             bool complete = decodeWorkers > 1
                 ? CollectShardsParallel(token => frameSource.Frames(path, passFps, token),
-                    shards, seen, log, decodeWorkers, out var passStats)
-                : CollectShards(frameSource.Frames(path, passFps), shards, seen, log, out passStats);
+                    shards, seen, successful, log, decodeWorkers, out var passStats)
+                : CollectShards(frameSource.Frames(path, passFps), shards, seen, successful, log, out passStats);
             totalExamined += passStats.FramesExamined;
             totalDecoded += passStats.FramesDecoded;
             stoppedEarly = passStats.StoppedEarly;
@@ -126,7 +128,9 @@ internal sealed class VideoDecoder(
     /// <summary>Collects into a caller-owned shard set (so escalation passes accumulate);
     /// returns true when the set became complete.</summary>
     private bool CollectShards(IEnumerable<Bitmap> frames, List<DecodedShard> shards,
-        HashSet<(ulong FileId, int Index, bool Parity)> seen, Action<string> log, out VideoDecodeStats stats)
+        Dictionary<(ulong FileId, int Index, bool Parity), DecodedShard?> seen,
+        ShardDecoder.SuccessfulShardRetentionBudget successful,
+        Action<string> log, out VideoDecodeStats stats)
     {
         var scratch = new DecodeScratch();
         var signature = new byte[SignatureLength];
@@ -175,7 +179,7 @@ internal sealed class VideoDecoder(
             {
                 decoded++;
                 if (TryCollect(BuildAverage(sum, avgW, avgH, avgCount), scratch, examined, ref mode, ref cachedPose,
-                        shards, seen, log, $"averaged {avgCount} frames"))
+                        shards, seen, successful, log, $"averaged {avgCount} frames"))
                 {
                     stoppedEarly = true;
                     break;
@@ -185,7 +189,7 @@ internal sealed class VideoDecoder(
             // Primary path: decode this (first) frame of the new group.
             avgCount = 0;
             decoded++;
-            bool complete = TryCollect(frame, scratch, examined, ref mode, ref cachedPose, shards, seen, log,
+            bool complete = TryCollect(frame, scratch, examined, ref mode, ref cachedPose, shards, seen, successful, log,
                 $"frame {examined}", out groupYielded);
             if (complete)
             {
@@ -246,7 +250,7 @@ internal sealed class VideoDecoder(
         {
             decoded++;
             TryCollect(BuildAverage(sum, avgW, avgH, avgCount), scratch, examined, ref mode, ref cachedPose,
-                shards, seen, log, $"averaged {avgCount} frames");
+                shards, seen, successful, log, $"averaged {avgCount} frames");
         }
 
         stats = new VideoDecodeStats(examined, decoded, shards.Count, stoppedEarly);
@@ -258,23 +262,42 @@ internal sealed class VideoDecoder(
     /// group needs no temporal-average retry).</summary>
     private bool TryCollect(Bitmap frame, DecodeScratch scratch, int examined, ref CaptureMode mode,
         ref CameraPose? cachedPose, List<DecodedShard> shards,
-        HashSet<(ulong FileId, int Index, bool Parity)> seen, Action<string> log, string label, out bool yielded)
+        Dictionary<(ulong FileId, int Index, bool Parity), DecodedShard?> seen,
+        ShardDecoder.SuccessfulShardRetentionBudget successful,
+        Action<string> log, string label, out bool yielded)
     {
         yielded = false;
         try
         {
             var shard = DecodeFrame(frame, scratch, examined, ref mode, ref cachedPose);
+            SuccessfulShardAdmission retention = successful.TryAdmitOwned(shard);
+            if (retention.Kind == SuccessfulShardAdmissionKind.InconsistentFamily)
+                throw successful.FamilyMismatchException();
+            if (retention.Kind == SuccessfulShardAdmissionKind.Refused)
+                throw successful.LimitException();
             yielded = true; // decoded to a shard (new or already-seen) — averaging this group is unnecessary
-            if (!seen.Add((shard.Header.FileId, shard.Header.Index, shard.Header.IsParity)))
+            if (retention.Kind is SuccessfulShardAdmissionKind.Duplicate or
+                SuccessfulShardAdmissionKind.TerminalConflict)
                 return false;
-            shards.Add(shard);
+            CandidateAdmission admission = AdmitCandidate(shards, seen, shard);
+            if (admission != CandidateAdmission.Added)
+            {
+                if (admission == CandidateAdmission.Conflict)
+                {
+                    successful.ReleaseAppliedConflict(shard.Header);
+                    log($"  conflict {label}  (ordinal {(long)shard.Header.Index + 1} is now an erasure)");
+                }
+                return false;
+            }
+            successful.MarkReturnedExternal([shard]);
             string which = shard.Header.IsParity
-                ? $"parity #{shard.Header.Index + 1}"
-                : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
+                ? $"parity #{(long)shard.Header.Index + 1}"
+                : $"part {(long)shard.Header.Index + 1}/{shard.Header.Count}";
             log($"  ok      {label}  ({which}, {shard.Payload.Length:N0} bytes) — {shards.Count} collected");
             return parityReassembler.IsSetComplete(shards);
         }
-        catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
+        catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException
+                                   and not ShardResourceLimitException and not ShardFamilyMismatchException)
         {
             // Every frame is untrusted input. A malformed/torn frame must not abort a whole
             // recording merely because it reached an unexpected decoder exception; the folder
@@ -286,8 +309,9 @@ internal sealed class VideoDecoder(
 
     private bool TryCollect(Bitmap frame, DecodeScratch scratch, int examined, ref CaptureMode mode,
         ref CameraPose? cachedPose, List<DecodedShard> shards,
-        HashSet<(ulong FileId, int Index, bool Parity)> seen, Action<string> log, string label)
-        => TryCollect(frame, scratch, examined, ref mode, ref cachedPose, shards, seen, log, label, out _);
+        Dictionary<(ulong FileId, int Index, bool Parity), DecodedShard?> seen,
+        ShardDecoder.SuccessfulShardRetentionBudget successful, Action<string> log, string label)
+        => TryCollect(frame, scratch, examined, ref mode, ref cachedPose, shards, seen, successful, log, label, out _);
 
     internal static void Accumulate(int[] sum, Bitmap frame)
     {
@@ -348,7 +372,9 @@ internal sealed class VideoDecoder(
     /// </summary>
     private bool CollectShardsParallel(Func<CancellationToken, IEnumerable<Bitmap>> frameFactory,
         List<DecodedShard> shards,
-        HashSet<(ulong FileId, int Index, bool Parity)> seen, Action<string> log, int workers,
+        Dictionary<(ulong FileId, int Index, bool Parity), DecodedShard?> seen,
+        ShardDecoder.SuccessfulShardRetentionBudget successful,
+        Action<string> log, int workers,
         out VideoDecodeStats stats)
     {
         using var cts = new CancellationTokenSource();
@@ -387,7 +413,7 @@ internal sealed class VideoDecoder(
         }
 
         if (workers == 1)
-            return CollectShards(StableFrames(), shards, seen, log, out stats);
+            return CollectShards(StableFrames(), shards, seen, successful, log, out stats);
 
         // One pending frame is enough to overlap capture with decode and prevents a 64-worker
         // configuration from retaining another 128 full RGB frames outside the worker estimate.
@@ -442,43 +468,133 @@ internal sealed class VideoDecoder(
 
         var workerTasks = Enumerable.Range(0, workers).Select(_ => Task.Run(() =>
         {
-            var scratch = new DecodeScratch();
-            var mode = CaptureMode.Unknown; // per-worker latch/pose: benign duplication
-            CameraPose? cachedPose = null;
-            foreach (var (frame, index) in queue.GetConsumingEnumerable())
+            try
             {
-                if (cts.IsCancellationRequested)
-                    break;
-                try
+                var scratch = new DecodeScratch();
+                var mode = CaptureMode.Unknown; // per-worker latch/pose: benign duplication
+                CameraPose? cachedPose = null;
+                foreach (var (frame, index) in queue.GetConsumingEnumerable())
                 {
-                    var shard = DecodeFrame(frame, scratch, index, ref mode, ref cachedPose);
-                    lock (gate)
+                    if (cts.IsCancellationRequested)
+                        break;
+                    try
                     {
-                        if (!seen.Add((shard.Header.FileId, shard.Header.Index, shard.Header.IsParity)))
-                            continue;
-                        shards.Add(shard);
-                        string which = shard.Header.IsParity
-                            ? $"parity #{shard.Header.Index + 1}"
-                            : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
-                        log($"  ok      frame {index}  ({which}, {shard.Payload.Length:N0} bytes) — {shards.Count} collected");
-                        if (parityReassembler.IsSetComplete(shards))
+                        var shard = DecodeFrame(frame, scratch, index, ref mode, ref cachedPose);
+                        lock (gate)
                         {
-                            stoppedEarly = true;
-                            cts.Cancel();
+                            SuccessfulShardAdmission retention = successful.TryAdmitOwned(shard);
+                            if (retention.Kind == SuccessfulShardAdmissionKind.InconsistentFamily)
+                                throw successful.FamilyMismatchException();
+                            if (retention.Kind == SuccessfulShardAdmissionKind.Refused)
+                                throw successful.LimitException();
+                            if (retention.Kind is SuccessfulShardAdmissionKind.Duplicate or
+                                SuccessfulShardAdmissionKind.TerminalConflict)
+                                continue;
+                            CandidateAdmission admission = AdmitCandidate(shards, seen, shard);
+                            if (admission != CandidateAdmission.Added)
+                            {
+                                if (admission == CandidateAdmission.Conflict)
+                                {
+                                    successful.ReleaseAppliedConflict(shard.Header);
+                                    log($"  conflict frame {index}  (ordinal {(long)shard.Header.Index + 1} is now an erasure)");
+                                }
+                                continue;
+                            }
+                            successful.MarkReturnedExternal([shard]);
+                            string which = shard.Header.IsParity
+                                ? $"parity #{(long)shard.Header.Index + 1}"
+                                : $"part {(long)shard.Header.Index + 1}/{shard.Header.Count}";
+                            log($"  ok      frame {index}  ({which}, {shard.Payload.Length:N0} bytes) — {shards.Count} collected");
+                            if (parityReassembler.IsSetComplete(shards))
+                            {
+                                stoppedEarly = true;
+                                cts.Cancel();
+                            }
                         }
                     }
+                    catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException
+                                               and not ShardResourceLimitException and not ShardFamilyMismatchException)
+                    {
+                        // torn, malformed or non-shard frame — the stream brings it around again
+                    }
                 }
-                catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
-                {
-                    // torn, malformed or non-shard frame — the stream brings it around again
-                }
+            }
+            catch
+            {
+                // A run-fatal worker failure must stop a live/cancellation-aware producer now.
+                // Otherwise another worker can consume forever and Task.WaitAll never reaches
+                // the producer join, or the method can unwind while that producer still owns the
+                // enumerator and queue.
+                cts.Cancel();
+                throw;
             }
         })).ToArray();
 
-        Task.WaitAll(workerTasks);
-        producer.GetAwaiter().GetResult(); // unwrap: surface the producer's ShardDecodeException, not an AggregateException
+        ExceptionDispatchInfo? workerFailure = null;
+        try
+        {
+            Task.WhenAll(workerTasks).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            // GetAwaiter unwraps Task.WhenAll's AggregateException. Preserve that first fatal
+            // worker error, but join the producer before rethrowing so no background access can
+            // race disposal of the queue, cancellation source, or frame enumerator.
+            workerFailure = ExceptionDispatchInfo.Capture(ex);
+            cts.Cancel();
+        }
+
+        ExceptionDispatchInfo? producerFailure = null;
+        try
+        {
+            producer.GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            producerFailure = ExceptionDispatchInfo.Capture(ex);
+        }
+
+        if (workerFailure is not null)
+            workerFailure.Throw();
+        if (producerFailure is not null)
+            producerFailure.Throw();
         stats = new VideoDecodeStats(examined, decodedCount, shards.Count, stoppedEarly);
         return stoppedEarly || parityReassembler.IsSetComplete(shards);
+    }
+
+    private enum CandidateAdmission
+    {
+        Added,
+        Duplicate,
+        Conflict,
+    }
+
+    /// <summary>
+    /// A CRC-valid duplicate with different bytes is not safely first-wins: either candidate may
+    /// be the poisoned one. Remove the ordinal entirely so cross-shard recovery can reconstruct it;
+    /// once conflicted, later copies cannot silently become authoritative again.
+    /// </summary>
+    private static CandidateAdmission AdmitCandidate(List<DecodedShard> shards,
+        Dictionary<(ulong FileId, int Index, bool Parity), DecodedShard?> seen, DecodedShard candidate)
+    {
+        var key = (candidate.Header.FileId, candidate.Header.Index, candidate.Header.IsParity);
+        if (!seen.TryGetValue(key, out DecodedShard? existing))
+        {
+            seen.Add(key, candidate);
+            shards.Add(candidate);
+            return CandidateAdmission.Added;
+        }
+        if (existing is null)
+            return CandidateAdmission.Duplicate;
+        if (existing.Header.HasSameFamilyAs(candidate.Header) &&
+            existing.Header.PayloadLength == candidate.Header.PayloadLength &&
+            existing.Header.PayloadCrc32 == candidate.Header.PayloadCrc32 &&
+            existing.Payload.AsSpan().SequenceEqual(candidate.Payload))
+            return CandidateAdmission.Duplicate;
+
+        shards.Remove(existing);
+        seen[key] = null;
+        return CandidateAdmission.Conflict;
     }
 
     internal static int BudgetedLiveWorkers(Bitmap frame, int requestedWorkers, int budgetMB)

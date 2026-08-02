@@ -64,4 +64,12 @@ public class MonitorResolutionTests
             """;
         Assert.Null(MonitorResolution.TryParseXrandr(output));
     }
+
+    [Theory]
+    [InlineData("DP-1 connected primary 999999999999999999999999x1080+0+0")]
+    [InlineData("DP-1 connected primary 0x1080+0+0")]
+    [InlineData("DP-1 connected primary 65537x1080+0+0")]
+    [InlineData("DP-1 connected primary 1920x999999999999999999999999+0+0")]
+    public void Xrandr_MalformedOrImplausibleDimensions_ReturnNull(string output) =>
+        Assert.Null(MonitorResolution.TryParseXrandr(output));
 }

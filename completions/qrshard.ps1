@@ -5,17 +5,19 @@ Register-ArgumentCompleter -Native -CommandName qrshard -ScriptBlock {
     $commands = 'encode', 'decode', 'send', 'receive', 'verify', 'info', 'calibrate', 'test', 'version', 'help'
     $options = @{
         encode    = '-o', '--out', '-r', '--resolution', '-c', '--cell', '-b', '--bits', '-e', '--ecc',
-                    '-R', '--recovery', '-F', '--fountain', '-p', '--password', '-f', '--format',
+                    '-R', '--recovery', '-F', '--fountain', '-p', '--password', '--password-file',
+                    '--password-stdin', '-f', '--format',
                     '-i', '--interval', '--slideshow', '--profile', '--camera', '--video', '--open',
                     '--no-compress', '--interleave2', '--json', '--dry-run'
         send      = $null # same as encode
-        decode    = '-o', '--out', '-p', '--password', '--session', '--watch', '--clipboard', '--fps', '--json'
-        receive   = '--device', '--format', '--screen', '--region', '--fps', '-o', '--out', '-p', '--password'
+        decode    = '-o', '--out', '-p', '--password', '--password-file', '--password-stdin', '--session', '--watch', '--clipboard', '--fps', '--json'
+        receive   = '--device', '--format', '--screen', '--region', '--fps', '-o', '--out', '-p', '--password', '--password-file', '--password-stdin'
         verify    = '--session', '--json'
         info      = '--heatmap', '--quality-heatmap', '--json'
         calibrate = '-o', '--out', '-r', '--resolution', '--camera'
         test      = '-r', '--resolution', '-c', '--cell', '-b', '--bits', '-e', '--ecc',
-                    '-R', '--recovery', '-F', '--fountain', '-p', '--password', '-f', '--format',
+                    '-R', '--recovery', '-F', '--fountain', '-p', '--password', '--password-file',
+                    '--password-stdin', '-f', '--format',
                     '--profile', '--camera', '--no-compress', '--interleave2'
     }
     $options['send'] = $options['encode']

@@ -14,8 +14,7 @@ namespace QrShard.Tests;
 /// ShardDecoder.AutoParallelism, which is min(ProcessorCount, 24). On a 32-thread box the budget
 /// was the binding constraint and the assertion said what it meant; on CI's 4-core runners the
 /// core count bound first and it failed on all four platforms. It was asserting something about
-/// the runner. These pin the properties that should hold on supported test hosts with normal
-/// globalization data; invariant-globalization release binaries have separate smoke coverage.
+/// the runner. These pin the properties that should hold on every supported test host and locale.
 ///
 /// Two of them are proven against a real defect — reverting ToLowerInvariant fails the Turkish-I
 /// case, and the filesystem chain exercises code no other test reaches. The numeric-culture one is
@@ -105,6 +104,49 @@ public class EnvironmentAssumptionTests
             Assert.NotEqual(0, exit);
             Assert.DoesNotContain("unknown", (@out.ToString() + err).ToLowerInvariant());
         });
+    }
+
+    [Theory]
+    [MemberData(nameof(HostileCultures))]
+    public void NegativeScreenCoordinatesUseInvariantAsciiArguments(string culture)
+    {
+        InCulture(culture, () =>
+        {
+            var region = ScreenFrameSource.ParseRegion("-100,-80,1920,1080");
+            Assert.Equal((-100, -80, 1920, 1080), region);
+
+            var (input, filter) = ScreenFrameSource.BuildScreenArgs(region);
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.Contains("-100", input);
+                Assert.Contains("-80", input);
+                Assert.Contains("1920x1080", input);
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                Assert.Equal("crop=1920:1080:-100:-80", filter);
+            }
+            else
+            {
+                Assert.Equal("1920x1080", input[3]);
+                Assert.EndsWith("+-100,-80", input[5], StringComparison.Ordinal);
+            }
+        });
+    }
+
+    [Fact]
+    public void ArchiveCreationFailsClosedWhenUnicodeCanonicalizationIsUnavailable()
+    {
+        Assert.True(Cli.TryCanonicalizeArchivePath("folder/readme.txt", false,
+            out string asciiName, out string asciiKey));
+        Assert.Equal("folder/readme.txt", asciiName);
+        Assert.Equal("FOLDER/README.TXT", asciiKey);
+
+        Assert.False(Cli.TryCanonicalizeArchivePath("folder/café.txt", false, out _, out _));
+        Assert.True(Cli.TryCanonicalizeArchivePath("folder/cafe\u0301.txt", true,
+            out string normalized, out string key));
+        Assert.Equal("folder/café.txt", normalized);
+        Assert.Equal("FOLDER/CAFÉ.TXT", key);
     }
 
     // ---------- Filesystem ----------

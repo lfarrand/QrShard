@@ -72,8 +72,7 @@ for rid in "${rids[@]}"; do
     echo "==> $rid"
     current_stage="$(mktemp -d "publish/.${rid}.tmp.XXXXXX")"
     dotnet publish src/QrShard -c Release -r "$rid" --self-contained \
-        -p:PublishSingleFile=true -p:InvariantGlobalization=true \
-        -o "$current_stage"
+        -p:PublishSingleFile=true -o "$current_stage"
     current_target="publish/$rid"
     current_backup=""
     if [ -e "$current_target" ]; then

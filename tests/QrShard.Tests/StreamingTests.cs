@@ -1,3 +1,4 @@
+using System.IO.MemoryMappedFiles;
 using QrShard;
 
 namespace QrShard.Tests;
@@ -62,6 +63,51 @@ public class StreamingTests
     }
 
     [Fact]
+    public void PayloadPreparer_DisposesItsSourceWhenInitialHashingFails()
+    {
+        var source = new TrackingPayloadSource();
+        var preparer = new PayloadPreparer(new PayloadCipher(),
+            mappedSourceFactory: _ => source,
+            sha256Factory: _ => throw new InvalidOperationException("injected hash failure"));
+
+        Assert.Throws<InvalidOperationException>(() => preparer.Open("unused.bin", 1,
+            compress: false, password: null, AppSettings.BuiltIn, semanticFlags: 0,
+            out _, out _));
+
+        Assert.True(source.Disposed);
+    }
+
+    [Theory]
+    [InlineData((int)MappedPayloadSourceConstructionStage.FileCreated)]
+    [InlineData((int)MappedPayloadSourceConstructionStage.ViewCreated)]
+    [InlineData((int)MappedPayloadSourceConstructionStage.PointerAcquired)]
+    public void MappedSource_ConstructorFailureReleasesEveryAcquiredResource(
+        int failureStageValue)
+    {
+        var failureStage = (MappedPayloadSourceConstructionStage)failureStageValue;
+        using var tmp = new TempDir();
+        string path = tmp.WriteFile("mapped.bin", TestData.Random(4096));
+        MemoryMappedFile? observedFile = null;
+        MemoryMappedViewAccessor? observedView = null;
+
+        Assert.Throws<InjectedConstructionFailure>(() => new MappedPayloadSource(path,
+            (stage, file, view) =>
+            {
+                observedFile = file;
+                observedView = view;
+                if (stage == failureStage)
+                    throw new InjectedConstructionFailure();
+            }));
+
+        Assert.NotNull(observedFile);
+        Assert.Throws<ObjectDisposedException>(() => observedFile.CreateViewAccessor());
+        if (observedView is not null)
+            Assert.True(observedView.SafeMemoryMappedViewHandle.IsClosed);
+        using var exclusive = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.None);
+    }
+
+    [Fact]
     public void LargeIncompressibleFile_StreamsAndRoundTrips()
     {
         // > 4 MB of noise takes the memory-mapped (non-materialized) encode path.
@@ -108,4 +154,15 @@ public class StreamingTests
         new ShardDecoder().DecodeFolder(result.Files.Where(File.Exists), output, _ => { });
         Assert.Equal(content, File.ReadAllBytes(output));
     }
+
+    private sealed class TrackingPayloadSource : IPayloadSource
+    {
+        public bool Disposed { get; private set; }
+        public long Length => 1;
+        public long ResidentBytes => 0;
+        public void Read(long offset, Span<byte> destination) => destination.Clear();
+        public void Dispose() => Disposed = true;
+    }
+
+    private sealed class InjectedConstructionFailure : Exception;
 }

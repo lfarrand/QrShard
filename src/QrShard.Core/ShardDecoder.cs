@@ -30,7 +30,7 @@ internal sealed class ShardDecoder(
 
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
     public ShardDecoder() : this(
-        AppSettings.Current, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
+        AppSettings.BuiltIn, new CameraRectifier(), new FrameLocator(new InnerRectScanner(), new StripReader()),
         new StripReader(), new GridSampler(), new ShardAssembler(),
         new Fec(), new Crc(), new FastPngReader(), new PhotoFusion(), new Interleaver2())
     {
@@ -39,6 +39,35 @@ internal sealed class ShardDecoder(
     /// <summary>Worker count used when DecodeMaxParallelism is 0 (automatic); see CollectShards
     /// for what the ceiling is measured against.</summary>
     public static int AutoParallelism => Math.Min(Environment.ProcessorCount, 24);
+
+    /// <summary>Comparer that never collapses two names which the host can represent distinctly.</summary>
+    internal static StringComparer FileSystemPathComparer =>
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
+    /// <summary>
+    /// Enumerates and sorts an input set without first allowing a directory iterator or LINQ sort
+    /// to materialize attacker-controlled path metadata. The charge includes the actual UTF-16
+    /// path length rather than assuming a fixed-size name.
+    /// </summary>
+    internal static List<string> MaterializeInputPaths(IEnumerable<string> imagePaths, int decodeMemoryBudgetMB)
+    {
+        int maximumInputs = SuccessfulShardRetentionBudget.MaximumInputCount(decodeMemoryBudgetMB);
+        long inputMetadataLimit = SuccessfulShardRetentionBudget.InputMetadataByteLimit(decodeMemoryBudgetMB);
+        long inputMetadataBytes = 0;
+        var ordered = new List<string>(Math.Min(maximumInputs, 16_384));
+        foreach (string path in imagePaths)
+        {
+            long pathCharge = checked(SuccessfulShardRetentionBudget.InputMetadataBytes + 2L * path.Length);
+            if (ordered.Count >= maximumInputs || pathCharge > inputMetadataLimit - inputMetadataBytes)
+                throw new ShardResourceLimitException(
+                    $"Decode input exceeds the bounded image/path metadata allowance ({maximumInputs:N0} images maximum) for " +
+                    $"DecodeMemoryBudgetMB={decodeMemoryBudgetMB:N0}. Split the capture set or raise that setting deliberately.");
+            ordered.Add(path);
+            inputMetadataBytes += pathCharge;
+        }
+        ordered.Sort(FileSystemPathComparer);
+        return ordered;
+    }
 
     public List<RestoredFile> DecodeFolder(IEnumerable<string> imagePaths, string? outputPath, Action<string> log,
         string? password = null)
@@ -50,10 +79,26 @@ internal sealed class ShardDecoder(
     }
 
     /// <summary>Decodes every image to shards without assembling — the building block for sessions and verify.</summary>
-    public List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log)
+    public List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log) =>
+        CollectShardsCore(imagePaths, log,
+            new SuccessfulShardRetentionBudget(settings.DecodeMemoryBudgetMB), emitConflictMarkers: false);
+
+    /// <summary>
+    /// Internal long-lived variant used by watch/video-style orchestration. The caller owns the
+    /// successful-payload budget, so repeated batches share one ceiling. Newly terminal conflicts
+    /// are returned as typed compact markers for the caller to persist/apply, never to assemble.
+    /// </summary>
+    public List<DecodedShard> CollectShards(IEnumerable<string> imagePaths, Action<string> log,
+        SuccessfulShardRetentionBudget successful) =>
+        CollectShardsCore(imagePaths, log, successful, emitConflictMarkers: true);
+
+    private List<DecodedShard> CollectShardsCore(IEnumerable<string> imagePaths, Action<string> log,
+        SuccessfulShardRetentionBudget successful, bool emitConflictMarkers)
     {
-        var ordered = imagePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
-        var results = new (DecodedShard? Shard, string? Error)[ordered.Count];
+        var ordered = MaterializeInputPaths(imagePaths, settings.DecodeMemoryBudgetMB);
+        long conflictSequence = successful.ConflictSequence;
+        var resultSlots = Enumerable.Range(0, ordered.Count).Select(_ => new SuccessfulShardSlot()).ToArray();
+        var errors = new string?[ordered.Count];
 
         // One reusable scratch (pixel + visited buffers, the two large per-image allocations)
         // per worker, so decoding N images costs far fewer than 2N GC'd arrays.
@@ -84,6 +129,7 @@ internal sealed class ShardDecoder(
         if (parallelism <= 0)
             parallelism = AutoParallelism;
         var failures = new FailedCapture?[ordered.Count];
+        var salvage = new FailedCaptureRetentionBudget(settings.DecodeMemoryBudgetMB);
 
         // Each worker takes the next image off a shared cursor rather than owning a pre-assigned
         // range. Per-image decode cost varies several-fold (the camera-rectification fallback, ECC
@@ -120,22 +166,48 @@ internal sealed class ShardDecoder(
         int workers = BudgetedWorkers(ordered, parallelism, settings.DecodeMemoryBudgetMB, log,
             out long plannedMaxPixels);
         int next = -1;
+        int fatalStop = 0;
 
         void Worker()
         {
             var scratch = new DecodeScratch();
             int i;
-            while ((i = Interlocked.Increment(ref next)) < ordered.Count)
+            while (Volatile.Read(ref fatalStop) == 0 &&
+                   (i = Interlocked.Increment(ref next)) < ordered.Count)
             {
-                var diagnostics = new DecodeDiagnostics();
+                // A peer can publish a run-fatal condition between the loop test and our cursor
+                // claim. Treat that claimed item as not started: at most the workers which were
+                // already inside DecodeImage when the failure happened may finish expensive work.
+                if (Volatile.Read(ref fatalStop) != 0)
+                    break;
+                var diagnostics = new DecodeDiagnostics
+                {
+                    TryReserveSalvage = salvage.TryReserve,
+                    SuccessfulShardBudget = successful,
+                    SuccessfulShardSlot = resultSlots[i],
+                };
                 try
                 {
-                    results[i] = (DecodeImage(ordered[i], scratch, diagnostics, plannedMaxPixels), null);
+                    _ = DecodeImage(ordered[i], scratch, diagnostics, plannedMaxPixels);
+                    // The axis-aligned attempt can fail and reserve salvage before a camera retry
+                    // succeeds. Successful captures do not enter fusion, so return that reservation.
+                    salvage.Release(diagnostics);
+                }
+                catch (ShardSuppressedException)
+                {
+                    salvage.Release(diagnostics);
                 }
                 catch (ShardDecodeException ex)
                 {
-                    results[i] = (null, ex.Message);
-                    if (diagnostics is { CellsLayout: not null, Cells: not null })
+                    bool runFatal = diagnostics.SuccessfulShardAdmissionRefused ||
+                                    ex is ShardFamilyMismatchException;
+                    if (runFatal)
+                        salvage.Release(diagnostics); // a prior camera attempt must not bypass the cap via fusion
+                    errors[i] = ex.Message;
+                    if (runFatal)
+                        Interlocked.Exchange(ref fatalStop, 1);
+                    if (!runFatal &&
+                        diagnostics is { CellsLayout: not null, Cells: not null })
                         failures[i] = new FailedCapture(diagnostics.CellsLayout, diagnostics.Cells, ordered[i]);
                 }
                 // Everything above runs on attacker-controlled bytes, and only the failures the
@@ -153,7 +225,8 @@ internal sealed class ShardDecoder(
                 // whole run, not of one image, and continuing past them would be dishonest.
                 catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
                 {
-                    results[i] = (null, $"unhandled {ex.GetType().Name} while decoding: {ex.Message}");
+                    salvage.Release(diagnostics);
+                    errors[i] = $"unhandled {ex.GetType().Name} while decoding: {ex.Message}";
                 }
             }
         }
@@ -179,24 +252,38 @@ internal sealed class ShardDecoder(
             }
         }
 
+        if (successful.HasInconsistentFamily)
+            throw successful.FamilyMismatchException();
+        successful.ReleaseBatchConflicts(conflictSequence);
+
         var shards = new List<DecodedShard>();
         for (int i = 0; i < ordered.Count; i++)
         {
-            var (shard, error) = results[i];
+            DecodedShard? shard = resultSlots[i].Shard;
             if (shard is not null)
             {
                 shards.Add(shard);
                 string corrections = shard.CorrectedBytes > 0 ? $", ECC corrected {shard.CorrectedBytes} bytes" : "";
                 string which = shard.Header.IsParity
-                    ? $"parity #{shard.Header.Index + 1}"
-                    : $"part {shard.Header.Index + 1}/{shard.Header.Count}";
-                log($"  ok      {Path.GetFileName(ordered[i])}  ({which}, {shard.Payload.Length:N0} bytes{corrections})");
+                    ? $"parity #{(long)shard.Header.Index + 1}"
+                    : $"part {(long)shard.Header.Index + 1}/{shard.Header.Count}";
+                log($"  ok      {ShardHeader.Display(Path.GetFileName(ordered[i]))}  " +
+                    $"({which}, {shard.Payload.Length:N0} bytes{corrections})");
             }
-            else
+            else if (errors[i] is { } error)
             {
-                log($"  FAILED  {Path.GetFileName(ordered[i])}: {error}");
+                log($"  FAILED  {ShardHeader.Display(Path.GetFileName(ordered[i]))}: " +
+                    ShardHeader.Display(error ?? "unknown decode failure"));
             }
         }
+
+        // The local list now owns these payloads. PhotoFusion runs afterwards and can discover a
+        // conflict for one of them; until RemoveAll/caller marker application drops that list
+        // reference, its bytes are not honestly reusable.
+        successful.MarkReturnedExternal(shards);
+
+        if (successful.RefusedCount > 0)
+            throw successful.LimitException();
 
         // Multi-capture fusion: several failed captures of the same shard may still combine
         // into a valid one (glare and reflections move between shots).
@@ -205,12 +292,31 @@ internal sealed class ShardDecoder(
         {
             foreach (var shard in photoFusion.Fuse(failed, log))
             {
-                if (!shards.Any(s => s.Header.FileId == shard.Header.FileId &&
-                                     s.Header.Index == shard.Header.Index &&
-                                     s.Header.IsParity == shard.Header.IsParity))
+                // Preserve a second CRC-valid candidate even when its ordinal already exists.
+                // Reassembly compares bytes: identical captures collapse harmlessly, while a
+                // disagreement becomes an erasure rather than a filename-order first-wins choice.
+                var slot = new SuccessfulShardSlot();
+                SuccessfulShardAdmission admission = successful.TryAdmitOwned(shard, slot);
+                if (admission.Kind == SuccessfulShardAdmissionKind.InconsistentFamily)
+                    throw successful.FamilyMismatchException();
+                if (admission.Kind == SuccessfulShardAdmissionKind.Refused)
+                    throw successful.LimitException();
+                if (admission.Kind == SuccessfulShardAdmissionKind.Added &&
+                    successful.TryPublish(shard.Header, slot, shard))
+                {
                     shards.Add(shard);
+                    // A later fused candidate can conflict with this one in the same iterator.
+                    // Transfer ownership immediately rather than after the whole fusion pass.
+                    successful.MarkReturnedExternal([shard]);
+                }
             }
         }
+        shards.RemoveAll(s => successful.IsConflicted(s.Header));
+        if (emitConflictMarkers)
+            shards.AddRange(successful.ConflictMarkersSince(conflictSequence));
+        if (salvage.RefusedCount > 0)
+            log($"  skipped fusion salvage for {salvage.RefusedCount:N0} failed capture(s): " +
+                "the run-wide DecodeMemoryBudgetMB/fusion-group limit was reached.");
         return shards;
     }
 
@@ -282,7 +388,7 @@ internal sealed class ShardDecoder(
         catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException
                                        and not ShardDecodeException)
         {
-            throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
+            throw new ShardDecodeException($"Not a readable image ({ShardHeader.Display(ex.Message)}).");
         }
         Bitmap bmp;
         using (image)
@@ -348,6 +454,21 @@ internal sealed class ShardDecoder(
         try
         {
             return DecodeBitmap(bmp, scratch, path, diagnostics);
+        }
+        catch (ShardSuppressedException)
+        {
+            throw; // duplicate/conflict outcome, never evidence that rectification is needed
+        }
+        catch (ShardFamilyMismatchException)
+        {
+            throw; // set-level integrity failure, not evidence that rectification is needed
+        }
+        catch (ShardDecodeException) when (diagnostics?.SuccessfulShardAdmissionRefused == true)
+        {
+            // This is a run-wide resource refusal, not evidence of perspective distortion. A
+            // camera retry would repeat expensive rectification and count the same valid shard a
+            // second time before arriving at the identical budget decision.
+            throw;
         }
         catch (ShardDecodeException axisAlignedError)
         {
@@ -436,7 +557,7 @@ internal sealed class ShardDecoder(
         catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException
                                        and not ShardDecodeException)
         {
-            throw new ShardDecodeException($"Not a readable image ({ex.Message}).");
+            throw new ShardDecodeException($"Not a readable image ({ShardHeader.Display(ex.Message)}).");
         }
     }
 
@@ -550,6 +671,7 @@ internal sealed class ShardDecoder(
                 // Not identifiable: leave it out of the estimate.
             }
         }
+
         if (largestPixels <= 0)
         {
             // There is no trustworthy size with which to divide the budget. One worker is the
@@ -638,10 +760,16 @@ internal sealed class ShardDecoder(
         // for multi-capture fusion. First failing attempt wins (scratch buffers are reused).
         void Salvage()
         {
-            if (diagnostics is not null && diagnostics.Cells is null)
+            // Only the folder path supplies an admission hook and only ECC layouts are fusible.
+            // Diagnose consumes margins/codeword errors, not a private copy of the cell stream.
+            if (diagnostics is not null && diagnostics.Cells is null && layout.EccParity > 0 &&
+                diagnostics.TryReserveSalvage is not null)
             {
-                int salvageLength = layout.EccParity > 0 ? protectedLength : (int)((layout.TotalBits + 7) / 8);
+                int salvageLength = protectedLength;
+                if (!diagnostics.TryReserveSalvage(layout, salvageLength))
+                    return;
                 diagnostics.Cells = work.AsSpan(0, salvageLength).ToArray();
+                diagnostics.SalvageReservedBytes = salvageLength;
                 // Recorded WITH the cells, not read back later: Layout is overwritten by the
                 // camera-rectified retry while these cells stay from the first attempt.
                 diagnostics.CellsLayout = layout;
@@ -689,12 +817,427 @@ internal sealed class ShardDecoder(
             Salvage();
             throw new ShardDecodeException("Shard header declares more payload than the image holds.");
         }
-        byte[] payload = stream[headerLen..(headerLen + header.PayloadLength)];
-        if (crc.Crc32(payload) != header.PayloadCrc32)
+        ReadOnlySpan<byte> payloadBytes = stream.AsSpan(headerLen, header.PayloadLength);
+        if (crc.Crc32(payloadBytes) != header.PayloadCrc32)
         {
             Salvage();
-            throw new ShardDecodeException($"Payload CRC-32 mismatch (part {header.Index + 1}/{header.Count}). Recapture this image.");
+            throw new ShardDecodeException(
+                $"Payload CRC-32 mismatch (part {(long)header.Index + 1}/{header.Count}). Recapture this image.");
         }
-        return new DecodedShard(header, payload, path, layout.EccParity, correctedBytes);
+        // Header names are retained as UTF-16 strings but arrive as UTF-8 bytes, so twice the
+        // wire-header length conservatively covers their worst retained representation.
+        int retentionCharge = checked(2 * headerLen + 2 * path.Length + header.PayloadLength +
+            SuccessfulShardRetentionBudget.PerShardOverheadBytes);
+        byte[] payload;
+        SuccessfulShardRetentionBudget? successfulBudget = diagnostics?.SuccessfulShardBudget;
+        SuccessfulShardSlot? successfulSlot = diagnostics?.SuccessfulShardSlot;
+        if (successfulBudget is not null && successfulSlot is not null)
+        {
+            SuccessfulShardAdmission admission = successfulBudget.TryAdmit(
+                header, payloadBytes, retentionCharge, path, layout.EccParity, correctedBytes, successfulSlot);
+            if (admission.Kind == SuccessfulShardAdmissionKind.Refused)
+            {
+                diagnostics!.SuccessfulShardAdmissionRefused = true;
+                throw new ShardResourceLimitException(
+                    $"Valid shard {(long)header.Index + 1} was not retained because decoded payloads reached " +
+                    $"DecodeMemoryBudgetMB={settings.DecodeMemoryBudgetMB:N0}. Split the capture set or raise that setting deliberately.");
+            }
+            if (admission.Kind == SuccessfulShardAdmissionKind.InconsistentFamily)
+                throw successfulBudget.FamilyMismatchException();
+            if (admission.Kind != SuccessfulShardAdmissionKind.Added)
+                throw new ShardSuppressedException();
+            payload = admission.Payload!;
+        }
+        else
+        {
+            payload = payloadBytes.ToArray();
+        }
+        var shard = new DecodedShard(header, payload, path, layout.EccParity, correctedBytes);
+        if (successfulBudget is not null && successfulSlot is not null &&
+            !successfulBudget.TryPublish(header, successfulSlot, shard))
+            throw new ShardSuppressedException();
+        return shard;
+    }
+
+    /// <summary>
+    /// Run-wide admission for successful folder payloads. Worker scratch is reusable, but every
+    /// accepted DecodedShard remains live until reassembly; without this independent ceiling a
+    /// mixed folder could retain an arbitrary number of otherwise-valid files.
+    /// </summary>
+    internal sealed class SuccessfulShardRetentionBudget
+    {
+        internal const int PerShardOverheadBytes = 256;
+        internal const int InputMetadataBytes = 64;
+        private const int InputMetadataBudgetDivisor = 8;
+        private const int AbsoluteMaximumInputs = 1_000_000;
+        private readonly object gate = new();
+        private readonly long byteLimit;
+        private readonly int countLimit;
+        private readonly Dictionary<(ulong FileId, int Index, bool Parity), Candidate> candidates = [];
+        private readonly Dictionary<ulong, ShardHeader> families = [];
+        private long retainedBytes;
+        private int retainedCount;
+        private int refusedCount;
+        private ulong? inconsistentFamilyFileId;
+
+        private sealed class Candidate(ShardHeader header, byte[] payload, int retainedBytes,
+            string sourceFile, int eccParity, int correctedBytes, SuccessfulShardSlot? slot,
+            bool payloadReleasableOnConflict)
+        {
+            internal ShardHeader Header { get; } = header;
+            internal byte[]? Payload { get; set; } = payload;
+            internal int RetainedBytes { get; set; } = retainedBytes;
+            internal string SourceFile { get; } = sourceFile;
+            internal int EccParity { get; } = eccParity;
+            internal int CorrectedBytes { get; } = correctedBytes;
+            internal SuccessfulShardSlot? Slot { get; set; } = slot;
+            internal bool PayloadReleasableOnConflict { get; set; } = payloadReleasableOnConflict;
+            internal bool Conflicted { get; set; }
+            internal long ConflictSequence { get; set; }
+        }
+
+        private long conflictSequence;
+
+        internal SuccessfulShardRetentionBudget(int decodeMemoryBudgetMB)
+        {
+            byteLimit = checked(decodeMemoryBudgetMB * 1_000_000L);
+            countLimit = MaximumInputCount(decodeMemoryBudgetMB);
+        }
+
+        internal static long InputMetadataByteLimit(int decodeMemoryBudgetMB) =>
+            checked(decodeMemoryBudgetMB * 1_000_000L) / InputMetadataBudgetDivisor;
+
+        internal static int MaximumInputCount(int decodeMemoryBudgetMB) =>
+            MaximumInputCountForByteLimit(checked(decodeMemoryBudgetMB * 1_000_000L));
+
+        internal static int MaximumInputCountForByteLimit(long byteLimit) =>
+            (int)Math.Min(AbsoluteMaximumInputs,
+                Math.Max(0, byteLimit) / InputMetadataBudgetDivisor / InputMetadataBytes);
+
+        internal long RetainedBytes
+        {
+            get { lock (gate) return retainedBytes; }
+        }
+
+        internal int RetainedCount
+        {
+            get { lock (gate) return retainedCount; }
+        }
+
+        internal int RefusedCount
+        {
+            get { lock (gate) return refusedCount; }
+        }
+
+        internal long ConflictSequence
+        {
+            get { lock (gate) return conflictSequence; }
+        }
+
+        /// <summary>
+        /// Admits at most one full payload for an ordinal. Exact duplicates consume nothing. A
+        /// disagreement atomically revokes the first result slot, releases its payload charge and
+        /// records one typed compact marker; later copies remain terminal and allocate nothing.
+        /// </summary>
+        internal SuccessfulShardAdmission TryAdmit(ShardHeader header, ReadOnlySpan<byte> payload,
+            int bytes, string sourceFile, int eccParity, int correctedBytes, SuccessfulShardSlot slot) =>
+            TryAdmitCore(header, payload, bytes, sourceFile, eccParity, correctedBytes, slot,
+                ownedPayload: null, payloadReleasableOnConflict: true);
+
+        /// <summary>Direct admission probe used by focused resource-bound tests.</summary>
+        internal SuccessfulShardAdmission TryAdmit(ShardHeader header, ReadOnlySpan<byte> payload,
+            int bytes) => TryAdmit(header, payload, bytes, "test", 0, 0, new SuccessfulShardSlot());
+
+        internal SuccessfulShardAdmission TryAdmitOwned(DecodedShard shard,
+            SuccessfulShardSlot? slot = null, bool payloadReleasableOnConflict = true) => TryAdmitCore(
+            shard.Header, shard.Payload, RetentionCharge(shard), shard.SourceFile, shard.EccParity,
+            shard.CorrectedBytes, slot, shard.Payload, payloadReleasableOnConflict);
+
+        internal void Seed(IEnumerable<DecodedShard> shards)
+        {
+            foreach (DecodedShard shard in shards)
+            {
+                if (shard.IsTerminalConflict)
+                    continue;
+                // Session/caller lists still own these arrays throughout the collection call. A
+                // conflict cannot honestly free their allowance until that external state has
+                // applied the marker, so keep the charge reserved for this run.
+                SuccessfulShardAdmissionKind kind = TryAdmitOwned(shard,
+                    payloadReleasableOnConflict: false).Kind;
+                if (kind == SuccessfulShardAdmissionKind.InconsistentFamily)
+                    throw FamilyMismatchException();
+                if (kind == SuccessfulShardAdmissionKind.Refused)
+                    throw LimitException();
+            }
+        }
+
+        internal List<DecodedShard> ConflictMarkersSince(long sequence)
+        {
+            lock (gate)
+            {
+                return candidates.Values
+                    .Where(c => c.Conflicted && c.ConflictSequence > sequence)
+                    .OrderBy(c => c.ConflictSequence)
+                    .Select(c => new DecodedShard(c.Header, [], c.SourceFile, c.EccParity, c.CorrectedBytes)
+                    {
+                        IsTerminalConflict = true,
+                    })
+                    .ToList();
+            }
+        }
+
+        internal bool IsConflicted(ShardHeader header)
+        {
+            lock (gate)
+                return candidates.TryGetValue((header.FileId, header.Index, header.IsParity),
+                    out Candidate? candidate) && candidate.Conflicted;
+        }
+
+        /// <summary>
+        /// Releases externally seeded payload charges only after the caller has durably applied
+        /// the typed markers and replaced its old shard list. Calling this before that hand-off
+        /// would make the accounting optimistic while the arrays are still live.
+        /// </summary>
+        internal void ReleasePersistedConflicts(IEnumerable<DecodedShard> markers)
+        {
+            lock (gate)
+            {
+                foreach (DecodedShard marker in markers)
+                {
+                    if (!marker.IsTerminalConflict ||
+                        !candidates.TryGetValue((marker.Header.FileId, marker.Header.Index,
+                            marker.Header.IsParity), out Candidate? candidate))
+                        continue;
+                    ReleaseAppliedConflict(candidate);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Releases decoder-owned payloads for conflicts discovered since a collection started.
+        /// This is called only after every worker has joined, so no worker local can still retain
+        /// the admission payload while another admission reuses its charge.
+        /// </summary>
+        internal void ReleaseBatchConflicts(long afterSequence)
+        {
+            lock (gate)
+            {
+                foreach (Candidate candidate in candidates.Values)
+                    if (candidate.Conflicted && candidate.ConflictSequence > afterSequence &&
+                        candidate.PayloadReleasableOnConflict)
+                        ReleaseAppliedConflict(candidate);
+            }
+        }
+
+        internal void ReleaseAppliedConflict(ShardHeader header)
+        {
+            lock (gate)
+            {
+                if (candidates.TryGetValue((header.FileId, header.Index, header.IsParity),
+                    out Candidate? candidate))
+                    ReleaseAppliedConflict(candidate);
+            }
+        }
+
+        private void ReleaseAppliedConflict(Candidate candidate)
+        {
+            if (!candidate.Conflicted || candidate.Payload is not { } payload)
+                return;
+            candidate.Payload = null;
+            candidate.RetainedBytes -= payload.Length;
+            retainedBytes -= payload.Length;
+        }
+
+        /// <summary>
+        /// Transfers ownership of returned candidates from revocable worker slots to the caller.
+        /// A later collection call must keep those payloads charged until its marker has actually
+        /// been applied to the caller's retained list.
+        /// </summary>
+        internal void MarkReturnedExternal(IEnumerable<DecodedShard> returned)
+        {
+            lock (gate)
+            {
+                foreach (DecodedShard shard in returned)
+                {
+                    if (shard.IsTerminalConflict ||
+                        !candidates.TryGetValue((shard.Header.FileId, shard.Header.Index,
+                            shard.Header.IsParity), out Candidate? candidate) || candidate.Conflicted)
+                        continue;
+                    candidate.PayloadReleasableOnConflict = false;
+                    candidate.Slot = null;
+                }
+            }
+        }
+
+        internal static int RetentionCharge(DecodedShard shard) => checked(
+            2 * ShardHeader.Size(shard.Header.FileName) + 2 * shard.SourceFile.Length +
+            shard.Payload.Length + PerShardOverheadBytes);
+
+        internal ShardResourceLimitException LimitException() => new(
+            $"Decoded shard retention reached DecodeMemoryBudgetMB={byteLimit / 1_000_000:N0} " +
+            "or its successful-shard count limit. Split the capture set or raise that setting deliberately.");
+
+        internal bool HasInconsistentFamily
+        {
+            get { lock (gate) return inconsistentFamilyFileId.HasValue; }
+        }
+
+        internal ShardFamilyMismatchException FamilyMismatchException()
+        {
+            lock (gate)
+                return new ShardFamilyMismatchException(
+                    $"CRC-valid shards for file {inconsistentFamilyFileId.GetValueOrDefault():x16} " +
+                    "contain inconsistent file identity or recovery metadata.");
+        }
+
+        internal bool TryPublish(ShardHeader header, SuccessfulShardSlot slot, DecodedShard shard)
+        {
+            lock (gate)
+            {
+                var key = (header.FileId, header.Index, header.IsParity);
+                if (!candidates.TryGetValue(key, out Candidate? candidate) || candidate.Conflicted ||
+                    !ReferenceEquals(candidate.Slot, slot))
+                    return false;
+                slot.Shard = shard;
+                return true;
+            }
+        }
+
+        private SuccessfulShardAdmission TryAdmitCore(ShardHeader header, ReadOnlySpan<byte> payload,
+            int bytes, string sourceFile, int eccParity, int correctedBytes, SuccessfulShardSlot? slot,
+            byte[]? ownedPayload, bool payloadReleasableOnConflict)
+        {
+            lock (gate)
+            {
+                bool newFamily = !families.TryGetValue(header.FileId, out ShardHeader? family);
+                if (!newFamily)
+                {
+                    if (!family!.HasSameFamilyAs(header))
+                    {
+                        inconsistentFamilyFileId ??= header.FileId;
+                        return new(SuccessfulShardAdmissionKind.InconsistentFamily, null);
+                    }
+                }
+
+                var key = (header.FileId, header.Index, header.IsParity);
+                if (candidates.TryGetValue(key, out Candidate? existing))
+                {
+                    if (existing.Conflicted)
+                        return new(SuccessfulShardAdmissionKind.TerminalConflict, null);
+                    if (existing.Header.PayloadLength == header.PayloadLength &&
+                        existing.Header.PayloadCrc32 == header.PayloadCrc32 &&
+                        existing.Payload is { } existingPayload &&
+                        existingPayload.AsSpan().SequenceEqual(payload))
+                        return new(SuccessfulShardAdmissionKind.Duplicate, null);
+
+                    existing.Conflicted = true;
+                    existing.ConflictSequence = ++conflictSequence;
+                    if (existing.Slot is not null)
+                        existing.Slot.Shard = null;
+                    existing.Slot = null;
+                    return new(SuccessfulShardAdmissionKind.Conflict, null);
+                }
+
+                if (bytes <= 0 || retainedCount >= countLimit || bytes > byteLimit - retainedBytes)
+                {
+                    refusedCount++;
+                    return new(SuccessfulShardAdmissionKind.Refused, null);
+                }
+                byte[] retained = ownedPayload ?? payload.ToArray();
+                // A refusal must be state-free. In particular, do not retain an attacker-chosen
+                // family header/name before its first shard has passed both byte and count admission.
+                if (newFamily)
+                    families.Add(header.FileId, header);
+                candidates.Add(key, new Candidate(header, retained, bytes, sourceFile,
+                    eccParity, correctedBytes, slot, payloadReleasableOnConflict));
+                retainedBytes += bytes;
+                retainedCount++;
+                return new(SuccessfulShardAdmissionKind.Added, retained);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Run-wide admission for failed-capture fusion material. Worker scratch consumes most of the
+    /// configured decode budget, so salvage may retain at most one eighth of that budget and no
+    /// more than PhotoFusion's useful capture count for any one layout signature. The lock covers
+    /// only failed captures; normal decode work never contends on it.
+    /// </summary>
+    internal sealed class FailedCaptureRetentionBudget
+    {
+        private const int SalvageBudgetDivisor = 8;
+        // Two-capture cluster fusion peaks below 3x retained bytes per capture: the two captures,
+        // recovered stream, compact bucket/frontier/byte tags and one candidate. Charging every
+        // retained capture at 3x also covers the cheaper >=3-capture majority path.
+        private const int FusionWorkingSetFactor = 3;
+        private readonly object gate = new();
+        private readonly long byteLimit;
+        private readonly Dictionary<(int GridW, int GridH, int Bits, int Ecc, bool Interleave2), int> groupCounts = [];
+        private long retainedBytes;
+        private long reservedBytes;
+        private int refusedCount;
+
+        internal FailedCaptureRetentionBudget(int decodeMemoryBudgetMB)
+        {
+            byteLimit = checked(decodeMemoryBudgetMB * 1_000_000L / SalvageBudgetDivisor);
+        }
+
+        internal int RefusedCount
+        {
+            get { lock (gate) return refusedCount; }
+        }
+
+        internal long RetainedBytes
+        {
+            get { lock (gate) return retainedBytes; }
+        }
+
+        internal long ReservedBytes
+        {
+            get { lock (gate) return reservedBytes; }
+        }
+
+        internal bool TryReserve(Layout layout, int bytes)
+        {
+            var key = (layout.GridW, layout.GridH, layout.BitsPerCell, layout.EccParity, layout.Interleave2);
+            lock (gate)
+            {
+                groupCounts.TryGetValue(key, out int count);
+                long charge = checked((long)bytes * FusionWorkingSetFactor);
+                if (bytes <= 0 || count >= PhotoFusion.MaxCapturesPerGroup ||
+                    (count == 0 && groupCounts.Count >= PhotoFusion.MaxFusionGroups) ||
+                    charge > byteLimit - reservedBytes)
+                {
+                    refusedCount++;
+                    return false;
+                }
+                groupCounts[key] = count + 1;
+                retainedBytes += bytes;
+                reservedBytes += charge;
+                return true;
+            }
+        }
+
+        internal void Release(DecodeDiagnostics diagnostics)
+        {
+            if (diagnostics.CellsLayout is not { } layout || diagnostics.SalvageReservedBytes <= 0)
+                return;
+            var key = (layout.GridW, layout.GridH, layout.BitsPerCell, layout.EccParity, layout.Interleave2);
+            lock (gate)
+            {
+                retainedBytes -= diagnostics.SalvageReservedBytes;
+                reservedBytes -= (long)diagnostics.SalvageReservedBytes * FusionWorkingSetFactor;
+                if (groupCounts.TryGetValue(key, out int count))
+                {
+                    if (count <= 1)
+                        groupCounts.Remove(key);
+                    else
+                        groupCounts[key] = count - 1;
+                }
+            }
+            diagnostics.SalvageReservedBytes = 0;
+            diagnostics.Cells = null;
+            diagnostics.CellsLayout = null;
+        }
     }
 }

@@ -42,8 +42,13 @@ internal sealed class ShardEncoder(
     public const int MaxRecoveryPercent = 100;
     public const int MaxFountainPercent = 1000;
 
+    private readonly record struct Geometry(Layout Layout, int HeaderSize, int Capacity,
+        int Count, int StripeData, int StripeParity, int Stripes, int ParityTotal, int TotalImages);
+
+    private readonly record struct InputSnapshot(long Length, long LastWriteUtcTicks, long CreationUtcTicks);
+
     /// <summary>Default wiring for tests, benchmarks, and non-DI callers.</summary>
-    public ShardEncoder() : this(AppSettings.Current, new PayloadPreparer(), new StripePlanner(),
+    public ShardEncoder() : this(AppSettings.BuiltIn, new PayloadPreparer(), new StripePlanner(),
         new ShardRenderer(), new CrossShardFec(), new FountainFec(), new Crc(), new Palette(), new ShardImageFormat())
     {
     }
@@ -55,16 +60,24 @@ internal sealed class ShardEncoder(
     {
         bool fountain = ValidateEncodeOptions(opt);
         string format = formats.Normalize(opt.ImageFormat);
-        long originalLength = FileSizeChecked(filePath);
-        string fileName = Path.GetFileName(filePath);
-        using var payload = payloadPreparer.Open(filePath, originalLength, opt.Compress, opt.Password, settings, out _, out _);
+        string inputPath = Path.GetFullPath(filePath);
+        InputSnapshot input = CaptureInput(inputPath);
+        string fileName = Path.GetFileName(inputPath);
+        byte semanticFlags = (byte)((opt.IsArchive ? ShardHeader.FlagArchive : 0) |
+            (fountain ? ShardHeader.FlagFountain : 0));
+        using var payload = payloadPreparer.Open(inputPath, input.Length, opt.Compress, opt.Password, settings,
+            semanticFlags, out _, out _);
+        EnsurePreparedLengthSupported(payload.Source.Length);
+        EnsureInputMetadataUnchanged(inputPath, input);
         var g = ComputeGeometry(opt, fileName, payload.Source.Length, fountain);
-        return new EncodePlan(g.Count + g.ParityTotal, g.Count, g.ParityTotal, g.Capacity,
+        return new EncodePlan(g.TotalImages, g.Count, g.ParityTotal, g.Capacity,
             g.Layout.Width, g.Layout.Height, g.StripeData, g.StripeParity, format);
     }
 
     private static bool ValidateEncodeOptions(EncodeOptions opt)
     {
+        if (opt.Password is { Length: 0 })
+            throw new ArgumentException("Password must not be empty; use null for plaintext output.");
         if (opt.RecoveryPercent is < 0 or > MaxRecoveryPercent)
             throw new ArgumentException($"Recovery percent must be between 0 and {MaxRecoveryPercent}.");
         if (opt.FountainPercent is < 0 or > MaxFountainPercent)
@@ -74,52 +87,116 @@ internal sealed class ShardEncoder(
         return opt.FountainPercent > 0;
     }
 
-    private static long FileSizeChecked(string filePath)
+    private static InputSnapshot CaptureInput(string filePath)
     {
-        long len = new FileInfo(filePath).Length;
+        var info = new FileInfo(filePath);
+        info.Refresh();
+        if (!info.Exists)
+            throw new FileNotFoundException("Input file was not found.", filePath);
+        long len = info.Length;
         if (len > MaxFileBytes)
             throw new InvalidOperationException($"Files larger than {MaxFileBytes / 1_000_000:N0} MB are not supported.");
-        return len;
+        return new InputSnapshot(len, info.LastWriteTimeUtc.Ticks, info.CreationTimeUtc.Ticks);
+    }
+
+    internal static void EnsurePreparedLengthSupported(long length)
+    {
+        if (length < 0 || length > MaxFileBytes)
+            throw new InvalidOperationException(
+                $"The prepared payload, including compression/encryption overhead, exceeds the " +
+                $"{MaxFileBytes / 1_000_000:N0} MB protocol limit.");
+    }
+
+    private static void EnsureInputMetadataUnchanged(string filePath, InputSnapshot expected)
+    {
+        InputSnapshot current = CaptureInput(filePath);
+        if (current != expected)
+            throw new IOException("The input file changed while it was being encoded. No shard generation was published.");
+    }
+
+    private static void EnsureInputUnchanged(string filePath, InputSnapshot expected, byte[] expectedSha)
+    {
+        EnsureInputMetadataUnchanged(filePath, expected);
+        byte[] currentSha;
+        using (var input = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                   4 * 1024 * 1024, FileOptions.SequentialScan))
+            currentSha = SHA256.HashData(input);
+        EnsureInputMetadataUnchanged(filePath, expected);
+        if (!CryptographicOperations.FixedTimeEquals(currentSha, expectedSha))
+            throw new IOException("The input file changed while it was being encoded. No shard generation was published.");
     }
 
     /// <summary>Layout + image/stripe counts for a given post-preparation payload size. Shared by
     /// Encode and Plan so the dry-run count can never drift from the real one.</summary>
-    private (Layout Layout, int HeaderSize, int Capacity, int Count, int StripeData, int StripeParity, int Stripes, int ParityTotal)
+    private Geometry
         ComputeGeometry(EncodeOptions opt, string fileName, long dataLength, bool fountain)
     {
+        EnsurePreparedLengthSupported(dataLength);
         var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, opt.BitsPerCell, opt.EccParity, opt.CameraMode,
             opt.Interleave2);
         int headerSize = ShardHeader.Size(fileName);
-        long capacityLong = layout.UsableBytes - headerSize;
+        long capacityLong = checked(layout.UsableBytes - (long)headerSize);
         if (capacityLong < 1)
             throw new InvalidOperationException("Image capacity is too small for the header; increase resolution or density.");
-        int capacity = (int)capacityLong;
-        int count = Math.Max(1, (int)((dataLength + capacity - 1) / capacity));
+        if (capacityLong > int.MaxValue)
+            throw new InvalidOperationException("Image capacity exceeds the supported per-shard limit.");
+        int capacity = checked((int)capacityLong);
+        long countLong = dataLength == 0
+            ? 1
+            : checked(dataLength / capacityLong + (dataLength % capacityLong == 0 ? 0 : 1));
+        if (countLong > ShardHeader.MaxImages)
+            throw new InvalidOperationException(
+                $"This layout needs {countLong:N0} data images, above the protocol limit of " +
+                $"{ShardHeader.MaxImages:N0}. Increase capacity per image or split the input.");
+        int count = checked((int)countLong);
         var (stripeData, stripeParity) = fountain
             ? stripePlanner.PlanFountain(count, opt.FountainPercent)
             : stripePlanner.PlanStripes(count, opt.RecoveryPercent);
-        int stripes = stripeParity > 0 ? (count + stripeData - 1) / stripeData : 0;
-        return (layout, headerSize, capacity, count, stripeData, stripeParity, stripes, stripes * stripeParity);
+        if (stripeData < 0 || stripeParity < 0 || (stripeParity == 0) != (stripeData == 0))
+            throw new InvalidOperationException("The recovery planner returned invalid stripe geometry.");
+
+        long stripesLong = 0, parityTotalLong = 0;
+        if (stripeParity > 0)
+        {
+            if (stripeData > CrossShardFec.MaxShardsPerStripe ||
+                (!fountain && checked((long)stripeData + stripeParity) > CrossShardFec.MaxShardsPerStripe))
+                throw new InvalidOperationException("The recovery planner returned unsupported stripe geometry.");
+            stripesLong = checked(countLong / stripeData + (countLong % stripeData == 0 ? 0 : 1));
+            parityTotalLong = checked(stripesLong * stripeParity);
+            if (parityTotalLong > ShardHeader.MaxParityOrdinals)
+                throw new InvalidOperationException(
+                    $"This layout needs {parityTotalLong:N0} recovery images, above the protocol limit of " +
+                    $"{ShardHeader.MaxParityOrdinals:N0}.");
+        }
+
+        long totalLong = checked(countLong + parityTotalLong);
+        if (totalLong > int.MaxValue)
+            throw new InvalidOperationException("The total shard image count exceeds the supported in-memory result limit.");
+
+        return new Geometry(layout, headerSize, capacity, count, stripeData, stripeParity,
+            checked((int)stripesLong), checked((int)parityTotalLong), checked((int)totalLong));
     }
 
     public EncodeResult Encode(string filePath, string outDir, EncodeOptions opt, Action<string>? log = null)
     {
         bool fountain = ValidateEncodeOptions(opt);
         string format = formats.Normalize(opt.ImageFormat);
-        long originalLength = FileSizeChecked(filePath);
-        string fileName = Path.GetFileName(filePath);
+        string inputPath = Path.GetFullPath(filePath);
+        InputSnapshot input = CaptureInput(inputPath);
+        long originalLength = input.Length;
+        string fileName = Path.GetFileName(inputPath);
 
-        using var payload = payloadPreparer.Open(filePath, originalLength, opt.Compress, opt.Password, settings,
-            out byte flags, out byte[] sha);
-        if (opt.IsArchive)
-            flags |= ShardHeader.FlagArchive;
-        if (fountain)
-            flags |= ShardHeader.FlagFountain;
+        byte semanticFlags = (byte)((opt.IsArchive ? ShardHeader.FlagArchive : 0) |
+            (fountain ? ShardHeader.FlagFountain : 0));
+        using var payload = payloadPreparer.Open(inputPath, originalLength, opt.Compress, opt.Password, settings,
+            semanticFlags, out byte flags, out byte[] sha);
         var source = payload.Source;
         long dataLength = source.Length;
+        EnsurePreparedLengthSupported(dataLength);
+        EnsureInputMetadataUnchanged(inputPath, input);
 
-        var (layout, headerSize, capacity, count, stripeData, stripeParity, stripes, parityTotal) =
-            ComputeGeometry(opt, fileName, dataLength, fountain);
+        Geometry geometry = ComputeGeometry(opt, fileName, dataLength, fountain);
+        var (layout, headerSize, capacity, count, stripeData, stripeParity, stripes, parityTotal, totalImages) = geometry;
 
         // Bound fixed resident payload/FEC storage before allocating parity. Compression and
         // password encryption can turn the source into one retained managed array, while parity
@@ -128,14 +205,19 @@ internal sealed class ShardEncoder(
         long maxStreamBytes = checked(headerSize + (long)capacity);
         long renderWorkerBytes = EstimateRenderWorkerBytes(
             layout, maxStreamBytes, imageWriterCopiesPixels: format != "png");
+        long permutationBytes = EstimateSharedInterleaveBytes(layout);
         long parityBytes = checked((long)parityTotal * capacity);
         long stripeScratchBytes = stripeParity > 0 ? checked((long)stripeData * capacity) : 0;
+        long parityArrayOverhead = checked((long)parityTotal * (IntPtr.Size + 24));
+        long resultPathBytes = EstimateResultPathBytes(outDir, fileName, format, totalImages);
+        long resultReferenceBytes = checked((long)totalImages * IntPtr.Size * 2); // render array + returned List backing array
         long fixedResidentBytes = checked(source.ResidentBytes + parityBytes + stripeScratchBytes +
-            (long)parityTotal * IntPtr.Size);
+            parityArrayOverhead + permutationBytes +
+            (long)stripeData * IntPtr.Size + resultReferenceBytes + resultPathBytes);
         long budget = checked(settings.EncodeMemoryBudgetMB * 1_000_000L);
         if (fixedResidentBytes > budget - renderWorkerBytes)
             throw new InvalidOperationException(
-                $"This encode plans ~{fixedResidentBytes / 1_000_000:N0} MB of resident payload/parity data plus " +
+                $"This encode plans ~{fixedResidentBytes / 1_000_000:N0} MB of fixed payload/recovery/output state plus " +
                 $"at least one ~{renderWorkerBytes / 1_000_000:N0} MB render working set, above " +
                 $"EncodeMemoryBudgetMB={settings.EncodeMemoryBudgetMB:N0}. Lower recovery, use --no-compress, " +
                 "split the input, reduce resolution, or raise the budget deliberately.");
@@ -143,8 +225,8 @@ internal sealed class ShardEncoder(
         ulong fileId = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         var palette = paletteBuilder.Build(opt.BitsPerCell);
         byte[] metaModules = layout.PackMetadata();
-
-        Directory.CreateDirectory(outDir);
+        using var output = new OutputTransaction(outDir);
+        int[]? sharedPermutation = renderer.PrepareInterleave(layout);
         int dataPad = Math.Max(3, count.ToString().Length);
         string extension = formats.Extension(format);
 
@@ -152,7 +234,7 @@ internal sealed class ShardEncoder(
         // operates on — into a reusable buffer.
         void FillChunk(int i, byte[] dest)
         {
-            long offset = (long)i * capacity;
+            long offset = checked((long)i * capacity);
             int len = (int)Math.Min(capacity, dataLength - offset);
             source.Read(offset, dest.AsSpan(0, len));
             if (len < capacity)
@@ -170,7 +252,7 @@ internal sealed class ShardEncoder(
 
             for (int g = 0; g < stripes; g++)
             {
-                int first = g * stripeData;
+                int first = checked((int)((long)g * stripeData));
                 int s = Math.Min(stripeData, count - first);
                 for (int t = 0; t < s; t++)
                     FillChunk(first + t, chunkBuffers[t]);
@@ -179,20 +261,20 @@ internal sealed class ShardEncoder(
                     // Fountain ordinals are round-robin across stripes (o -> stripe o % stripes)
                     // so a cycling slideshow spreads every stripe's coded frames evenly.
                     for (int seq = 0; seq < stripeParity; seq++)
-                        parityChunks[seq * stripes + g] =
+                        parityChunks[checked((int)((long)seq * stripes + g))] =
                             fountainFec.EncodeFrame(new ArraySegment<byte[]>(chunkBuffers, 0, s), fileId, g, seq, capacity);
                 }
                 else
                 {
                     byte[][] parity = crossShardFec.Encode(new ArraySegment<byte[]>(chunkBuffers, 0, s), stripeParity, capacity);
                     for (int p = 0; p < stripeParity; p++)
-                        parityChunks[g * stripeParity + p] = parity[p];
+                        parityChunks[checked((int)((long)g * stripeParity + p))] = parity[p];
                 }
             }
         }
 
-        var files = new string[count + parityTotal];
-        int done = 0, totalImages = count + parityTotal;
+        var files = new string[totalImages];
+        int done = 0;
 
         // Parallelism is bounded by the full known render working set: RGB canvas, stream, FEC
         // cells, optional interleave scatter, and the ImageSharp pixel copy for non-PNG formats.
@@ -220,20 +302,22 @@ internal sealed class ShardEncoder(
                     break;
                 bool isParity = i >= count;
                 int payloadLen;
-                string outPath;
+                string relativeName;
                 if (!isParity)
                 {
-                    payloadLen = (int)Math.Min(capacity, dataLength - (long)i * capacity);
-                    outPath = Path.Combine(outDir, $"{fileName}.qrs{(i + 1).ToString().PadLeft(dataPad, '0')}of{count.ToString().PadLeft(dataPad, '0')}{extension}");
+                    payloadLen = (int)Math.Min(capacity, dataLength - checked((long)i * capacity));
+                    relativeName = $"{fileName}.qrs{(i + 1).ToString().PadLeft(dataPad, '0')}of{count.ToString().PadLeft(dataPad, '0')}{extension}";
                 }
                 else
                 {
                     payloadLen = parityChunks[i - count].Length;
-                    outPath = Path.Combine(outDir, $"{fileName}.qrs-parity{(i - count + 1).ToString().PadLeft(3, '0')}of{parityTotal.ToString().PadLeft(3, '0')}{extension}");
+                    relativeName = $"{fileName}.qrs-parity{(i - count + 1).ToString().PadLeft(3, '0')}of{parityTotal.ToString().PadLeft(3, '0')}{extension}";
                 }
+                string stagedPath = Path.Combine(output.StagingDirectory, relativeName);
+                string finalPath = Path.Combine(output.TargetDirectory, relativeName);
 
                 // Stage header + payload contiguously: [0..headerSize) header, then the payload.
-                int streamLength = headerSize + payloadLen;
+                int streamLength = checked(headerSize + payloadLen);
                 int stagedLength = layout.EccParity > 0
                     ? streamLength
                     : checked((int)layout.TotalBytes);
@@ -242,7 +326,7 @@ internal sealed class ShardEncoder(
                 if (isParity)
                     parityChunks[i - count].CopyTo(payloadSpan);
                 else
-                    source.Read((long)i * capacity, payloadSpan);
+                    source.Read(checked((long)i * capacity), payloadSpan);
                 if (streamLength < stagedLength)
                     Array.Clear(stream, streamLength, stagedLength - streamLength);
 
@@ -263,8 +347,9 @@ internal sealed class ShardEncoder(
                 };
                 header.Serialize().CopyTo(stream, 0);
 
-                renderer.RenderShard(layout, palette, metaModules, stream, streamLength, outPath, scratch, writer);
-                files[i] = outPath;
+                renderer.RenderShard(layout, palette, metaModules, stream, streamLength,
+                    stagedPath, scratch, writer, sharedPermutation);
+                files[i] = finalPath;
                 int finished = Interlocked.Increment(ref done);
                 // Serialize the progress callback: it runs on every parallel worker, and a caller
                 // may pass a delegate that is not thread-safe (a StringBuilder/StringWriter sink,
@@ -272,13 +357,23 @@ internal sealed class ShardEncoder(
                 // consumers of the progress action must be protected too. Cost is negligible.
                 if (log is not null)
                     lock (logLock)
-                        log($"  [{finished}/{totalImages}] {Path.GetFileName(outPath)}" +
+                        log($"  [{finished}/{totalImages}] {ShardHeader.Display(Path.GetFileName(finalPath))}" +
                             (isParity ? " (parity)" : $" ({payloadLen:N0} bytes)"));
             }
         });
 
-        return new EncodeResult(totalImages, capacity, layout.Width, layout.Height, [.. files],
-            count, parityTotal, stripeData, stripeParity);
+        // Rendering reads a memory map in parallel. A sender editing/replacing the source during
+        // that interval must never receive a successful result for shards that no longer match
+        // the identity hash in their headers. Recheck metadata around a final streaming SHA pass
+        // before the staged generation becomes visible.
+        EnsureInputUnchanged(inputPath, input, sha);
+        // Materialize every allocation needed by the success result before the commit boundary.
+        // With millions of images even the List's reference array is material: an OOM here after
+        // Publish would expose a complete generation while reporting failure to the caller.
+        var result = new EncodeResult(totalImages, capacity, layout.Width, layout.Height,
+            new List<string>(files), count, parityTotal, stripeData, stripeParity);
+        output.Publish();
+        return result;
     }
 
     /// <summary>
@@ -294,5 +389,124 @@ internal sealed class ShardEncoder(
         return checked(pixels + maxStreamBytes + cells +
             (layout.Interleave2 ? cells : 0) +
             (imageWriterCopiesPixels ? pixels : 0));
+    }
+
+    /// <summary>The v2 permutation is immutable and shared by every worker in one encode.</summary>
+    internal static long EstimateSharedInterleaveBytes(Layout layout) => layout.Interleave2
+        ? checked((long)layout.CodewordCount * Fec.CodewordLength * sizeof(int))
+        : 0;
+
+    private static long EstimateResultPathBytes(string outDir, string fileName, string format, int totalImages)
+    {
+        // A List result retains one full path string per image. Include a conservative object and
+        // filename suffix allowance so extreme sparse plans fail the memory admission check before
+        // allocating millions of strings/references.
+        long chars = checked((long)Path.GetFullPath(outDir).Length + fileName.Length + format.Length + 96);
+        long bytesPerPath = checked(24 + chars * sizeof(char));
+        return checked(bytesPerPath * totalImages);
+    }
+
+    /// <summary>
+    /// Renders a complete generation into a private sibling and publishes it with one directory
+    /// rename. A caller-supplied empty destination is left untouched on failure; a non-empty one
+    /// is refused so shards from different generations can never be mixed silently.
+    /// </summary>
+    internal sealed class OutputTransaction : IDisposable
+    {
+        private bool published;
+        private readonly bool targetExisted;
+
+        internal OutputTransaction(string outDir)
+        {
+            TargetDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(outDir));
+            string? parent = Path.GetDirectoryName(TargetDirectory);
+            if (parent is null || TargetDirectory == Path.GetPathRoot(TargetDirectory))
+                throw new InvalidOperationException("Refusing to encode directly into a filesystem root.");
+            if (File.Exists(TargetDirectory))
+                throw new IOException($"Output destination '{ShardHeader.Display(outDir)}' is a file.");
+            targetExisted = Directory.Exists(TargetDirectory);
+            if (targetExisted)
+            {
+                if ((File.GetAttributes(TargetDirectory) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException($"Output destination '{ShardHeader.Display(outDir)}' cannot be a symbolic link or reparse point.");
+                EnsureEmpty(TargetDirectory, outDir);
+            }
+
+            Directory.CreateDirectory(parent);
+            for (int attempt = 0; attempt < 32; attempt++)
+            {
+                string candidate = Path.Combine(parent, $".qrshard-encode-{Guid.NewGuid():N}.tmp");
+                try
+                {
+                    ShardAssembler.CreatePrivateDirectoryExclusive(candidate);
+                    StagingDirectory = candidate;
+                    return;
+                }
+                catch (IOException) when (File.Exists(candidate) || Directory.Exists(candidate))
+                {
+                    // Exclusive create proved a collision; try another unpredictable sibling.
+                }
+            }
+            throw new IOException("Could not create a private output staging directory after 32 attempts.");
+        }
+
+        internal string TargetDirectory { get; }
+        internal string StagingDirectory { get; } = null!;
+
+        internal void Publish()
+        {
+            if (published)
+                throw new InvalidOperationException("The output generation has already been published.");
+
+            if (File.Exists(TargetDirectory))
+                throw new IOException("The output destination changed to a file before publication.");
+            if (Directory.Exists(TargetDirectory))
+            {
+                if (!targetExisted)
+                    throw new IOException("The output destination was created by another writer before publication.");
+                EnsureEmpty(TargetDirectory, TargetDirectory);
+                Directory.Delete(TargetDirectory);
+            }
+            else if (targetExisted)
+            {
+                throw new IOException("The caller-supplied output directory disappeared before publication.");
+            }
+
+            try
+            {
+                Directory.Move(StagingDirectory, TargetDirectory);
+                published = true;
+            }
+            catch
+            {
+                // If the caller supplied an empty directory, publication must not turn a failed
+                // encode into a missing destination. Recreate only when no competing object won.
+                if (targetExisted && !Directory.Exists(TargetDirectory) && !File.Exists(TargetDirectory))
+                    Directory.CreateDirectory(TargetDirectory);
+                throw;
+            }
+        }
+
+        private static void EnsureEmpty(string path, string displayPath)
+        {
+            if (Directory.EnumerateFileSystemEntries(path).Any())
+                throw new IOException(
+                    $"Output destination '{displayPath}' is not empty. Choose a new/empty directory for this generation.");
+        }
+
+        public void Dispose()
+        {
+            if (published || !Directory.Exists(StagingDirectory))
+                return;
+            try
+            {
+                Directory.Delete(StagingDirectory, recursive: true);
+            }
+            catch
+            {
+                // Best effort: the private, uniquely named incomplete generation is never returned
+                // or published, and a cleanup failure must not hide the original encode error.
+            }
+        }
     }
 }

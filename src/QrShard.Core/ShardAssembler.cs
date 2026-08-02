@@ -41,14 +41,35 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         if (outputPath is not null && groups.Count > 1)
             throw new ShardDecodeException("The images belong to multiple different files; omit -o or decode them separately.");
 
-        // Attempt EVERY group before reporting, then rethrow the first failure. Throwing from
-        // inside the loop meant one incomplete file discarded every complete file that happened to
-        // be grouped after it: with a partial capture of A and a whole capture of B in one folder,
-        // the tool printed "'B': 1/1 data — recoverable ✓" and then wrote nothing at all. Which
-        // file survived was decided by shard order, i.e. by filename. Cli's own comment on the
-        // call site already promised the behaviour implemented here — "so a folder mixing a
-        // complete file with an incomplete one still yields the complete one on disk" — and that
-        // was true only when the complete one sorted first.
+        // A mixed capture is one logical decode request. Prove every family complete and
+        // internally consistent before the first path is published; otherwise sort/group order
+        // made a complete sibling appear on disk just before an incomplete one threw.
+        if (groups.Count > 1)
+        {
+            foreach (var group in groups)
+            {
+                List<DecodedShard> family = [.. group];
+                ShardHeader first = family[0].Header;
+                if (family.Any(shard => !first.HasSameFamilyAs(shard.Header)))
+                    throw new ShardDecodeException(
+                        $"Inconsistent shard set for '{ShardHeader.Display(first.FileName)}': repeated file metadata differs.");
+                if (first.TotalLength is < 0 or > ShardEncoder.MaxFileBytes ||
+                    first.OriginalLength is < 0 or > ShardEncoder.MaxFileBytes)
+                    throw new ShardDecodeException(
+                        $"'{ShardHeader.Display(first.FileName)}': shard header declares an implausible file size.");
+                if ((first.Flags & ShardHeader.FlagEncrypted) != 0 && password is null)
+                    throw new ShardDecodeException(
+                        $"'{ShardHeader.Display(first.FileName)}' is encrypted; supply the password with -p/--password.");
+                if (!parityReassembler.IsSetComplete(family))
+                    throw new ShardDecodeException(
+                        $"'{ShardHeader.Display(first.FileName)}': the shard family is incomplete or inconsistent. " +
+                        "Capture the missing images and decode the mixed set again.");
+            }
+        }
+
+        // Structural incompleteness has now failed before publication. Attempt every admitted
+        // group before reporting a later content-verification or filesystem failure, so one
+        // destination's independent I/O problem does not suppress unrelated verified outputs.
         var restored = new List<RestoredFile>();
         ShardDecodeException? failure = null;
         foreach (var group in groups)
@@ -68,11 +89,12 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
                 // best-effort multi-file contract while keeping process-wide failures such as OOM
                 // and cancellation fatal.
                 failure ??= new ShardDecodeException(
-                    $"'{ShardHeader.Display(group.First().Header.FileName)}': restore failed ({ex.Message}).");
+                    $"'{ShardHeader.Display(group.First().Header.FileName)}': restore failed " +
+                    $"({ShardHeader.Display(ex.Message)}).");
             }
         }
-        // Reassemble writes each file as it goes, so everything recoverable is already on disk by
-        // the time this throws; the caller reports the failure and the user keeps the good files.
+        // Reassemble writes each admitted file as it goes; any independent runtime failure is
+        // reported after the other already-preflighted families have had their restore attempt.
         if (failure is not null)
             throw failure;
         return restored;
@@ -88,6 +110,12 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
                     $"Inconsistent shard set for '{ShardHeader.Display(first.FileName)}': repeated file identity or recovery metadata differs.");
 
         // Both reassembly paths bound their buffers by the declared sizes, so sanity-check first.
+        // Deserialize enforces these protocol invariants; repeat them because embedding/tests can
+        // hand an already-constructed DecodedShard to this internal assembly path.
+        if (count is < 1 or > ShardHeader.MaxImages || first.StripeData < 0 || first.StripeParity < 0 ||
+            ((first.StripeData == 0) != (first.StripeParity == 0)))
+            throw new ShardDecodeException(
+                $"'{ShardHeader.Display(first.FileName)}': shard header declares invalid recovery geometry.");
         if (first.TotalLength is < 0 or > ShardEncoder.MaxFileBytes || first.OriginalLength is < 0 or > ShardEncoder.MaxFileBytes)
             throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': shard header declares an implausible file size.");
         // Cross-shard geometry drives divisor/array math in both parity paths. Deserialize
@@ -98,11 +126,8 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
 
         byte[][] chunks;
         long[] chunkLengths;
-        bool allDataPresent = shards.Where(s => !s.Header.IsParity)
-            .Select(s => s.Header.Index)
-            .Where(i => (uint)i < (uint)count)
-            .Distinct()
-            .Count() == count;
+        DataCandidates dataCandidates = CollectDataCandidates(shards, count);
+        bool allDataPresent = dataCandidates.ByIndex.Count == count;
         if (first.StripeParity > 0 && !allDataPresent)
         {
             chunks = parityReassembler.ReassembleWithParity(shards, first, log, out int cap);
@@ -112,7 +137,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         }
         else
         {
-            chunks = CollectContiguous(shards, first);
+            chunks = CollectContiguous(first, dataCandidates);
             chunkLengths = new long[chunks.Length];
             for (int i = 0; i < chunks.Length; i++)
                 chunkLengths[i] = chunks[i].Length;
@@ -123,65 +148,83 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         bool archive = (first.Flags & ShardHeader.FlagArchive) != 0;
 
         Stream source = new ChunkConcatStream(chunks, chunkLengths);
-        if (encrypted)
-        {
-            if (password is null)
-                throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}' is encrypted; supply the password with -p/--password.");
-            var blob = new byte[first.TotalLength];
-            source.ReadExactly(blob);
-            // Newer encrypted shards bind the identity header as AAD; older ones (no FlagAuthMeta)
-            // decrypt with empty AAD, which GCM treats identically to no AAD.
-            ReadOnlySpan<byte> aad = (first.Flags & ShardHeader.FlagAuthMeta) != 0
-                ? PayloadCipher.BuildAad(first.OriginalLength, first.Sha256, first.FileName)
-                : default;
-            // Decrypting in place keeps the encrypted path to two live buffers (chunks + blob)
-            // rather than three; the tag is still verified over the whole message first.
-            var plain = cipher.DecryptInPlace(blob, password, first.FileName, aad);
-            source = new MemoryStream(plain.Array!, plain.Offset, plain.Count, writable: false);
-        }
-        if (compressed)
-        {
-            source = (first.Flags & ShardHeader.FlagBrotli) != 0
-                ? new BrotliStream(source, CompressionMode.Decompress)
-                : new DeflateStream(source, CompressionMode.Decompress);
-        }
-
-        // Archives restore into a directory; the tar itself is a transient temp file.
-        // The intermediate tar for an archive payload is DECRYPTED PLAINTEXT. Naming it from the
-        // FileId put it at a fully predictable path in the shared temp root: FileId is a cleartext
-        // header field carried in every shard image, so anyone who has seen the images — the whole
-        // distribution model of this tool — knows the filename before the victim decodes. On Unix
-        // that root is typically /tmp, mode 1777, and FileStream creates with 0666 & ~umask and no
-        // O_EXCL, so a pre-planted file or symlink of that exact name is opened rather than
-        // refused. A random private directory removes both the predictability and the shared-root
-        // exposure: it requests 0700 on Unix and has a protected owner-only DACL on Windows.
-        TemporaryDirectoryLease? archiveTemp = archive ? CreatePrivateTemporaryDirectory("qrshard-") : null;
-        string tempDir = archiveTemp?.Path ?? "";
-        string finalPath = archive ? "" : ResolveOutputPath(first, outputPath);
-        // Never stream unverified bytes into the final pathname. In particular, an explicit -o
-        // may already contain the user's only good copy: FileMode.Create used to truncate it
-        // before decompression, length, or SHA-256 verification had succeeded. A random sibling
-        // keeps the final move on one filesystem and FileMode.CreateNew prevents link/race reuse.
-        string payloadPath = archive
-            ? Path.Combine(tempDir, "payload.tar")
-            : SiblingStagingPath(finalPath);
-
-        long written = 0;
-        byte[] sha;
+        byte[]? decryptedPlaintext = null;
+        TemporaryDirectoryLease? archiveTemp = null;
+        string payloadPath = "";
         try
         {
+            if (encrypted)
+            {
+                if (password is null)
+                    throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}' is encrypted; supply the password with -p/--password.");
+                var blob = new byte[first.TotalLength];
+                decryptedPlaintext = blob;
+                source.ReadExactly(blob);
+                // Newer encrypted shards bind the identity header as AAD; older ones (no FlagAuthMeta)
+                // decrypt with empty AAD, which GCM treats identically to no AAD.
+                ReadOnlySpan<byte> aad = (first.Flags & ShardHeader.FlagAuthMetaV2) != 0
+                    ? PayloadCipher.BuildAadV2(first.OriginalLength, first.Sha256, first.FileName,
+                        first.Flags)
+                    : (first.Flags & ShardHeader.FlagAuthMeta) != 0
+                        ? PayloadCipher.BuildAad(first.OriginalLength, first.Sha256, first.FileName)
+                        : default;
+                // Decrypting in place keeps the encrypted path to two live buffers (chunks + blob)
+                // rather than three; the tag is still verified over the whole message first.
+                ArraySegment<byte> plain = cipher.DecryptInPlace(blob, password, first.FileName, aad);
+                source.Dispose();
+                source = new MemoryStream(plain.Array!, plain.Offset, plain.Count, writable: false);
+            }
+            if (compressed)
+            {
+                source = (first.Flags & ShardHeader.FlagBrotli) != 0
+                    ? new BrotliStream(source, CompressionMode.Decompress)
+                    : new DeflateStream(source, CompressionMode.Decompress);
+            }
+
+            // Archives restore into a directory; the tar itself is a transient temp file.
+            // The intermediate tar for an archive payload is DECRYPTED PLAINTEXT. Naming it from the
+            // FileId put it at a fully predictable path in the shared temp root: FileId is a cleartext
+            // header field carried in every shard image, so anyone who has seen the images — the whole
+            // distribution model of this tool — knows the filename before the victim decodes. On Unix
+            // that root is typically /tmp, mode 1777, and FileStream creates with 0666 & ~umask and no
+            // O_EXCL, so a pre-planted file or symlink of that exact name is opened rather than
+            // refused. A random private directory removes both the predictability and the shared-root
+            // exposure: it requests 0700 on Unix and has a protected owner-only DACL on Windows.
+            archiveTemp = archive ? CreatePrivateTemporaryDirectory("qrshard-") : null;
+            string tempDir = archiveTemp?.Path ?? "";
+            string finalPath = archive ? "" : ResolveOutputPath(first, outputPath);
+            // Never stream unverified bytes into the final pathname. In particular, an explicit -o
+            // may already contain the user's only good copy: FileMode.Create used to truncate it
+            // before decompression, length, or SHA-256 verification had succeeded. A random sibling
+            // keeps the final move on one filesystem and FileMode.CreateNew prevents link/race reuse.
+            payloadPath = archive
+                ? Path.Combine(tempDir, "payload.tar")
+                : SiblingStagingPath(finalPath);
+
+            long written = 0;
+            byte[] sha;
             try
             {
                 using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 using (var output = CreatePrivateStagingFile(payloadPath))
                 {
                     var buffer = new byte[1 << 20];
-                    int n;
-                    while (written <= first.OriginalLength && (n = source.Read(buffer, 0, buffer.Length)) > 0)
+                    try
                     {
-                        output.Write(buffer, 0, n);
-                        hash.AppendData(buffer, 0, n);
-                        written += n;
+                        int n;
+                        while (written <= first.OriginalLength && (n = source.Read(buffer, 0, buffer.Length)) > 0)
+                        {
+                            output.Write(buffer, 0, n);
+                            hash.AppendData(buffer, 0, n);
+                            written += n;
+                        }
+                    }
+                    finally
+                    {
+                        // The buffer holds verified-output plaintext regardless of whether the
+                        // source was encrypted. Clear the entire rented-sized working area on
+                        // every success/failure path instead of leaving the last chunk in Gen 2.
+                        CryptographicOperations.ZeroMemory(buffer);
                     }
                 }
                 sha = hash.GetHashAndReset();
@@ -201,7 +244,8 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
                 // a half-restored tree or overwrite files already present in an explicit -o.
                 string destDir = outputPath ?? FreeDirectory(SafeDirectoryName(first.FileName));
                 ExtractTarAtomically(payloadPath, destDir);
-                log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → extracted to {destDir}");
+                log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → extracted to " +
+                    ShardHeader.Display(destDir));
                 return new RestoredFile(first.FileName, destDir, written);
             }
 
@@ -212,14 +256,32 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
                 PublishVerifiedReplacement(payloadPath, finalPath);
             else
                 File.Move(payloadPath, finalPath, overwrite: outputPath is not null);
-            log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → {finalPath} ({written:N0} bytes)");
+            log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → " +
+                $"{ShardHeader.Display(finalPath)} ({written:N0} bytes)");
             return new RestoredFile(first.FileName, finalPath, written);
         }
         finally
         {
-            source.Dispose();
-            TryDelete(payloadPath);
-            archiveTemp?.Dispose();
+            // Clear decrypted material first: even an unexpected stream-disposal failure must
+            // not bypass zeroing. Nested finally blocks likewise preserve staging cleanup.
+            if (decryptedPlaintext is not null)
+                CryptographicOperations.ZeroMemory(decryptedPlaintext);
+            try
+            {
+                source.Dispose();
+            }
+            finally
+            {
+                try
+                {
+                    if (payloadPath.Length > 0)
+                        TryDelete(payloadPath);
+                }
+                finally
+                {
+                    archiveTemp?.Dispose();
+                }
+            }
         }
     }
 
@@ -244,9 +306,11 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         if (parent is null || destination == Path.GetPathRoot(destination))
             throw new ShardDecodeException("Refusing to extract an archive directly into a filesystem root.");
         if (File.Exists(destination))
-            throw new ShardDecodeException($"Cannot extract archive: '{destDir}' is a file.");
+            throw new ShardDecodeException(
+                $"Cannot extract archive: '{ShardHeader.Display(destDir)}' is a file.");
         if (Directory.Exists(destination) && Directory.EnumerateFileSystemEntries(destination).Any())
-            throw new ShardDecodeException($"Cannot extract archive: destination '{destDir}' is not empty.");
+            throw new ShardDecodeException(
+                $"Cannot extract archive: destination '{ShardHeader.Display(destDir)}' is not empty.");
 
         Directory.CreateDirectory(parent);
         string staging = Path.Combine(parent, $".qrshard-{Guid.NewGuid():N}.tmp");
@@ -262,7 +326,8 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             // Recheck immediately before publishing so a concurrent writer is never overwritten.
             if (File.Exists(destination) ||
                 (Directory.Exists(destination) && Directory.EnumerateFileSystemEntries(destination).Any()))
-                throw new ShardDecodeException($"Cannot extract archive: destination '{destDir}' changed and is no longer empty.");
+                throw new ShardDecodeException(
+                    $"Cannot extract archive: destination '{ShardHeader.Display(destDir)}' changed and is no longer empty.");
 
             // Keep the staging root private until the exact leased object has been published.
             // Applying an existing 0777 mode/permissive ACL before publication would expose the
@@ -316,7 +381,8 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         if (!IsVerifiedPrivateWindowsDirectory(path))
         {
             handle.Dispose();
-            throw new IOException($"Private staging directory '{path}' changed before it could be leased.");
+            throw new IOException(
+                $"Private staging directory '{ShardHeader.Display(path)}' changed before it could be leased.");
         }
         return new TemporaryDirectoryLease(path, handle);
     }
@@ -341,7 +407,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             if (!NativeCreateDirectory(path, ref attributes))
             {
                 int error = Marshal.GetLastPInvokeError();
-                throw new IOException($"Could not exclusively create private directory '{path}'.",
+                throw new IOException($"Could not exclusively create private directory '{ShardHeader.Display(path)}'.",
                     new Win32Exception(error));
             }
         }
@@ -357,7 +423,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         if (NativeMkdir(path, OwnerRwx) != 0)
         {
             int error = Marshal.GetLastPInvokeError();
-            throw new IOException($"Could not exclusively create private directory '{path}'.",
+            throw new IOException($"Could not exclusively create private directory '{ShardHeader.Display(path)}'.",
                 new Win32Exception(error));
         }
     }
@@ -468,7 +534,8 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         {
             int error = Marshal.GetLastPInvokeError();
             handle.Dispose();
-            throw new IOException($"Could not lease private directory '{path}'.", new Win32Exception(error));
+            throw new IOException($"Could not lease private directory '{ShardHeader.Display(path)}'.",
+                new Win32Exception(error));
         }
         return handle;
     }
@@ -502,7 +569,8 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
                     checked((uint)info.Length)))
             {
                 int error = Marshal.GetLastPInvokeError();
-                throw new IOException($"Could not atomically publish archive directory to '{destination}'.",
+                throw new IOException(
+                    $"Could not atomically publish archive directory to '{ShardHeader.Display(destination)}'.",
                     new Win32Exception(error));
             }
         }
@@ -762,8 +830,10 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             for (int segmentIndex = 0; segmentIndex < segments.Length; segmentIndex++)
             {
                 string segment = segments[segmentIndex];
-                string spelling = segment.Normalize(NormalizationForm.FormC);
-                string canonical = spelling.ToUpperInvariant();
+                if (!TryCanonicalizePortableArchiveSegment(segment, out string spelling, out string canonical))
+                    throw new ShardDecodeException(
+                        $"Archive entry '{entryDisplay}' contains a non-ASCII path segment that cannot be " +
+                        "safely case/Unicode-normalized in the current invariant-globalization runtime.");
                 if (!pathNode.Children.TryGetValue(canonical, out ArchivePathNode? child))
                 {
                     EnsureArchivePathNodeCount(++pathNodeCount);
@@ -820,6 +890,68 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             throw new ShardDecodeException(
                 $"Archive contains more than {MaxArchivePathNodes:N0} distinct path components; " +
                 "refusing an unbounded directory/in-memory index workload.");
+    }
+
+    private static readonly bool UnicodeCanonicalizationAvailable = DetectUnicodeCanonicalization();
+
+    /// <summary>
+    /// Produces the normalized spelling and portable collision key shared by archive creation and
+    /// extraction. In invariant-globalization deployments .NET cannot promise Unicode NFC/case
+    /// aliases will collapse consistently; ASCII remains well-defined, while non-ASCII is refused
+    /// instead of letting an archive pass a security check that a different host interprets
+    /// differently.
+    /// </summary>
+    internal static bool TryCanonicalizePortableArchiveSegment(string segment,
+        out string normalizedSpelling, out string collisionKey) =>
+        TryCanonicalizePortableArchiveSegment(segment, UnicodeCanonicalizationAvailable,
+            out normalizedSpelling, out collisionKey);
+
+    /// <summary>Testable policy core; production callers use the runtime-detecting overload.</summary>
+    internal static bool TryCanonicalizePortableArchiveSegment(string segment,
+        bool unicodeCanonicalizationAvailable, out string normalizedSpelling, out string collisionKey)
+    {
+        bool ascii = true;
+        foreach (char c in segment)
+            ascii &= c <= '\x7f';
+        if (!ascii && !unicodeCanonicalizationAvailable)
+        {
+            normalizedSpelling = "";
+            collisionKey = "";
+            return false;
+        }
+        try
+        {
+            normalizedSpelling = ascii ? segment : segment.Normalize(NormalizationForm.FormC);
+            collisionKey = normalizedSpelling.ToUpperInvariant();
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or PlatformNotSupportedException)
+        {
+            normalizedSpelling = "";
+            collisionKey = "";
+            return false;
+        }
+    }
+
+    private static bool DetectUnicodeCanonicalization()
+    {
+        if (AppContext.TryGetSwitch("System.Globalization.Invariant", out bool invariant) && invariant)
+            return false;
+        string? environment = Environment.GetEnvironmentVariable("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT");
+        if (environment is not null &&
+            (environment.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+             environment.Equals("true", StringComparison.OrdinalIgnoreCase)))
+            return false;
+        try
+        {
+            // In invariant mode only ASCII casing is guaranteed. This behavioral probe covers
+            // hosts that selected the mode through a runtime mechanism not reflected as a switch.
+            return "\u00e9".Normalize(NormalizationForm.FormC).ToUpperInvariant() == "\u00c9";
+        }
+        catch (PlatformNotSupportedException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -1096,23 +1228,66 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     }
 
     /// <summary>Original path: no cross-shard parity — every data image must be present.</summary>
-    private static byte[][] CollectContiguous(List<DecodedShard> shards, ShardHeader first)
+    private sealed record DataCandidates(Dictionary<int, DecodedShard> ByIndex, HashSet<int> Conflicts);
+
+    private static DataCandidates CollectDataCandidates(IEnumerable<DecodedShard> shards, int count)
     {
-        var byIndex = new DecodedShard?[first.Count];
+        var byIndex = new Dictionary<int, DecodedShard>();
+        var conflicts = new HashSet<int>();
         foreach (var s in shards)
-            if (!s.Header.IsParity && (uint)s.Header.Index < (uint)first.Count) // guard crafted out-of-range ordinals
-                byIndex[s.Header.Index] ??= s;
+        {
+            if (s.Header.IsParity || (uint)s.Header.Index >= (uint)count || conflicts.Contains(s.Header.Index))
+                continue;
+            if (!byIndex.TryGetValue(s.Header.Index, out DecodedShard? existing))
+            {
+                byIndex.Add(s.Header.Index, s);
+                continue;
+            }
+            bool identical = existing.Header.PayloadLength == s.Header.PayloadLength &&
+                existing.Header.PayloadCrc32 == s.Header.PayloadCrc32 &&
+                existing.Payload.AsSpan().SequenceEqual(s.Payload);
+            if (!identical)
+            {
+                byIndex.Remove(s.Header.Index);
+                conflicts.Add(s.Header.Index);
+            }
+        }
+        return new DataCandidates(byIndex, conflicts);
+    }
 
-        var missing = Enumerable.Range(0, first.Count).Where(i => byIndex[i] is null).ToList();
-        if (missing.Count > 0)
+    private static byte[][] CollectContiguous(ShardHeader first, DataCandidates candidates)
+    {
+        int missingCount = first.Count - candidates.ByIndex.Count;
+        if (missingCount > 0)
+        {
+            string preview = MissingDataPreview(candidates.ByIndex, first.Count);
+            string conflicts = candidates.Conflicts.Count == 0
+                ? ""
+                : $" {candidates.Conflicts.Count:N0} ordinal(s) had conflicting CRC-valid copies and were treated as missing.";
             throw new ShardDecodeException(
-                $"'{ShardHeader.Display(first.FileName)}': missing image(s) {string.Join(", ", missing.Select(i => i + 1))} of {first.Count}. " +
-                "Capture them and decode again.");
+                $"'{ShardHeader.Display(first.FileName)}': missing image(s) {preview} of {first.Count:N0} " +
+                $"({missingCount:N0} total).{conflicts} Capture them and decode again.");
+        }
 
-        if (byIndex.Sum(s => (long)s!.Payload.Length) != first.TotalLength)
+        if (candidates.ByIndex.Values.Sum(s => (long)s.Payload.Length) != first.TotalLength)
             throw new ShardDecodeException($"'{ShardHeader.Display(first.FileName)}': reassembled length does not match expected {first.TotalLength:N0}.");
 
-        return [.. byIndex.Select(s => s!.Payload)];
+        // Allocate the Count-sized result only after the sparse set proves every ordinal present.
+        var chunks = new byte[first.Count][];
+        foreach ((int index, DecodedShard shard) in candidates.ByIndex)
+            chunks[index] = shard.Payload;
+        return chunks;
+    }
+
+    private static string MissingDataPreview(IReadOnlyDictionary<int, DecodedShard> present, int count)
+    {
+        const int maximum = 10;
+        var missing = new List<int>(maximum);
+        for (int i = 0; i < count && missing.Count < maximum; i++)
+            if (!present.ContainsKey(i))
+                missing.Add(i + 1);
+        string result = string.Join(", ", missing);
+        return count - present.Count > missing.Count ? result + ", ..." : result;
     }
 
     /// <summary>Reads a chunk sequence as one stream, consuming only the declared prefix of each chunk.</summary>

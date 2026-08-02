@@ -1,0 +1,10 @@
+name: QrShard security analysis
+
+# The CLI treats local files, device names, paths, and environment variables as hostile input.
+# CodeQL's default remote-source model therefore misses the most relevant trust boundary.
+threat-models: local
+
+paths-ignore:
+  - '**/bin/**'
+  - '**/obj/**'
+  - 'publish/**'

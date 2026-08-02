@@ -20,7 +20,8 @@ internal sealed class AppSettings
     {
         "PngCompressionLevel", "PayloadCompressionLevel", "ShardFolderSuffix",
         "EncodeMemoryBudgetMB", "DecodeMaxParallelism", "DecodeMemoryBudgetMB",
-        "ReceiveFps", "WatchPollMs", "ReceiveDecodeWorkers", "EncodeDefaults", "EncodeProfiles",
+        "ReceiveFps", "WatchPollMs", "ReceiveDecodeWorkers", "FfmpegPath",
+        "EncodeDefaults", "EncodeProfiles",
     };
 
     private static readonly HashSet<string> EncodeSettings = new(StringComparer.Ordinal)
@@ -33,6 +34,12 @@ internal sealed class AppSettings
     public static string DefaultPath => Path.Combine(AppContext.BaseDirectory, "appsettings.json");
 
     public static AppSettings Current => Cached.Value;
+
+    /// <summary>
+    /// Configuration-free defaults for library callers. Only the CLI opts into the adjacent
+    /// appsettings.json file; embedding QrShard must not parse an unrelated host configuration.
+    /// </summary>
+    public static AppSettings BuiltIn { get; } = new();
 
     /// <summary>CLI defaults for `encode`; each is overridden by its flag when given.</summary>
     public EncodeDefaultSettings EncodeDefaults { get; private set; } = new();
@@ -81,6 +88,9 @@ internal sealed class AppSettings
 
     /// <summary>Parallel frame-decode workers for the live receiver; 0 = automatic.</summary>
     public int ReceiveDecodeWorkers { get; private set; }
+
+    /// <summary>Optional absolute path to ffmpeg. When absent, a safe absolute PATH lookup is used.</summary>
+    public string? FfmpegPath { get; private set; }
 
     /// <summary>Named encode presets applied by <c>--profile &lt;name&gt;</c>; flags still override.</summary>
     public IReadOnlyDictionary<string, EncodeDefaultSettings> EncodeProfiles { get; private set; } =
@@ -161,6 +171,16 @@ internal sealed class AppSettings
             settings.ReceiveDecodeWorkers = ReadInt(root, "ReceiveDecodeWorkers", settings.ReceiveDecodeWorkers);
             if (settings.ReceiveDecodeWorkers is < 0 or > 64)
                 throw Invalid("ReceiveDecodeWorkers", settings.ReceiveDecodeWorkers, "0 (auto) to 64");
+
+            if (root.TryGetProperty("FfmpegPath", out var ffmpegPath))
+            {
+                if (ffmpegPath.ValueKind != JsonValueKind.String)
+                    throw Invalid("FfmpegPath", ffmpegPath.ToString(), "an absolute filesystem path");
+                string value = ffmpegPath.GetString() ?? "";
+                if (string.IsNullOrWhiteSpace(value) || !Path.IsPathFullyQualified(value))
+                    throw Invalid("FfmpegPath", value, "an absolute filesystem path");
+                settings.FfmpegPath = Path.GetFullPath(value);
+            }
 
             if (root.TryGetProperty("EncodeDefaults", out var defaults))
             {
