@@ -22,8 +22,8 @@ public sealed class ExternalToolSecurityTests
             Environment.CurrentDirectory = working;
             Environment.SetEnvironmentVariable("PATH", string.Join(Path.PathSeparator, working, trusted));
 
-            Assert.Equal(Path.GetFullPath(expected), ExternalToolResolver.Resolve("ffmpeg"));
-            Assert.NotEqual(Path.GetFullPath(planted), ExternalToolResolver.Resolve("ffmpeg"));
+            Assert.Equal(PhysicalPath.Canonicalize(expected), ExternalToolResolver.Resolve("ffmpeg"));
+            Assert.NotEqual(PhysicalPath.Canonicalize(planted), ExternalToolResolver.Resolve("ffmpeg"));
         }
         finally
         {
@@ -61,8 +61,153 @@ public sealed class ExternalToolSecurityTests
         string name = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
         string executable = MakeExecutable(tmp.File(name));
 
-        Assert.Equal(Path.GetFullPath(executable), ExternalToolResolver.Resolve("ffmpeg", executable));
+        Assert.Equal(PhysicalPath.Canonicalize(executable), ExternalToolResolver.Resolve("ffmpeg", executable));
         Assert.Throws<InvalidOperationException>(() => ExternalToolResolver.Resolve("ffmpeg", name));
+    }
+
+    [Fact]
+    public void PathResolutionSkipsPhysicalAliasesOfCurrentDirectoryAndChildren()
+    {
+        using var tmp = new TempDir();
+        string working = tmp.Sub("working");
+        string child = Directory.CreateDirectory(Path.Combine(working, "child")).FullName;
+        string trusted = tmp.Sub("trusted");
+        string cwdAlias = tmp.File("cwd-alias");
+        string childAlias = tmp.File("child-alias");
+        CreateDirectoryLink(cwdAlias, working);
+        CreateDirectoryLink(childAlias, child);
+        string name = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
+        MakeExecutable(Path.Combine(working, name));
+        MakeExecutable(Path.Combine(child, name));
+        string expected = MakeExecutable(Path.Combine(trusted, name));
+        string priorDirectory = Environment.CurrentDirectory;
+        string? priorPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.CurrentDirectory = working;
+            Environment.SetEnvironmentVariable("PATH",
+                string.Join(Path.PathSeparator, cwdAlias, childAlias, trusted));
+
+            Assert.Equal(PhysicalPath.Canonicalize(expected), ExternalToolResolver.Resolve("ffmpeg"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", priorPath);
+            Environment.CurrentDirectory = priorDirectory;
+        }
+    }
+
+    [Fact]
+    public void PathResolutionRestartsWhenALinkTargetContainsAnotherLink()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        using var tmp = new TempDir();
+        string working = tmp.Sub("working");
+        string child = Directory.CreateDirectory(Path.Combine(working, "child")).FullName;
+        string trusted = tmp.Sub("trusted");
+        string parentAlias = tmp.File("parent-alias");
+        string nestedAlias = tmp.File("nested-alias");
+        Directory.CreateSymbolicLink(parentAlias, "working");
+        Directory.CreateSymbolicLink(nestedAlias, Path.Combine("parent-alias", "child"));
+        string name = "ffmpeg";
+        MakeExecutable(Path.Combine(child, name));
+        string expected = MakeExecutable(Path.Combine(trusted, name));
+        string priorDirectory = Environment.CurrentDirectory;
+        string? priorPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.CurrentDirectory = working;
+            Environment.SetEnvironmentVariable("PATH", string.Join(Path.PathSeparator, nestedAlias, trusted));
+
+            Assert.Equal(PhysicalPath.Canonicalize(expected), ExternalToolResolver.Resolve("ffmpeg"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", priorPath);
+            Environment.CurrentDirectory = priorDirectory;
+        }
+    }
+
+    [Fact]
+    public void ExecutableSymlinkIntoCurrentDirectoryIsRejected()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        using var tmp = new TempDir();
+        string working = tmp.Sub("working");
+        string linkBin = tmp.Sub("link-bin");
+        string trusted = tmp.Sub("trusted");
+        string planted = MakeExecutable(Path.Combine(working, "ffmpeg"));
+        File.CreateSymbolicLink(Path.Combine(linkBin, "ffmpeg"), planted);
+        string expected = MakeExecutable(Path.Combine(trusted, "ffmpeg"));
+        string priorDirectory = Environment.CurrentDirectory;
+        string? priorPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.CurrentDirectory = working;
+            Environment.SetEnvironmentVariable("PATH", string.Join(Path.PathSeparator, linkBin, trusted));
+
+            Assert.Equal(PhysicalPath.Canonicalize(expected), ExternalToolResolver.Resolve("ffmpeg"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", priorPath);
+            Environment.CurrentDirectory = priorDirectory;
+        }
+    }
+
+    [Fact]
+    public void ExecutableSymlinkToASafeDirectoryIsAcceptedAsItsPhysicalTarget()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        using var tmp = new TempDir();
+        string working = tmp.Sub("working");
+        string linkBin = tmp.Sub("link-bin");
+        string realBin = tmp.Sub("real-bin");
+        string executable = MakeExecutable(Path.Combine(realBin, "ffmpeg"));
+        File.CreateSymbolicLink(Path.Combine(linkBin, "ffmpeg"), executable);
+        string priorDirectory = Environment.CurrentDirectory;
+        string? priorPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.CurrentDirectory = working;
+            Environment.SetEnvironmentVariable("PATH", linkBin);
+
+            Assert.Equal(PhysicalPath.Canonicalize(executable), ExternalToolResolver.Resolve("ffmpeg"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", priorPath);
+            Environment.CurrentDirectory = priorDirectory;
+        }
+    }
+
+    [Fact]
+    public void PathResolutionPreservesNormalizationSensitiveFileSystemNames()
+    {
+        using var tmp = new TempDir();
+        string decomposedDirectory = tmp.Sub("cafe\u0301-bin");
+        string composedDirectory = tmp.File("caf\u00e9-bin");
+        if (Directory.Exists(composedDirectory))
+            return; // This mounted filesystem cannot represent the distinction under test.
+        string name = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
+        string executable = MakeExecutable(Path.Combine(decomposedDirectory, name));
+        string expected = PhysicalPath.Canonicalize(executable);
+        Assert.Equal("cafe\u0301-bin", Path.GetFileName(Path.GetDirectoryName(expected)));
+        string? priorPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", decomposedDirectory);
+
+            Assert.Equal(expected, ExternalToolResolver.Resolve("ffmpeg"));
+            Assert.Equal(expected, ExternalToolResolver.Resolve("ffmpeg", executable));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", priorPath);
+        }
     }
 
     [Fact]
@@ -207,6 +352,31 @@ public sealed class ExternalToolSecurityTests
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return path;
+    }
+
+    private static void CreateDirectoryLink(string link, string target)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Directory.CreateSymbolicLink(link, target);
+            return;
+        }
+
+        string system = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        Assert.NotEmpty(system);
+        using Process process = Process.Start(new ProcessStartInfo
+        {
+            FileName = Path.Combine(system, "cmd.exe"),
+            ArgumentList = { "/d", "/c", "mklink", "/J", link, target },
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        })!;
+        string stdout = process.StandardOutput.ReadToEnd();
+        string stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, $"could not create test junction: {stdout} {stderr}");
     }
 
     private sealed class ChunkedTextReader(string text, int chunkSize) : TextReader

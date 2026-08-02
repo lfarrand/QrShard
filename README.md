@@ -414,7 +414,7 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 | `ReceiveFps` | >0–120 | 10 | Default frame rate for the live `receive` capture |
 | `WatchPollMs` | 50–60000 | 250 | Folder poll interval (ms) for `decode --watch` |
 | `ReceiveDecodeWorkers` | 0–64 | 0 (auto) | Parallel frame-decode workers for the live receiver |
-| `FfmpegPath` | absolute executable path | safe absolute PATH lookup | Pin the ffmpeg executable. Relative/current/application-directory discovery is refused; the child receives a restricted PATH |
+| `FfmpegPath` | absolute executable path | safe absolute PATH lookup | Pin the ffmpeg executable. Relative/current/application-directory discovery, including physical symlink/junction aliases, is refused; the child receives a restricted PATH |
 | `EncodeProfiles` | `{ "<name>": { …encode-default keys… } }` | (none) | Named encode presets selected with `--profile <name>`; each starts from `EncodeDefaults` and overrides only the keys it names |
 
 ### Tuning for a large machine

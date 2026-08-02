@@ -6,21 +6,30 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace QrShard.Tests;
 
 /// <summary>The send command, camera calibration probes, and clipboard DIB decoding.</summary>
+[Collection(CurrentDirectoryCollection.Name)]
 public class SendCalibrateClipboardTests
 {
     [Fact]
     public void Send_EncodesWithSlideshow_AndRespectsLaunchSuppression()
     {
-        Environment.SetEnvironmentVariable("QRSHARD_NO_LAUNCH", "1");
-        using var tmp = new TempDir();
-        string input = tmp.WriteFile("input.bin", TestData.Random(40_000));
-        string shardDir = tmp.File("shards");
-        var stdout = new StringWriter();
+        string? prior = Environment.GetEnvironmentVariable("QRSHARD_NO_LAUNCH");
+        try
+        {
+            Environment.SetEnvironmentVariable("QRSHARD_NO_LAUNCH", "1");
+            using var tmp = new TempDir();
+            string input = tmp.WriteFile("input.bin", TestData.Random(40_000));
+            string shardDir = tmp.File("shards");
+            var stdout = new StringWriter();
 
-        int code = new Cli().Run(["send", input, "-o", shardDir, "-r", "900"], stdout, stdout);
-        Assert.Equal(0, code);
-        Assert.True(File.Exists(Path.Combine(shardDir, "slideshow.html")));
-        Assert.Contains("suppressed by QRSHARD_NO_LAUNCH", stdout.ToString());
+            int code = new Cli().Run(["send", input, "-o", shardDir, "-r", "900"], stdout, stdout);
+            Assert.Equal(0, code);
+            Assert.True(File.Exists(Path.Combine(shardDir, "slideshow.html")));
+            Assert.Contains("suppressed by QRSHARD_NO_LAUNCH", stdout.ToString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("QRSHARD_NO_LAUNCH", prior);
+        }
     }
 
     [Fact]

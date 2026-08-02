@@ -140,9 +140,11 @@ encode/decode is capped at 100,000 entries and 128 path segments per entry; deco
 collision-checking trie at 200,000 distinct path nodes.
 
 External helpers are never shell-invoked. A configured helper must be absolute; otherwise QrShard
-uses an absolute PATH lookup that skips relative, current, and application directories (and
-requires an executable file on Unix). ffmpeg receives structured arguments, a restricted child
-PATH, `-nostdin`, one worker/filter thread, protocol/pixel limits, bounded stderr and termination
+uses an absolute PATH lookup that physically canonicalizes every directory and executable, skips
+relative, current, and application directories plus their symlink/junction aliases, and fails
+closed if an entry cannot be resolved (Unix helpers must also be executable). ffmpeg receives
+structured arguments, a restricted child PATH, `-nostdin`, one worker/filter thread,
+protocol/pixel limits, bounded stderr and termination
 waits. `xrandr` and browser launchers use the same trusted-resolution policy and bounded execution
 where output is consumed. Terminal diagnostics replace control, bidi-format, line/paragraph
 separator, and invalid-surrogate characters and cap hostile names/messages; JSON uses JSON escaping.

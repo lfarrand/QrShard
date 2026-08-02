@@ -10,6 +10,7 @@ namespace QrShard.Tests;
 /// in mind, and the neighbouring case — one strip instead of both, one exception type instead of
 /// the family — went the other way.
 /// </summary>
+[Collection(CurrentDirectoryCollection.Name)]
 public class ReviewRegressionTests
 {
     private static readonly EncodeOptions Fast = new() { Width = 900, Height = 900, CellPx = 3, BitsPerCell = 4 };

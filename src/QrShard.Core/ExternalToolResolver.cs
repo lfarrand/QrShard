@@ -18,42 +18,40 @@ internal static class ExternalToolResolver
         {
             if (!Path.IsPathFullyQualified(configuredPath))
                 throw new InvalidOperationException($"The configured {toolName} path must be absolute.");
-            string configured = Path.GetFullPath(configuredPath);
-            return IsExecutableFile(configured) ? configured : null;
+            return TryCanonicalExecutable(configuredPath);
         }
 
         string? path = Environment.GetEnvironmentVariable("PATH");
         if (string.IsNullOrWhiteSpace(path))
             return null;
 
-        string current = Path.GetFullPath(Environment.CurrentDirectory);
-        string application = Path.GetFullPath(AppContext.BaseDirectory);
+        string? current = TryCanonicalDirectory(Environment.CurrentDirectory);
+        string? application = TryCanonicalDirectory(AppContext.BaseDirectory);
+        if (current is null || application is null)
+            return null;
         foreach (string rawEntry in path.Split(Path.PathSeparator))
         {
             string entry = Environment.ExpandEnvironmentVariables(rawEntry.Trim().Trim('"'));
             if (entry.Length == 0 || !Path.IsPathFullyQualified(entry))
                 continue;
 
-            string directory;
-            try
-            {
-                directory = Path.GetFullPath(entry);
-            }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-            {
+            string? directory = TryCanonicalDirectory(entry);
+            if (directory is null)
                 continue;
-            }
 
             // These locations are commonly writable by whoever supplied the input. They are also
-            // the two implicit search locations this resolver exists to remove.
+            // the two implicit search locations this resolver exists to remove. Physical paths
+            // prevent symbolic-link, junction and macOS /var aliases from bypassing the check.
             if (IsSameOrChild(directory, current) || IsSameOrChild(directory, application))
                 continue;
 
             foreach (string candidateName in CandidateNames(toolName))
             {
-                string candidate = Path.Combine(directory, candidateName);
-                if (IsExecutableFile(candidate))
-                    return Path.GetFullPath(candidate);
+                string? candidate = TryCanonicalExecutable(Path.Combine(directory, candidateName));
+                if (candidate is null || IsSameOrChild(candidate, current) ||
+                    IsSameOrChild(candidate, application))
+                    continue;
+                return candidate;
             }
         }
         return null;
@@ -106,15 +104,58 @@ internal static class ExternalToolResolver
         }
     }
 
+    private static string? TryCanonicalDirectory(string path)
+    {
+        if (!Directory.Exists(path))
+            return null;
+        try
+        {
+            string canonical = PhysicalPath.Canonicalize(path);
+            return Directory.Exists(canonical) ? canonical : null;
+        }
+        catch (Exception ex) when (IsCanonicalizationFailure(ex))
+        {
+            return null;
+        }
+    }
+
+    private static string? TryCanonicalExecutable(string path)
+    {
+        if (!IsExecutableFile(path))
+            return null;
+        try
+        {
+            string canonical = PhysicalPath.Canonicalize(path);
+            return IsExecutableFile(canonical) ? canonical : null;
+        }
+        catch (Exception ex) when (IsCanonicalizationFailure(ex))
+        {
+            return null;
+        }
+    }
+
+    private static bool IsCanonicalizationFailure(Exception ex) =>
+        ex is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException or
+            System.Security.SecurityException;
+
     private static bool IsSameOrChild(string path, string root)
     {
-        StringComparison comparison = OperatingSystem.IsWindows()
+        StringComparison comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;
         string normalizedPath = Path.TrimEndingDirectorySeparator(path);
         string normalizedRoot = Path.TrimEndingDirectorySeparator(root);
+        if (OperatingSystem.IsMacOS())
+        {
+            // Default Apple filesystems treat composed/decomposed spellings as the same name.
+            // Linux and Windows can store them distinctly, so preserve their exact spelling.
+            normalizedPath = normalizedPath.Normalize(System.Text.NormalizationForm.FormC);
+            normalizedRoot = normalizedRoot.Normalize(System.Text.NormalizationForm.FormC);
+        }
         return normalizedPath.Equals(normalizedRoot, comparison)
-            || normalizedPath.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, comparison);
+            || (Path.EndsInDirectorySeparator(normalizedRoot)
+                ? normalizedPath.StartsWith(normalizedRoot, comparison)
+                : normalizedPath.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, comparison));
     }
 
     private static string RestrictedChildPath(string executableDirectory)
