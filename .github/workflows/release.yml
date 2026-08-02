@@ -390,6 +390,7 @@ jobs:
 
           generate_sbom() {
             local build_dir="$1" component_dir="$2" output_dir="$3" product="$4"
+            mkdir -p "$GITHUB_WORKSPACE/$output_dir"
             "$sbom_tool" generate \
               -b "$GITHUB_WORKSPACE/$build_dir" \
               -bc "$GITHUB_WORKSPACE/$component_dir" \
