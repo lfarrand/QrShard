@@ -923,7 +923,7 @@ workflows are:
 | Workflow | What it guards |
 |---|---|
 | **CI** | Build + the full suite on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and macos-15 — every platform a release binary is published for. Each job renders totals, a per-class breakdown and the slowest tests into the run summary |
-| **CodeQL** | C# and GitHub Actions analysis on every PR/main push, weekly, and on manual dispatch |
+| **CodeQL** | Production C# and GitHub Actions analysis on every PR/main push, weekly, and on manual dispatch; C# uses the default remote model plus hostile local-file contents (the precise trust boundary is documented in `SECURITY.md`) |
 | **Dependency Review** | Rejects a pull request that introduces a dependency with a low-or-higher known vulnerability |
 | **Interop** | Four encoders x four decoders: shards encoded on each OS/arch must decode on every other, forcing parity reconstruction (where the x64 and arm64 GF(2⁸) paths could disagree) and covering the encrypted path |
 | **Package** | Packs both NuGet packages and consumes them from *outside* the repo — compiles the readme's own code sample against the packed package, round-trips through the public API, and installs the dotnet tool |
@@ -974,6 +974,12 @@ those exact packages; a clean package-SBOM job generates the two ordinary framew
 graphs. All six SBOMs validate the staged artifact hash and reject stale, test, benchmark, and
 SBOM-tool components. The four binary manifests also reject wrong-RID graphs; the package
 manifests reject Native-AOT contamination.
+
+The committed NuGet lock files describe the portable framework-dependent graph used by ordinary
+builds, tests, packaging, and dependency submission. Each Native-AOT matrix restore writes its
+mutually exclusive RID graph to an ignored `obj/aot/<rid>/packages.lock.json`, preventing a local or
+CI AOT publish from contaminating those committed portable lock files; the per-RID SBOM checks the
+exact runtime and compiler-pack versions instead.
 
 Only after those jobs pass does `create-draft` wait at the protected `release` environment. Its
 configured reviewer must explicitly approve the run; self-review is permitted because the

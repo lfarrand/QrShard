@@ -147,6 +147,21 @@ waits. `xrandr` and browser launchers use the same trusted-resolution policy and
 where output is consumed. Terminal diagnostics replace control, bidi-format, line/paragraph
 separator, and invalid-surrogate characters and cap hostile names/messages; JSON uses JSON escaping.
 
+### Static-analysis trust boundary
+
+CodeQL scans production C# and GitHub Actions on pull requests, `main`, a weekly schedule, and manual
+dispatch. C# analysis keeps CodeQL's default remote model and adds the `file` threat submodel because
+bytes read from shard, image, archive, and session files are untrusted. It deliberately does not
+enable the entire preview `local` group: that group also treats command-line arguments, environment
+variables, and `Path.GetTempPath()` as attacker-controlled, although they are explicit same-user
+configuration here. On this file-processing CLI that broader model reports every intended input,
+output, temporary path, and absolute helper launch as path or command injection. Those boundaries
+are instead enforced by containment/collision checks, private staging and reparse-point handling,
+absolute helper resolution, structured argument lists, and their adversarial regression tests.
+Test-source files are excluded from the production CodeQL database; they still run under the full
+cross-platform test matrix. Revisit this model before adding a service, remotely supplied path, or
+different process-launch boundary.
+
 ### Release artifacts
 
 Beginning with v1.6.2, tagged releases publish `SHA256SUMS` only after the exact Native-AOT binaries

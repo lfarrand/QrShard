@@ -161,8 +161,12 @@ jobs:
         # One packages.lock.json cannot represent four mutually exclusive RID-specific AOT
         # graphs. The SDK/runtime/compiler packs are version-pinned by global.json/.NET 10.0.10
         # and semantically checked in the per-RID SBOM below; disable locked mode only for this
-        # matrix restore while keeping every framework-dependent restore locked.
-        run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false -p:RestoreLockedMode=false -warnaserror
+        # matrix restore while keeping every framework-dependent restore locked. Write the AOT
+        # graph under ignored obj/ so this restore can never rewrite the committed portable graph.
+        run: dotnet publish src/QrShard/QrShard.csproj -c Release -r ${{ matrix.rid }} -p:PublishAot=true -p:PackAsTool=false -p:RestoreLockedMode=false -p:NuGetLockFilePath=obj/aot/${{ matrix.rid }}/packages.lock.json -warnaserror
+
+      - name: Verify portable lock files remained unchanged
+        run: git diff --exit-code -- src/QrShard.Core/packages.lock.json src/QrShard/packages.lock.json tests/QrShard.Benchmarks/packages.lock.json tests/QrShard.Tests/packages.lock.json
 
       - name: Include redistribution notices
         shell: bash
