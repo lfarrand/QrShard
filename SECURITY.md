@@ -166,7 +166,7 @@ different process-launch boundary.
 
 ### Release artifacts
 
-Beginning with v1.6.2, tagged releases publish `SHA256SUMS` only after the exact Native-AOT binaries
+Beginning with v1.7.0, tagged releases publish `SHA256SUMS` only after the exact Native-AOT binaries
 and NuGet packages have been tested with .NET SDK 10.0.302 on versioned GitHub-hosted runner labels.
 An active no-bypass tag ruleset blocks update/deletion of `v*`, and the workflow independently
 peels the remote tag and compares it with the event commit before attestation, draft creation, and

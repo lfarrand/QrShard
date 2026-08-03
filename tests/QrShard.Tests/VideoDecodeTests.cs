@@ -283,6 +283,20 @@ public class VideoDecodeTests
         Exception? waitFailure = null;
         try
         {
+            // Do not spend the completion timeout waiting for the nested producer/workers to be
+            // scheduled on a constrained CI pool. First prove that both frames reached the live
+            // pipeline and that the producer is at the cancellation-aware simulated camera read.
+            Task handshake = source.ProducerBlocked.Task;
+            Task first = await Task.WhenAny(handshake, receive, Task.Delay(TimeSpan.FromSeconds(10)));
+            if (first == receive && !handshake.IsCompletedSuccessfully)
+            {
+                observed = await receive;
+                if (observed is not null)
+                    ExceptionDispatchInfo.Capture(observed).Throw();
+                Assert.Fail("decode completed before the producer reached the simulated stalled camera read");
+            }
+            Assert.True(handshake.IsCompletedSuccessfully,
+                "producer never reached the simulated stalled camera read");
             observed = await receive.WaitAsync(TimeSpan.FromSeconds(10));
         }
         catch (Exception ex)

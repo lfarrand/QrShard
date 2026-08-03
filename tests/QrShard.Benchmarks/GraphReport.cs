@@ -204,9 +204,9 @@ internal static class GraphReport
 
             // Chart 4: codec round-trip throughput.
             new Chart("throughput", "Codec round-trip throughput",
-                "MB of payload processed per second of codec time (encode + decode, capture excluded).",
+                "MiB of payload processed per second of codec time (encode + decode, capture excluded).",
                 PerPreset(r => r.Complete ? r.SizeBytes / 1048576.0 / r.CodecSec : double.NaN),
-                v => $"{Compact(v)} MB/s"),
+                v => $"{Compact(v)} MiB/s"),
         ];
     }
 
@@ -359,7 +359,7 @@ internal static class GraphReport
         var sb = new StringBuilder();
         sb.Append("<section><h2>All measurements</h2><div class=\"scroll\"><table><thead><tr>" +
                   "<th>Size</th><th>Preset</th><th>Images</th><th>Encode</th><th>Decode</th>" +
-                  "<th>Codec MB/s</th><th>Est. manual (3 s/img)</th><th>Est. auto (0.5 s/img)</th></tr></thead><tbody>");
+                  "<th>Codec MiB/s</th><th>Est. manual (3 s/img)</th><th>Est. auto (0.5 s/img)</th></tr></thead><tbody>");
         foreach (var r in rows)
         {
             var (data, parity) = BenchPresets.EstimateImages(r.Preset, r.SizeBytes);
@@ -491,7 +491,7 @@ internal static class GraphReport
     private static string MarkdownTable(List<Row> rows)
     {
         var sb = new StringBuilder();
-        sb.Append("| Size | Preset | Images | Encode | Decode | Codec MB/s | Est. manual (3 s/img) | Est. auto (0.5 s/img) |\n");
+        sb.Append("| Size | Preset | Images | Encode | Decode | Codec MiB/s | Est. manual (3 s/img) | Est. auto (0.5 s/img) |\n");
         sb.Append("|---|---|---:|---:|---:|---:|---:|---:|\n");
         foreach (var r in rows)
         {
