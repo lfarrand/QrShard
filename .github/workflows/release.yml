@@ -718,7 +718,9 @@ jobs:
     needs: [binaries, packages, create-draft]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # NuGet.org repository signing/indexing took almost five minutes per package during v1.7.1.
+    # Allow two independent ten-minute reconciliation windows plus GitHub Packages mirroring.
+    timeout-minutes: 30
     environment:
       name: release
     permissions:
@@ -912,7 +914,10 @@ jobs:
 
             remote="$(mktemp)"
             found=0
-            for _ in {1..18}; do
+            # A successful upload is not downloadable until NuGet.org has repository-signed and
+            # indexed it. That took almost five minutes per package during v1.7.1, so allow a
+            # bounded ten-minute window before leaving the tag/draft for a safe failed-job rerun.
+            for _ in {1..60}; do
               if curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
                    --max-filesize 200000000 \
                    "${base}${version}/${lower_id}.${version}.nupkg" -o "$remote"; then
@@ -922,7 +927,7 @@ jobs:
               sleep 10
             done
             [ "$found" -eq 1 ] || {
-              echo "::error::$id $version is still absent after the publication/recovery window"
+              echo "::error::$id $version is still absent after the ten-minute publication/recovery window"
               exit 1
             }
             dotnet nuget verify "$remote" --all

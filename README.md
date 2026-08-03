@@ -1047,7 +1047,9 @@ If a package source accepts one package and a later write or response fails, lea
 in place and rerun the failed workflow jobs. The idempotent publication job discovers the official
 V3 package endpoints, validates every present copy across both registries before any new write,
 pushes only absent versions, and then downloads and authenticates the result. It never relies on
-`--skip-duplicate`, which would not prove byte identity. Never rebuild or retag the same version.
+`--skip-duplicate`, which would not prove byte identity. NuGet.org repository signing and indexing
+is allowed up to ten minutes per package; a longer delay leaves the tag and draft intact for the
+same safe failed-job rerun. Never rebuild or retag the same version.
 
 Draft creation is likewise reconciled: a rerun accepts only an existing **draft**, rejects any
 unexpected asset, downloads every present asset, and requires exact byte equality before uploading
