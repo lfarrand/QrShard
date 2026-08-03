@@ -23,7 +23,7 @@ Each release is also mirrored to GitHub Packages, but **nuget.org is the support
 source** — GitHub Packages requires an access token with `read:packages` to install from, even
 for public repositories.
 
-Beginning with v1.6.2, the exact pre-publication `.nupkg` attached to GitHub Releases has signed
+Beginning with v1.7.0, the exact pre-publication `.nupkg` attached to GitHub Releases has signed
 SLSA provenance and an SPDX 2.2 SBOM attestation; verification instructions are in the repository
 README. Older releases predate these controls. NuGet.org then repository-signs the uploaded
 package, changing its bytes. NuGet clients can verify that separate repository signature, subject
