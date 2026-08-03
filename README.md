@@ -504,10 +504,10 @@ uses that worker count.
 
 | Resolution / density | Payload / image | Frames/s, 1 core | Frames/s, parallel* | Payload rate* | 250 MB, decode only* |
 |---|---:|---:|---:|---:|---:|
-| 2160² · 3 px · 4-bit *(Default)* | ~212 KB | ~52 (19 ms) | ~238 | ~50 MB/s | ~5.0 s |
-| 2160² · 2 px · 6-bit *(Dense)* | ~716 KB | ~39 (25 ms) | ~218 | ~156 MB/s | ~1.6 s |
-| 3840×2160 · 1 px · 6-bit *(Max4K)* | ~4.9 MB | ~14 (70 ms) | ~81 | ~397 MB/s | ~0.6 s |
-| 3840×2160 · 1 px · 8-bit | ~6.5 MB | ~13 (77 ms) | ~76 | ~498 MB/s | ~0.5 s |
+| 2160² · 3 px · 4-bit *(Default)* | ~212 KB | ~50 (20.0 ms) | ~298 | ~63 MB/s | ~4.0 s |
+| 2160² · 2 px · 6-bit *(Dense)* | ~716 KB | ~31.5 (31.8 ms) | ~213 | ~153 MB/s | ~1.6 s |
+| 3840×2160 · 1 px · 6-bit *(Max4K)* | ~4.9 MB | ~10.7 (93.3 ms) | ~40 | ~194 MB/s | ~1.3 s |
+| 3840×2160 · 1 px · 8-bit | ~6.5 MB | ~10.2 (98.0 ms) | ~38 | ~247 MB/s | ~1.0 s |
 
 \*Parallel figures are from the [benchmark machine](#benchmark-snapshot) (32 logical cores) and
 scale down on fewer cores. Batch folder decode is capped by cores, `DecodeMaxParallelism`, image
@@ -515,8 +515,9 @@ count, and the ~40-byte/pixel memory planner; with the current 4000 MB default i
 workers for 4K input, not the auto cap of 24. File-recording decode is sequential so that early
 stop and frame ordering stay deterministic. Live receive defaults to 2–4 workers depending on
 core count (or `ReceiveDecodeWorkers`). Reproduce the probe in `tests/QrShard.Benchmarks` with
-`dotnet run -c Release -- --fps-probe`. These persisted measurements are from v1.6.1; they are a
-baseline, not timings asserted for an unmeasured later revision.
+`dotnet run -c Release -- --fps-probe`. These v1.7.0 measurements (`f07a3e9`,
+2026-08-03 07:18 BST) were taken with background desktop/ChatGPT activity and are specific to
+this machine.
 
 Notice the frame rate *falls* with density while the payload rate *rises*: a 4K frame decodes
 more slowly but carries much more data, so dense, clean captures can still move more bytes per
@@ -695,28 +696,32 @@ handheld photos remain the honest acceptance test.
 
 ## Benchmark snapshot
 
-This persisted snapshot was measured on the **v1.6.1** code. It remains useful as a
-hardware-specific baseline, not a claim that an unmeasured later revision has identical timings;
-use the reproduction commands below for the current checkout and target machine.
+This persisted snapshot was measured on **2026-08-02** from the **v1.7.0** source at commit
+`f07a3e9`. It is a hardware-specific planning snapshot, not a cross-version performance claim;
+the run's background-load caveat is recorded below.
 
 Measured on this machine (BenchmarkDotNet means, Monitoring strategy, 3 iterations per case;
 decoded output SHA-verified every iteration):
 
 | | |
 |---|---|
-| CPU | AMD Ryzen 9 9950X3D 16-Core @ 4.3 GHz (family 26, model 68, stepping 0) |
+| CPU | AMD Ryzen 9 9950X3D2 16-Core Processor @ 4.3 GHz |
 | Cores | 16 physical / 32 logical |
 | Motherboard | ASRock X670E Taichi (firmware 4.43) |
-| RAM | 4x DDR5-3600, 128 GB total |
-| Storage | Crucial T700 2 TB NVMe (temp/work); Corsair MP600 PRO NH 2 TB (artifacts) |
+| RAM | 4x 32 GB DDR5, configured at 3600 MT/s (128 GB total) |
+| Storage | Crucial T700 2 TB NVMe (C:, temp/work); Corsair MP600 PRO NH 2 TB NVMe (E:, source/artifacts) |
 | OS | Windows 11 Pro 25H2 (build 26200.8973) |
-| .NET | 10.0.10 (win-x64) |
+| .NET / GC | 10.0.10 (win-x64), concurrent Server GC; SDK 10.0.302 |
+| Benchmark | BenchmarkDotNet 0.15.8, Monitoring strategy, 1 warmup + 3 measured iterations |
+| Power plan | High performance |
 
 Presets: **Default** = 2160², 3 px cells, 4 bits (robust); **Dense** = 2160², 2 px, 6 bits;
-**Max4K** = 3840x2160, 1 px, 6 bits; **Max4K-R10** = Max4K + 10% parity images. The generated
-[All measurements](#all-measurements) table is the single source of benchmark values; the charts
-are exported from the same persisted result set. A relative **perf gate** also races base and head
-on the same 30 MB round trip and fails a >30% median regression.
+**Max4K** = 3840x2160, 1 px, 6 bits; **Max4K-R10** = Max4K + 10% parity images. The persisted
+`transfer-results.json` result set is the source for the generated [All measurements](#all-measurements)
+table, `docs/benchmarks/measurements.md`, and all eight SVGs. Matrix size labels use 1024-based
+multiples; codec throughput is therefore shown as **MiB/s**. The separate decode frame-rate probe
+above deliberately reports decimal MB/s. A relative **perf gate** also races base and head on the
+same 30 MB round trip and fails a >30% median regression.
 
 ### Charts
 
@@ -731,7 +736,7 @@ All four are log-log, generated from the same measurements as the table below.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks/throughput-dark.svg">
-  <img alt="Codec round-trip throughput in MB/s of payload per second of codec time" src="docs/benchmarks/throughput-light.svg">
+  <img alt="Codec round-trip throughput in MiB/s of payload per second of codec time" src="docs/benchmarks/throughput-light.svg">
 </picture>
 
 <picture>
@@ -747,8 +752,8 @@ All four are log-log, generated from the same measurements as the table below.
 The two transfer charts are where the density presets earn their keep: they are codec time plus
 `images x seconds-per-image`, so they rank by **image count**, not by codec speed. At 100 MB that
 is a 495-image Default set against a 22-image Max4K one — about 25 minutes of hand-driven capture
-versus about 1 minute. The presets differ by roughly 3 seconds of codec time at that size, which
-is simply irrelevant next to a 24-minute difference in capture. At 1 GB the same effect is
+versus about 1 minute. Default and Max4K differ by about 1.7 seconds of codec time at that size,
+which is simply irrelevant next to a 24-minute difference in capture. At 1 GB the same effect is
 brutal: 5,068 images is over four hours of manual capture, where Max4K's 220 images is about
 eleven minutes.
 
@@ -760,63 +765,62 @@ Encode and decode are BenchmarkDotNet means.
 
 > **Read these as order-of-magnitude, not as a stopwatch.** The suite runs one warmup and three
 > iterations per case under the Monitoring strategy, which is the right trade for operations this
-> long and IO-heavy, but it leaves wide confidence intervals on the smaller rows — the 99.9% CI on
-> 10 MB/Default is several times its own mean. Differences under about 20% on any single row are
-> below the instrument's resolution here. The large-file rows, where each iteration runs for
-> seconds, are the trustworthy ones.
+> long and IO-heavy, but it leaves wide confidence intervals on the shorter rows. BenchmarkDotNet
+> also warns when an iteration is below its recommended 100 ms minimum. Confidence intervals are
+> case-specific and are wider than the mean for many rows in this run, so no universal percentage
+> threshold is defensible. Treat every mean as a rough planning figure; use a back-to-back run with
+> more iterations when the size of a difference matters.
 >
-> **Do not compare these figures against an older revision of this table.** Every row above was
-> measured in ONE sitting on an otherwise-idle machine (sustained load under 3% of 32 logical
-> cores, verified before and after). Earlier tables were taken in different sittings, and the
-> machine state between them moves the numbers more than most code changes do: re-measuring
-> **v1.6.0 itself** on the machine and day these figures come from gave 3.91 s for 1 GB/Max4K
-> decode, against the 2.42 s its own published table claimed — and against 4.02 s for 1.6.1 here,
-> which is inside the error bars. Cross-session deltas in this table are machine drift, not
-> progress or regression. To compare two revisions, build both and measure them back to back.
+> **Measurement conditions:** all 80 cases were measured in one uninterrupted run, but the machine
+> was not otherwise idle. Immediately before launch, total CPU averaged 6.29% and peaked at 13.38%
+> over 21 seconds on 32 logical cores; preceding windows were noisier. BenchmarkDotNet executed the
+> matrix in 12m28s (12m38s global). Background activity can skew individual rows and their confidence
+> intervals, so do not infer progress or regression by comparing this table with an older snapshot.
+> To compare revisions, build both and measure them back to back on the same quiet machine.
 
 <!-- BENCH:TABLE:START -->
-| Size | Preset | Images | Encode | Decode | Codec MB/s | Est. manual (3 s/img) | Est. auto (0.5 s/img) |
+| Size | Preset | Images | Encode | Decode | Codec MiB/s | Est. manual (3 s/img) | Est. auto (0.5 s/img) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| 1KB | Default | 1 | 12.8 ms | 46.6 ms | 0.016 | 3.06 s | 559.4 ms |
-| 1KB | Dense | 1 | 15.6 ms | 51.3 ms | 0.015 | 3.07 s | 566.9 ms |
-| 1KB | Max4K | 1 | 62.9 ms | 117 ms | 0.005 | 3.18 s | 679.9 ms |
-| 1KB | Max4K-R10 | 1+1p | 103.1 ms | 128.7 ms | 0.004 | 6.23 s | 1.23 s |
-| 10KB | Default | 1 | 13.6 ms | 49.8 ms | 0.154 | 3.06 s | 563.3 ms |
-| 10KB | Dense | 1 | 17.4 ms | 52 ms | 0.141 | 3.07 s | 569.3 ms |
-| 10KB | Max4K | 1 | 81 ms | 95 ms | 0.055 | 3.18 s | 676 ms |
-| 10KB | Max4K-R10 | 1+1p | 87.2 ms | 130.4 ms | 0.045 | 6.22 s | 1.22 s |
-| 100KB | Default | 1 | 50.4 ms | 46.2 ms | 1 | 3.1 s | 596.6 ms |
-| 100KB | Dense | 1 | 30.9 ms | 57.7 ms | 1.1 | 3.09 s | 588.6 ms |
-| 100KB | Max4K | 1 | 77.3 ms | 98.6 ms | 0.555 | 3.18 s | 675.9 ms |
-| 100KB | Max4K-R10 | 1+1p | 91 ms | 128.4 ms | 0.445 | 6.22 s | 1.22 s |
-| 500KB | Default | 3 | 64.1 ms | 50.1 ms | 4.3 | 9.11 s | 1.61 s |
-| 500KB | Dense | 1 | 107 ms | 51.9 ms | 3.1 | 3.16 s | 659 ms |
-| 500KB | Max4K | 1 | 78.2 ms | 106.7 ms | 2.6 | 3.18 s | 685 ms |
-| 500KB | Max4K-R10 | 1+1p | 91.3 ms | 130.3 ms | 2.2 | 6.22 s | 1.22 s |
-| 1MB | Default | 5 | 66.7 ms | 42.4 ms | 9.2 | 15.11 s | 2.61 s |
-| 1MB | Dense | 2 | 124.1 ms | 56.9 ms | 5.5 | 6.18 s | 1.18 s |
-| 1MB | Max4K | 1 | 76.8 ms | 109.2 ms | 5.4 | 3.19 s | 686 ms |
-| 1MB | Max4K-R10 | 1+1p | 93.7 ms | 130 ms | 4.5 | 6.22 s | 1.22 s |
-| 10MB | Default | 50 | 275.5 ms | 256.7 ms | 18.8 | 2.5 min | 25.53 s |
-| 10MB | Dense | 15 | 212.1 ms | 77.8 ms | 34.5 | 45.29 s | 7.79 s |
-| 10MB | Max4K | 3 | 98.4 ms | 151.2 ms | 40.1 | 9.25 s | 1.75 s |
-| 10MB | Max4K-R10 | 3+1p | 149.4 ms | 156.8 ms | 32.7 | 12.31 s | 2.31 s |
-| 100MB | Default | 495 | 2.25 s | 910.2 ms | 31.6 | 24.8 min | 4.2 min |
-| 100MB | Dense | 147 | 1.43 s | 462.7 ms | 53 | 7.4 min | 1.3 min |
-| 100MB | Max4K | 22 | 370.3 ms | 505.1 ms | 114 | 1.1 min | 11.88 s |
-| 100MB | Max4K-R10 | 22+3p | 342.7 ms | 551.9 ms | 112 | 1.3 min | 13.39 s |
-| 250MB | Default | 1238 | 4.67 s | 2.2 s | 36.4 | 1.03 h | 10.4 min |
-| 250MB | Dense | 366 | 3.55 s | 1.03 s | 54.6 | 18.4 min | 3.1 min |
-| 250MB | Max4K | 54 | 597.7 ms | 1.09 s | 148 | 2.7 min | 28.69 s |
-| 250MB | Max4K-R10 | 54+6p | 661.3 ms | 1.17 s | 137 | 3 min | 31.83 s |
-| 500MB | Default | 2475 | 8.78 s | 4.85 s | 36.7 | 2.07 h | 20.9 min |
-| 500MB | Dense | 732 | 6.56 s | 2.05 s | 58.1 | 36.7 min | 6.2 min |
-| 500MB | Max4K | 108 | 1.12 s | 1.96 s | 163 | 5.5 min | 57.08 s |
-| 500MB | Max4K-R10 | 108+11p | 1.26 s | 2.1 s | 149 | 6 min | 1 min |
-| 1GB | Default | 5068 | 16.15 s | 8.92 s | 40.8 | 4.23 h | 42.7 min |
-| 1GB | Dense | 1499 | 11.15 s | 4.07 s | 67.2 | 1.25 h | 12.7 min |
-| 1GB | Max4K | 220 | 2.3 s | 4.02 s | 162 | 11.1 min | 1.9 min |
-| 1GB | Max4K-R10 | 220+22p | 2.92 s | 4.31 s | 142 | 12.2 min | 2.1 min |
+| 1KB | Default | 1 | 13.9 ms | 47.7 ms | 0.016 | 3.06 s | 561.6 ms |
+| 1KB | Dense | 1 | 17.5 ms | 53 ms | 0.014 | 3.07 s | 570.5 ms |
+| 1KB | Max4K | 1 | 65.3 ms | 108.9 ms | 0.006 | 3.17 s | 674.3 ms |
+| 1KB | Max4K-R10 | 1+1p | 89.2 ms | 140.4 ms | 0.004 | 6.23 s | 1.23 s |
+| 10KB | Default | 1 | 16.8 ms | 53.7 ms | 0.139 | 3.07 s | 570.5 ms |
+| 10KB | Dense | 1 | 19.7 ms | 53.9 ms | 0.133 | 3.07 s | 573.6 ms |
+| 10KB | Max4K | 1 | 91 ms | 108.4 ms | 0.049 | 3.2 s | 699.4 ms |
+| 10KB | Max4K-R10 | 1+1p | 91.5 ms | 137.8 ms | 0.043 | 6.23 s | 1.23 s |
+| 100KB | Default | 1 | 53.9 ms | 54.1 ms | 0.904 | 3.11 s | 608 ms |
+| 100KB | Dense | 1 | 36.8 ms | 60.4 ms | 1 | 3.1 s | 597.3 ms |
+| 100KB | Max4K | 1 | 89.7 ms | 111.6 ms | 0.485 | 3.2 s | 701.3 ms |
+| 100KB | Max4K-R10 | 1+1p | 94.2 ms | 136.8 ms | 0.423 | 6.23 s | 1.23 s |
+| 500KB | Default | 3 | 79 ms | 54.4 ms | 3.7 | 9.13 s | 1.63 s |
+| 500KB | Dense | 1 | 111.5 ms | 52.3 ms | 3 | 3.16 s | 663.8 ms |
+| 500KB | Max4K | 1 | 76.9 ms | 114.4 ms | 2.6 | 3.19 s | 691.4 ms |
+| 500KB | Max4K-R10 | 1+1p | 91.2 ms | 142.4 ms | 2.1 | 6.23 s | 1.23 s |
+| 1MB | Default | 5 | 69.2 ms | 46.4 ms | 8.7 | 15.12 s | 2.62 s |
+| 1MB | Dense | 2 | 129.5 ms | 62.2 ms | 5.2 | 6.19 s | 1.19 s |
+| 1MB | Max4K | 1 | 78.9 ms | 114.8 ms | 5.2 | 3.19 s | 693.7 ms |
+| 1MB | Max4K-R10 | 1+1p | 104.6 ms | 137.4 ms | 4.1 | 6.24 s | 1.24 s |
+| 10MB | Default | 50 | 249.7 ms | 165.7 ms | 24.1 | 2.5 min | 25.42 s |
+| 10MB | Dense | 15 | 199.6 ms | 95.1 ms | 33.9 | 45.29 s | 7.79 s |
+| 10MB | Max4K | 3 | 94.1 ms | 171.1 ms | 37.7 | 9.27 s | 1.77 s |
+| 10MB | Max4K-R10 | 3+1p | 150.9 ms | 178.2 ms | 30.4 | 12.33 s | 2.33 s |
+| 100MB | Default | 495 | 1.55 s | 1.05 s | 38.4 | 24.8 min | 4.2 min |
+| 100MB | Dense | 147 | 1.07 s | 553.4 ms | 61.5 | 7.4 min | 1.3 min |
+| 100MB | Max4K | 22 | 337.3 ms | 582 ms | 109 | 1.1 min | 11.92 s |
+| 100MB | Max4K-R10 | 22+3p | 363.5 ms | 674.5 ms | 96.3 | 1.3 min | 13.54 s |
+| 250MB | Default | 1238 | 3.74 s | 2.51 s | 40 | 1.03 h | 10.4 min |
+| 250MB | Dense | 366 | 2.44 s | 1.11 s | 70.4 | 18.4 min | 3.1 min |
+| 250MB | Max4K | 54 | 734.6 ms | 1.22 s | 128 | 2.7 min | 28.96 s |
+| 250MB | Max4K-R10 | 54+6p | 781 ms | 1.5 s | 109 | 3 min | 32.28 s |
+| 500MB | Default | 2475 | 7.44 s | 5 s | 40.2 | 2.07 h | 20.8 min |
+| 500MB | Dense | 732 | 4.75 s | 2.2 s | 71.9 | 36.7 min | 6.2 min |
+| 500MB | Max4K | 108 | 1.26 s | 2.45 s | 135 | 5.5 min | 57.71 s |
+| 500MB | Max4K-R10 | 108+11p | 1.36 s | 2.61 s | 126 | 6 min | 1.1 min |
+| 1GB | Default | 5068 | 15.06 s | 10.26 s | 40.4 | 4.23 h | 42.7 min |
+| 1GB | Dense | 1499 | 9.78 s | 4.47 s | 71.9 | 1.25 h | 12.7 min |
+| 1GB | Max4K | 220 | 2.51 s | 4.56 s | 145 | 11.1 min | 2 min |
+| 1GB | Max4K-R10 | 220+22p | 3.17 s | 5 s | 125 | 12.2 min | 2.2 min |
 <!-- BENCH:TABLE:END -->
 
 ### Running the benchmarks
@@ -824,20 +828,53 @@ Encode and decode are BenchmarkDotNet means.
 `tests/QrShard.Benchmarks` is a [BenchmarkDotNet](https://benchmarkdotnet.org/) suite measuring
 encode and decode across file sizes **1 KB – 1 GB** and the four presets:
 
-```
+On PowerShell (the shell used for this snapshot), clear both optional filters before a full run:
+
+```powershell
 cd tests/QrShard.Benchmarks
-dotnet run -c Release                      # full matrix — ~14 min on the machine above, ~5 GB temp disk
+Remove-Item Env:\QRSHARD_BENCH_SIZES -ErrorAction SilentlyContinue
+Remove-Item Env:\QRSHARD_BENCH_PRESETS -ErrorAction SilentlyContinue
+dotnet run -c Release                      # full matrix — ~13 min on the machine above, ~5 GB temp disk
+```
+
+For an intentionally filtered run **instead of** the full matrix:
+
+```powershell
+cd tests/QrShard.Benchmarks
+$env:QRSHARD_BENCH_SIZES = '1KB,1MB,100MB'
+$env:QRSHARD_BENCH_PRESETS = 'Default,Max4K'
+dotnet run -c Release
+Remove-Item Env:\QRSHARD_BENCH_SIZES -ErrorAction SilentlyContinue
+Remove-Item Env:\QRSHARD_BENCH_PRESETS -ErrorAction SilentlyContinue
+```
+
+On a POSIX shell, the full-matrix equivalent is:
+
+```sh
+unset QRSHARD_BENCH_SIZES QRSHARD_BENCH_PRESETS
+dotnet run -c Release
+```
+
+Or, for an intentionally filtered run instead:
+
+```sh
 QRSHARD_BENCH_SIZES=1KB,1MB,100MB QRSHARD_BENCH_PRESETS=Default,Max4K dotnet run -c Release
-dotnet run -c Release -- --graphs-only     # regenerate graphs from persisted results
-dotnet run -c Release -- --readme-assets   # refresh this README's charts + table
+```
+
+After validating the persisted rows, the export and probe commands are:
+
+```
+dotnet run -c Release -- --graphs-only     # regenerate transfer-graphs.html from persisted results only
+dotnet run -c Release -- --readme-assets   # refresh committed SVGs + measurements tables
 dotnet run -c Release -- --fps-probe       # decode frame rate / throughput (Decode frame rate table)
 ```
 
 Results persist and **merge across runs**; output includes the machine-spec header and a
 self-contained `transfer-graphs.html`. That merge is what lets the matrix be measured in several
-sittings — but it also means a partial re-run leaves the untouched sizes at their older numbers,
-silently mixing builds in one table. After perf work, re-measure every size you intend to
-publish (a stale row usually gives itself away as a non-monotonic kink in the charts).
+sittings — but it also means a partial re-run leaves untouched sizes at their older numbers and
+can silently mix builds in one table. For a publishable full refresh, preserve and remove
+`BenchmarkDotNet.Artifacts/results/transfer-results.json`, run the complete matrix, and confirm
+that all 80 benchmarks produced exactly 40 size/preset aggregates before running `--readme-assets`.
 
 `--readme-assets` re-exports what you see above from those same persisted results: one
 standalone SVG per chart per colour scheme into [`docs/benchmarks/`](docs/benchmarks/), and the
