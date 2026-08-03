@@ -61,7 +61,8 @@ Shards are order-independent, duplicate-tolerant and filename-agnostic, and shar
 different files can share a folder without being confused for one another.
 
 `DecodeImages` and `QrShardDecodeSession.Assemble` stage output and verify exact length and
-SHA-256. A single-file result is then atomically moved into place. An archive output directory must
+SHA-256. An existing output directory receives ordinary files under their sanitised original names;
+a single-file result is then atomically moved into place. An archive output directory must
 be absent or empty and is never merged; its complete staged tree is published only after every
 entry succeeds. Replacing an existing file carries forward only its nine Unix rwx bits, or its
 Windows DACL and basic attributes. An existing empty archive destination instead carries its full

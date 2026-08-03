@@ -183,8 +183,10 @@ qrshard decode recording.mp4 -o holiday-photos.zip
 Near-duplicate frames are skipped cheaply, torn mid-transition frames fail checksums harmlessly
 and come around again next cycle, and decoding **stops early** the moment the collected set is
 complete or recoverable. If a file recording still comes up short, it is automatically re-extracted
-at a higher frame rate before giving up. Add `-F 100` (fountain coding) when encoding and the
-slideshow also cycles random-linear coded frames: a **full-rank set of roughly `stripeData`
+at a higher frame rate before giving up. If it still cannot be decoded, the sampled frames are
+preserved as BMP files in the logged temporary directory for inspection or manual decoding. Add
+`-F 100` (fountain coding) when encoding and the slideshow also cycles random-linear coded frames:
+a **full-rank set of roughly `stripeData`
 frames per stripe** reconstructs the data, so duplicates, dependent rows, and lost or glared
 frames simply do not count — the ideal mode for lossy capture chains.
 
@@ -264,7 +266,7 @@ guarantees.
 
 | Option | Supported values | Default | Description |
 |---|---|---|---|
-| `-o, --out <path>` | any path | original filename in the current directory (never overwrites — falls back to `<name>.restored<ext>`, then `.restored-2`, `.restored-3`, …) | Where to write the file (a directory for archive payloads). Single files are staged and verified before atomic publication; an archive destination must be absent or empty |
+| `-o, --out <path>` | any path | original filename in the current directory (never overwrites — falls back to `<name>.restored<ext>`, then `.restored-2`, `.restored-3`, …) | Where to write the output. For ordinary file payloads, an existing directory places each restored file inside it under its sanitised original name. Archive destinations must be absent or empty. All outputs are staged and verified before publication |
 | `-p, --password <pw>` | any string | — | Password for encrypted payloads. A wrong password fails without publishing plaintext, but lengths, image counts, and other cleartext shard metadata remain visible. Command-line values may appear in shell history/process listings |
 | `--password-file <file>` | strict UTF-8, optional UTF-8 BOM, ≤64 KiB/4096 characters | — | Read the password from a protected file; one trailing line ending is removed |
 | `--password-stdin` | first line, ≤4096 characters | — | Read from standard input. Exactly one password source may be used |

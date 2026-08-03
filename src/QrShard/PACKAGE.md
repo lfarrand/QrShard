@@ -59,6 +59,10 @@ qrshard calibrate                          # find the densest settings your capt
 qrshard decode captures/ --json            # machine-readable result, for scripting
 ```
 
+An existing directory passed to `-o` receives decoded ordinary files under their sanitised original
+names. If recording decode fails, QrShard logs and preserves the sampled BMP frames in a temporary
+directory so they can be inspected or decoded manually.
+
 The HTML slideshow is a relative manifest: keep `slideshow.html` beside its shard images and any
 generated PNG sidecars, then use its **Start fullscreen** button. Missing frame files are skipped as
 erasures. `--slideshow apng` makes a single file but refuses a set above 256 MiB of decoded RGB
