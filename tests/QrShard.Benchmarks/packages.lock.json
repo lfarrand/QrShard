@@ -191,7 +191,7 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.DependencyInjection": "[10.0.10, )",
-          "QrShard.Core": "[1.7.0, )",
+          "QrShard.Core": "[1.7.1, )",
           "SixLabors.ImageSharp": "[4.0.0, )"
         }
       }
