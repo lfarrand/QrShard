@@ -30,15 +30,15 @@ public class WatchAndReceiveTests
             ["decode", watchDir, "--watch", "--session", session, "-o", output], stdout, stdout));
 
         // Captures arrive in two sittings, like a user screenshotting as the images cycle.
-        await Task.Delay(400);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
         foreach (string f in result.Files.Take(result.ImageCount / 2))
             File.Copy(f, Path.Combine(watchDir, Path.GetFileName(f)));
-        await Task.Delay(1500);
+        await Task.Delay(1500, TestContext.Current.CancellationToken);
         Assert.False(watch.IsCompleted); // still incomplete — must keep watching
         foreach (string f in result.Files.Skip(result.ImageCount / 2))
             File.Copy(f, Path.Combine(watchDir, Path.GetFileName(f)));
 
-        int code = await watch.WaitAsync(OrchestrationTimeout);
+        int code = await watch.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.False(File.Exists(session)); // cleaned up on success
@@ -70,7 +70,7 @@ public class WatchAndReceiveTests
         var watch = Task.Run(() => new Cli().Run(
             ["decode", watchDir, "--watch", "-o", output], stdout, stdout));
 
-        await Task.Delay(400);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
         // Everything except the final image arrives intact.
         foreach (string f in result.Files.SkipLast(1))
             File.Copy(f, Path.Combine(watchDir, Path.GetFileName(f)));
@@ -79,13 +79,13 @@ public class WatchAndReceiveTests
         byte[] whole = File.ReadAllBytes(lastSource);
         File.WriteAllBytes(lastDest, whole[..(whole.Length / 2)]);
 
-        await Task.Delay(1500);
+        await Task.Delay(1500, TestContext.Current.CancellationToken);
         Assert.False(watch.IsCompleted); // the set is still short, as it should be
 
         // Now it is written properly, exactly as a re-saved capture would be.
         File.WriteAllBytes(lastDest, whole);
 
-        int code = await watch.WaitAsync(OrchestrationTimeout);
+        int code = await watch.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
         Assert.Equal(content, File.ReadAllBytes(output));
     }
@@ -122,8 +122,17 @@ public class WatchAndReceiveTests
         };
 
         string watchDir = tmp.Sub("conflicting-incoming");
-        File.Copy(encodedPath, Path.Combine(watchDir, "a.png"));
-        Render(conflictingHeader, conflictingPayload, layout, Path.Combine(watchDir, "b.png"));
+        string originalPath = Path.Combine(watchDir, "a.png");
+        string conflictingPath = Path.Combine(watchDir, "b.png");
+        File.Copy(encodedPath, originalPath);
+        Render(conflictingHeader, conflictingPayload, layout, conflictingPath);
+
+        // Present both candidates as one settled batch. On a busy runner rendering b.png can take
+        // longer than the production 500 ms settle window; without this, the watcher may decode
+        // the already-settled one-shard a.png, complete the set, and exit before b.png is eligible.
+        DateTime settledWriteTime = DateTime.UtcNow - TimeSpan.FromSeconds(5);
+        File.SetLastWriteTimeUtc(originalPath, settledWriteTime);
+        File.SetLastWriteTimeUtc(conflictingPath, settledWriteTime);
 
         using var cancellation = new CancellationTokenSource();
         var stdout = new StringWriter();
@@ -137,7 +146,13 @@ public class WatchAndReceiveTests
         Exception? failure = null;
         try
         {
-            await stderr.Signal.Task.WaitAsync(OrchestrationTimeout);
+            Task first = await Task.WhenAny(stderr.Signal.Task, watch)
+                .WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
+            if (first == watch)
+            {
+                code = await watch;
+                Assert.Fail($"Watch mode exited with code {code} before reporting the terminal conflict.");
+            }
         }
         catch (Exception ex)
         {
@@ -148,7 +163,7 @@ public class WatchAndReceiveTests
             cancellation.Cancel();
             try
             {
-                code = await watch.WaitAsync(OrchestrationTimeout);
+                code = await watch.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
             }
             catch (Exception cleanupFailure)
             {
@@ -200,7 +215,7 @@ public class WatchAndReceiveTests
         if (!OperatingSystem.IsWindows())
             return; // the default-device path only errors on Windows
         var stderr = new StringWriter();
-        int code = new Cli().Run(["receive"], new StringWriter(), stderr);
+        int code = new Cli().Run(["receive"], new StringWriter(), stderr, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(2, code);
         Assert.Contains("--device", stderr.ToString());
         Assert.Contains("list_devices", stderr.ToString());

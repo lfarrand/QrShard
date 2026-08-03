@@ -260,7 +260,7 @@ public class EncoderSafetyTests
         try
         {
             Task entered = renderer.Entered.Task;
-            Task first = await Task.WhenAny(entered, encode, Task.Delay(TimeSpan.FromSeconds(10)));
+            Task first = await Task.WhenAny(entered, encode, Task.Delay(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
             if (first == encode && !entered.IsCompletedSuccessfully)
             {
                 _ = await encode; // propagate an early encoder failure instead of masking it as a timeout
@@ -281,7 +281,7 @@ public class EncoderSafetyTests
         // WaitAsync does not stop the underlying task. Always observe and bounded-join it after
         // releasing the renderer so a failed handshake cannot race renderer/TempDir disposal.
         Exception? encodeFailure = await Record.ExceptionAsync(async () =>
-            await encode.WaitAsync(TimeSpan.FromSeconds(10)));
+            await encode.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
         if (orchestrationFailure is not null)
             ExceptionDispatchInfo.Capture(orchestrationFailure).Throw();
 

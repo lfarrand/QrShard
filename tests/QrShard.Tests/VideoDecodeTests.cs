@@ -232,14 +232,14 @@ public class VideoDecodeTests
             // exposed the old nested-Task.Run/ManualResetEvent wait as a scheduling race before
             // the test reached any of its cancellation or output assertions.
             Task handshake = source.ProducerBlocked.Task;
-            Task first = await Task.WhenAny(handshake, receive, Task.Delay(OrchestrationTimeout));
+            Task first = await Task.WhenAny(handshake, receive, Task.Delay(OrchestrationTimeout, TestContext.Current.CancellationToken));
             if (first == receive)
             {
                 stats = await receive; // propagate an early product failure instead of hiding it as a timeout
                 Assert.Fail("decode completed before the producer reached the simulated stalled camera read");
             }
             Assert.True(first == handshake, "producer never reached the simulated stalled camera read");
-            stats = await receive.WaitAsync(OrchestrationTimeout);
+            stats = await receive.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
         }
         catch (Exception ex)
         {
@@ -253,7 +253,7 @@ public class VideoDecodeTests
             {
                 // WaitAsync does not stop its underlying task. Bounded-join it after releasing the
                 // fake camera so TempDir cannot normally be disposed while decode still uses it.
-                await receive.WaitAsync(OrchestrationTimeout);
+                await receive.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
             }
             catch (Exception cleanupFailure)
             {
@@ -280,7 +280,7 @@ public class VideoDecodeTests
         var decoder = new VideoDecoder(new MismatchedFamilyFrameDecoder(), source,
             new ShardAssembler(), new ParityReassembler(), new CameraRectifier());
 
-        Task<Exception> receive = Task.Factory.StartNew(() => Record.Exception(() =>
+        Task<Exception?> receive = Task.Factory.StartNew(() => Record.Exception(() =>
                 decoder.Decode("live-device", null, 8, _ => { }, out _, decodeWorkers: 2)),
             CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
@@ -292,7 +292,7 @@ public class VideoDecodeTests
             // scheduled on a constrained CI pool. First prove that both frames reached the live
             // pipeline and that the producer is at the cancellation-aware simulated camera read.
             Task handshake = source.ProducerBlocked.Task;
-            Task first = await Task.WhenAny(handshake, receive, Task.Delay(OrchestrationTimeout));
+            Task first = await Task.WhenAny(handshake, receive, Task.Delay(OrchestrationTimeout, TestContext.Current.CancellationToken));
             if (first == receive && !handshake.IsCompletedSuccessfully)
             {
                 observed = await receive;
@@ -302,7 +302,7 @@ public class VideoDecodeTests
             }
             Assert.True(handshake.IsCompletedSuccessfully,
                 "producer never reached the simulated stalled camera read");
-            observed = await receive.WaitAsync(OrchestrationTimeout);
+            observed = await receive.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
         }
         catch (Exception ex)
         {
@@ -313,7 +313,7 @@ public class VideoDecodeTests
             source.EmergencyRelease.Set();
             try
             {
-                observed ??= await receive.WaitAsync(OrchestrationTimeout);
+                observed ??= await receive.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
             }
             catch (Exception cleanupFailure)
             {
@@ -384,7 +384,7 @@ public class VideoDecodeTests
         string input = tmp.WriteFile("f.bin", TestData.Random(30_000));
         string outDir = tmp.File("shards");
         var stdout = new StringWriter();
-        int code = new Cli().Run(["encode", input, "-o", outDir, "-r", "900", "--video", "--interval", "250"], stdout, new StringWriter());
+        int code = new Cli().Run(["encode", input, "-o", outDir, "-r", "900", "--video", "--interval", "250"], stdout, new StringWriter(), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
         Assert.Contains("slideshow.html", stdout.ToString());
         Assert.Contains("250 ms/image", stdout.ToString());

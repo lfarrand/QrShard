@@ -42,9 +42,9 @@ public class ArchiveInputSafetyTests
         string restored = tmp.File("restored");
 
         Assert.Equal(0, new Cli().Run(["encode", input, "-o", shards, "-r", "900"],
-            new StringWriter(), new StringWriter()));
+            new StringWriter(), new StringWriter(), cancellationToken: TestContext.Current.CancellationToken));
         Assert.Equal(0, new Cli().Run(["decode", shards, "-o", restored],
-            new StringWriter(), new StringWriter()));
+            new StringWriter(), new StringWriter(), cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.True(Directory.Exists(Path.Combine(restored, "empty", "nested")));
         Assert.Equal("content", File.ReadAllText(Path.Combine(restored, "not-empty", "file.txt")));
@@ -61,7 +61,7 @@ public class ArchiveInputSafetyTests
 
         var error = new StringWriter();
         int exit = new Cli().Run(["encode", link, "-o", tmp.File("shards")],
-            new StringWriter(), error);
+            new StringWriter(), error, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(2, exit);
         Assert.Contains("symbolic links and junctions", error.ToString(), StringComparison.OrdinalIgnoreCase);
@@ -83,9 +83,9 @@ public class ArchiveInputSafetyTests
         string restored = tmp.File("restored");
 
         Assert.Equal(0, new Cli().Run(["encode", input, "-o", shards, "-r", "900"],
-            new StringWriter(), new StringWriter()));
+            new StringWriter(), new StringWriter(), cancellationToken: TestContext.Current.CancellationToken));
         Assert.Equal(0, new Cli().Run(["decode", shards, "-o", restored],
-            new StringWriter(), new StringWriter()));
+            new StringWriter(), new StringWriter(), cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Equal("same inode, two selected paths", File.ReadAllText(Path.Combine(restored, "first.txt")));
         Assert.Equal("same inode, two selected paths", File.ReadAllText(Path.Combine(restored, "second.txt")));

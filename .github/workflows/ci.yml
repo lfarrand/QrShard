@@ -44,9 +44,8 @@ jobs:
       - name: Test
         run: >
           dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release --no-build
-          --logger "console;verbosity=minimal"
-          --logger "trx;LogFileName=${{ matrix.os }}.trx"
           --results-directory TestResults
+          -- --report-trx --report-trx-filename ${{ matrix.os }}.trx
 
       # Totals and a per-class breakdown, rendered into the run summary.
       #

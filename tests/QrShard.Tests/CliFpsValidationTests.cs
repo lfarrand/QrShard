@@ -23,7 +23,7 @@ public class CliFpsValidationTests
         }
 
         var error = new StringWriter();
-        int code = new Cli().Run(["decode", gif, "--fps", value], new StringWriter(), error);
+        int code = new Cli().Run(["decode", gif, "--fps", value], new StringWriter(), error, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.NotEqual(0, code);
         Assert.Contains("--fps", error.ToString());
@@ -37,7 +37,7 @@ public class CliFpsValidationTests
     public void Receive_RejectsFpsOutsideItsDocumentedRangeBeforeOpeningACapture(string value)
     {
         var error = new StringWriter();
-        int code = new Cli().Run(["receive", "--screen", "--fps", value], new StringWriter(), error);
+        int code = new Cli().Run(["receive", "--screen", "--fps", value], new StringWriter(), error, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.NotEqual(0, code);
         Assert.Contains("--fps", error.ToString());

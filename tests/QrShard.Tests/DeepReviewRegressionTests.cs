@@ -69,7 +69,7 @@ public class DeepReviewRegressionTests
         var @out = new StringWriter();
         var err = new StringWriter();
         int exit = 0;
-        var thrown = Record.Exception(() => exit = new Cli().Run(["decode", path], @out, err));
+        var thrown = Record.Exception(() => exit = new Cli().Run(["decode", path], @out, err, cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Null(thrown);
         Assert.NotEqual(0, exit);
@@ -86,7 +86,7 @@ public class DeepReviewRegressionTests
         string path = tmp.File("evil.gif");
         File.WriteAllBytes(path, PngWithCorruptZtxt());
 
-        var thrown = Record.Exception(() => new RecordingFrameSource().Frames(path, 1).ToList());
+        var thrown = Record.Exception(() => new RecordingFrameSource().Frames(path, 1, TestContext.Current.CancellationToken).ToList());
         Assert.IsType<ShardDecodeException>(thrown);
     }
 

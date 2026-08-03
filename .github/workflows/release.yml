@@ -170,10 +170,13 @@ jobs:
           xcrun --find dsymutil
           xcrun dsymutil --version
 
-      - name: Test
+      - name: Build
         env:
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
-        run: dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release -warnaserror
+        run: dotnet build tests/QrShard.Tests/QrShard.Tests.csproj -c Release -warnaserror
+
+      - name: Test
+        run: dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release --no-build
 
       - name: Publish (Native AOT)
         env:

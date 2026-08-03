@@ -80,13 +80,13 @@ public class CameraVideoAndCalibrationTests
         using var tmp = new TempDir();
         string calDir = tmp.File("cal");
         var stdout = new StringWriter();
-        int genCode = new Cli().Run(["calibrate", "-o", calDir, "-r", "900"], stdout, stdout);
+        int genCode = new Cli().Run(["calibrate", "-o", calDir, "-r", "900"], stdout, stdout, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(0, genCode);
         Assert.True(Directory.GetFiles(calDir, "*.png").Length >= 5);
 
         // "Captures" = the pristine probes themselves: the densest setting must win.
         var analyzeOut = new StringWriter();
-        int code = new Cli().Run(["calibrate", calDir], analyzeOut, analyzeOut);
+        int code = new Cli().Run(["calibrate", calDir], analyzeOut, analyzeOut, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
         Assert.Contains("-c 1 -b 8", analyzeOut.ToString());
     }
@@ -96,7 +96,7 @@ public class CameraVideoAndCalibrationTests
     {
         using var tmp = new TempDir();
         string calDir = tmp.File("cal");
-        new Cli().Run(["calibrate", "-o", calDir, "-r", "900"], new StringWriter(), new StringWriter());
+        new Cli().Run(["calibrate", "-o", calDir, "-r", "900"], new StringWriter(), new StringWriter(), cancellationToken: TestContext.Current.CancellationToken);
 
         // Simulate a mediocre capture chain: downscale to 60% and back (kills 1px cells).
         string capDir = tmp.Sub("captured");
@@ -109,7 +109,7 @@ public class CameraVideoAndCalibrationTests
         }
 
         var analyzeOut = new StringWriter();
-        int code = new Cli().Run(["calibrate", capDir], analyzeOut, analyzeOut);
+        int code = new Cli().Run(["calibrate", capDir], analyzeOut, analyzeOut, cancellationToken: TestContext.Current.CancellationToken);
         string report = analyzeOut.ToString();
         Assert.Equal(0, code);
         Assert.Contains("Recommended encode settings", report);
