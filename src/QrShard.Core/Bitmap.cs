@@ -34,16 +34,18 @@ internal sealed class Bitmap(Rgb24[] px, int width, int height)
         int y1 = Math.Clamp((int)Math.Floor(cy) + ry, 0, Height - 1);
         long r = 0, g = 0, b = 0;
         int n = 0;
+        int span = x1 - x0 + 1;
         for (int y = y0; y <= y1; y++)
         {
-            for (int x = x0; x <= x1; x++)
+            var row = Px.AsSpan(y * Width + x0, span);
+            for (int i = 0; i < row.Length; i++)
             {
-                var p = At(x, y);
+                var p = row[i];
                 r += p.R;
                 g += p.G;
                 b += p.B;
-                n++;
             }
+            n += span;
         }
         return new Rgb24((byte)(r / n), (byte)(g / n), (byte)(b / n));
     }

@@ -299,7 +299,7 @@ public sealed class ExternalToolSecurityTests
             .Select(static i => (char)('a' + i % 26)));
         using var reader = new ChunkedTextReader(input, readSize);
 
-        string tail = await RecordingFrameSource.ReadBoundedErrorTailAsync(reader, 4096);
+        string tail = await RecordingFrameSource.ReadBoundedErrorTailAsync(reader, 4096, TestContext.Current.CancellationToken);
 
         Assert.Equal(input[^4096..], tail);
     }

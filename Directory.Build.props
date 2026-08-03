@@ -1,6 +1,7 @@
 <Project>
 
   <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <!-- Six Labors license (ImageSharp 4.x validates at build time). The license file is
          personal and deliberately NOT committed (gitignored): drop your own sixlabors.lic at
          the solution root, or set the SixLaborsLicenseKey environment variable instead.

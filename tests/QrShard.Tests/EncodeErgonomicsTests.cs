@@ -134,7 +134,7 @@ public class EncodeErgonomicsTests
         string input = tmp.WriteFile("input.bin", TestData.Random(20_000));
         var stdout = new StringWriter();
         int code = new Cli(settings).Run(
-            ["encode", input, "-o", tmp.File("shards"), "-r", "900", "--profile", "dense", "-c", "4"], stdout, stdout);
+            ["encode", input, "-o", tmp.File("shards"), "-r", "900", "--profile", "dense", "-c", "4"], stdout, stdout, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
         Assert.Contains("cell 4px, 6 bits/cell", stdout.ToString()); // -c flag over profile, bits from profile
     }

@@ -21,7 +21,7 @@ public class SendCalibrateClipboardTests
             string shardDir = tmp.File("shards");
             var stdout = new StringWriter();
 
-            int code = new Cli().Run(["send", input, "-o", shardDir, "-r", "900"], stdout, stdout);
+            int code = new Cli().Run(["send", input, "-o", shardDir, "-r", "900"], stdout, stdout, cancellationToken: TestContext.Current.CancellationToken);
             Assert.Equal(0, code);
             Assert.True(File.Exists(Path.Combine(shardDir, "slideshow.html")));
             Assert.Contains("suppressed by QRSHARD_NO_LAUNCH", stdout.ToString());
@@ -38,7 +38,7 @@ public class SendCalibrateClipboardTests
         using var tmp = new TempDir();
         string calDir = tmp.File("cal");
         var stdout = new StringWriter();
-        int code = new Cli().Run(["calibrate", "--camera", "-o", calDir, "-r", "1080"], stdout, stdout);
+        int code = new Cli().Run(["calibrate", "--camera", "-o", calDir, "-r", "1080"], stdout, stdout, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
         Assert.Contains("--camera", stdout.ToString());
         var probes = Directory.GetFiles(calDir, "*.png");
@@ -51,7 +51,7 @@ public class SendCalibrateClipboardTests
             rotationDegrees: 3, perspective: 0.02, jpegQuality: 0);
 
         var analyzeOut = new StringWriter();
-        code = new Cli().Run(["calibrate", capDir], analyzeOut, analyzeOut);
+        code = new Cli().Run(["calibrate", capDir], analyzeOut, analyzeOut, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
         Assert.Contains("Recommended encode settings", analyzeOut.ToString());
     }

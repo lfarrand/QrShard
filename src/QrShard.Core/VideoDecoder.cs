@@ -1,6 +1,11 @@
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
+using System.Threading.Channels;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace QrShard;
 
@@ -85,6 +90,20 @@ internal sealed class VideoDecoder(
         int totalExamined = 0, totalDecoded = 0;
         bool stoppedEarly = false;
 
+        // Capture frames to a directory so a manual decode can be attempted on error.
+        // Frames are written as uncompressed BMP (no PNG compression overhead) on a background
+        // thread so file I/O never blocks the decode pipeline.
+        string captureDir = Path.Combine(Path.GetTempPath(), $"qrshard-frames-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(captureDir);
+        int savedFrameCount = 0;
+        log($"  frames directory: {captureDir}");
+        var captureChannel = Channel.CreateBounded<CapturedFrame>(new BoundedChannelOptions(4)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+        });
+        var writerTask = Task.Run(() => WriteFramesBackground(captureChannel.Reader, captureDir));
+
         // A re-extractable file source (not live capture) that decodes incomplete can be
         // re-run at a higher extraction rate — the transfer may cycle faster than the frames
         // we sampled. Passes accumulate into the shard set, stopping the moment it completes.
@@ -96,10 +115,29 @@ internal sealed class VideoDecoder(
             if (pass > 0)
                 log($"  set still incomplete — re-extracting at {passFps} fps");
             int shardsBefore = shards.Count;
+
+            IEnumerable<Bitmap> SaveFrames(IEnumerable<Bitmap> source)
+            {
+                foreach (var frame in source)
+                {
+                    int index = Interlocked.Increment(ref savedFrameCount);
+                    try
+                    {
+                        var pixels = frame.Px.AsSpan(0, frame.Width * frame.Height).ToArray();
+                        captureChannel.Writer.TryWrite(new CapturedFrame(pixels, frame.Width, frame.Height, index));
+                    }
+                    catch
+                    {
+                        // Best effort — never let a save failure break the decode pipeline.
+                    }
+                    yield return frame;
+                }
+            }
+
             bool complete = decodeWorkers > 1
-                ? CollectShardsParallel(token => frameSource.Frames(path, passFps, token),
+                ? CollectShardsParallel(token => SaveFrames(frameSource.Frames(path, passFps, token)),
                     shards, seen, successful, log, decodeWorkers, out var passStats)
-                : CollectShards(frameSource.Frames(path, passFps), shards, seen, successful, log, out passStats);
+                : CollectShards(SaveFrames(frameSource.Frames(path, passFps)), shards, seen, successful, log, out passStats);
             totalExamined += passStats.FramesExamined;
             totalDecoded += passStats.FramesDecoded;
             stoppedEarly = passStats.StoppedEarly;
@@ -115,12 +153,36 @@ internal sealed class VideoDecoder(
             }
         }
 
+        captureChannel.Writer.Complete();
+        try { writerTask.GetAwaiter().GetResult(); } catch { }
+
         stats = new VideoDecodeStats(totalExamined, totalDecoded, shards.Count, stoppedEarly);
         log($"  video: examined {stats.FramesExamined} frame(s), fully decoded {stats.FramesDecoded}, " +
             $"collected {stats.ShardsCollected} shard(s){(stats.StoppedEarly ? ", stopped early — set complete" : "")}");
         if (shards.Count == 0)
+        {
+            log($"  captured frames preserved in: {captureDir}");
             throw new ShardDecodeException("No decodable shard images were found in the video.");
-        return assembler.Assemble(shards, outputPath, log, password);
+        }
+
+        bool success = false;
+        try
+        {
+            var result = assembler.Assemble(shards, outputPath, log, password);
+            success = true;
+            return result;
+        }
+        finally
+        {
+            if (success)
+            {
+                try { Directory.Delete(captureDir, recursive: true); } catch { }
+            }
+            else
+            {
+                log($"  captured frames preserved in: {captureDir}");
+            }
+        }
     }
 
     // ---------- Shard collection with dedupe + early stop ----------
@@ -315,13 +377,34 @@ internal sealed class VideoDecoder(
 
     internal static void Accumulate(int[] sum, Bitmap frame)
     {
-        var px = frame.Px;
-        for (int i = 0; i < px.Length; i++)
+        // Flat byte view eliminates per-pixel struct-field access and the i*3 multiply;
+        // the contiguous access pattern lets the SIMD loop (or the JIT auto-vectorizer) run.
+        ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(frame.Px.AsSpan());
+        int n = src.Length;
+        int i = 0;
+        if (Vector.IsHardwareAccelerated && n >= Vector<byte>.Count)
         {
-            int j = i * 3;
-            sum[j] += px[i].R;
-            sum[j + 1] += px[i].G;
-            sum[j + 2] += px[i].B;
+            int intVecLen = Vector<int>.Count;
+            for (; i <= n - Vector<byte>.Count; i += Vector<byte>.Count)
+            {
+                var vb = new Vector<byte>(src.Slice(i));
+                Vector.Widen(vb, out Vector<ushort> lo16, out Vector<ushort> hi16);
+                Vector.Widen(lo16, out Vector<uint> a, out Vector<uint> b);
+                Vector.Widen(hi16, out Vector<uint> c, out Vector<uint> d);
+                AccumulateVector(sum, i, a);
+                AccumulateVector(sum, i + intVecLen, b);
+                AccumulateVector(sum, i + intVecLen * 2, c);
+                AccumulateVector(sum, i + intVecLen * 3, d);
+            }
+        }
+        for (; i < n; i++)
+            sum[i] += src[i];
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void AccumulateVector(int[] arr, int offset, Vector<uint> values)
+        {
+            var current = new Vector<int>(arr, offset);
+            (current + Unsafe.As<Vector<uint>, Vector<int>>(ref values)).CopyTo(arr, offset);
         }
     }
 
@@ -330,13 +413,12 @@ internal sealed class VideoDecoder(
         int pixels = checked(w * h);
         if (count < 1 || sum.Length < checked(pixels * 3))
             throw new ArgumentException("Temporal-average buffer does not match the frame geometry.");
-        var px = new SixLabors.ImageSharp.PixelFormats.Rgb24[pixels];
-        for (int i = 0; i < px.Length; i++)
-        {
-            int j = i * 3;
-            px[i] = new SixLabors.ImageSharp.PixelFormats.Rgb24(
-                (byte)(sum[j] / count), (byte)(sum[j + 1] / count), (byte)(sum[j + 2] / count));
-        }
+        var px = new Rgb24[pixels];
+        // Flat byte view: write R,G,B bytes sequentially — matches Rgb24 memory layout and
+        // avoids per-pixel struct construction. The JIT can auto-vectorize the divide loop.
+        Span<byte> dst = MemoryMarshal.AsBytes(px.AsSpan());
+        for (int i = 0; i < dst.Length; i++)
+            dst[i] = (byte)(sum[i] / count);
         return new Bitmap(px, w, h);
     }
 
@@ -415,9 +497,10 @@ internal sealed class VideoDecoder(
         if (workers == 1)
             return CollectShards(StableFrames(), shards, seen, successful, log, out stats);
 
-        // One pending frame is enough to overlap capture with decode and prevents a 64-worker
-        // configuration from retaining another 128 full RGB frames outside the worker estimate.
-        using var queue = new System.Collections.Concurrent.BlockingCollection<(Bitmap Frame, int Index)>(1);
+        // A small queue smooths out per-frame decode-time jitter so workers don't stall when
+        // one frame takes longer (e.g. camera rectification). Keep it small to limit memory:
+        // each queued item holds one full-resolution RGB frame.
+        using var queue = new System.Collections.Concurrent.BlockingCollection<(Bitmap Frame, int Index)>(4);
         int examined = 0, decodedCount = 0;
         bool stoppedEarly = false;
         object gate = new();
@@ -713,11 +796,98 @@ internal sealed class VideoDecoder(
         }
     }
 
-    private static double MeanAbsDiff(byte[] a, byte[] b)
+    internal static double MeanAbsDiff(byte[] a, byte[] b)
     {
         long sum = 0;
-        for (int i = 0; i < a.Length; i++)
+        int i = 0;
+        if (Vector.IsHardwareAccelerated && a.Length >= Vector<byte>.Count)
+        {
+            // SIMD path: subtract-with-saturation in both directions gives per-lane abs-diff
+            // without sign extension; widen to ushort for a partial horizontal sum that cannot
+            // overflow (255 * CountPerVector fits in ushort for all practical vector widths).
+            for (; i <= a.Length - Vector<byte>.Count; i += Vector<byte>.Count)
+            {
+                var va = new Vector<byte>(a, i);
+                var vb = new Vector<byte>(b, i);
+                var diff = Vector.Max(va, vb) - Vector.Min(va, vb);
+                // Widen to ushort and accumulate — Vector.Dot is not available on byte,
+                // so sum the widened lanes with Vector.Widen + Vector.Dot(ones).
+                Vector.Widen(diff, out Vector<ushort> lo, out Vector<ushort> hi);
+                sum += Vector.Sum(lo) + Vector.Sum(hi);
+            }
+        }
+        for (; i < a.Length; i++)
             sum += Math.Abs(a[i] - b[i]);
         return (double)sum / a.Length;
+    }
+
+    // ---------- Async frame capture (BMP, background I/O) ----------
+
+    private readonly record struct CapturedFrame(Rgb24[] Pixels, int Width, int Height, int Index);
+
+    private static async Task WriteFramesBackground(ChannelReader<CapturedFrame> reader, string directory)
+    {
+        await foreach (var frame in reader.ReadAllAsync())
+        {
+            try
+            {
+                WriteBmpFile(Path.Combine(directory, $"frame-{frame.Index:D6}.bmp"),
+                    frame.Pixels, frame.Width, frame.Height);
+            }
+            catch
+            {
+                // Best effort — never let a save failure break the decode pipeline.
+            }
+        }
+    }
+
+    /// <summary>Writes a 24-bit BMP file directly from an Rgb24 pixel array — no ImageSharp
+    /// encoding overhead. BMP is uncompressed, so the write is essentially a memcpy with a
+    /// 54-byte header; PNG compression would dominate per-frame wall time.</summary>
+    internal static void WriteBmpFile(string path, Rgb24[] pixels, int width, int height)
+    {
+        int rowBytes = width * 3;
+        int padding = (4 - rowBytes % 4) % 4;
+        int stride = rowBytes + padding;
+        int pixelDataSize = stride * height;
+
+        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 65536);
+        using var bw = new BinaryWriter(fs);
+
+        // BITMAPFILEHEADER (14 bytes)
+        bw.Write((byte)'B');
+        bw.Write((byte)'M');
+        bw.Write(54 + pixelDataSize);
+        bw.Write(0);  // reserved
+        bw.Write(54); // offset to pixel data
+
+        // BITMAPINFOHEADER (40 bytes)
+        bw.Write(40);            // header size
+        bw.Write(width);
+        bw.Write(height);        // positive = bottom-up row order
+        bw.Write((short)1);      // planes
+        bw.Write((short)24);     // bits per pixel
+        bw.Write(0);             // compression (BI_RGB)
+        bw.Write(pixelDataSize);
+        bw.Write(0);             // X pixels per meter
+        bw.Write(0);             // Y pixels per meter
+        bw.Write(0);             // colors used
+        bw.Write(0);             // important colors
+
+        // Pixel rows: bottom-to-top, BGR byte order, each row padded to 4-byte alignment.
+        byte[] rowBuf = new byte[stride];
+        for (int y = height - 1; y >= 0; y--)
+        {
+            int srcOff = y * width;
+            for (int x = 0; x < width; x++)
+            {
+                var p = pixels[srcOff + x];
+                int bx = x * 3;
+                rowBuf[bx] = p.B;
+                rowBuf[bx + 1] = p.G;
+                rowBuf[bx + 2] = p.R;
+            }
+            bw.Write(rowBuf, 0, stride);
+        }
     }
 }

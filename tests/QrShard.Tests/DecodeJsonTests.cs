@@ -242,7 +242,7 @@ public class DecodeJsonOutputPathTests
         {
             Environment.CurrentDirectory = work;
             var stdout = new StringWriter();
-            code = new Cli().Run(["decode", shards, "--json"], stdout, new StringWriter());
+            code = new Cli().Run(["decode", shards, "--json"], stdout, new StringWriter(), cancellationToken: TestContext.Current.CancellationToken);
             output = stdout.ToString();
         }
         finally

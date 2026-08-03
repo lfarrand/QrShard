@@ -38,7 +38,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
     public List<RestoredFile> Assemble(List<DecodedShard> shards, string? outputPath, Action<string> log, string? password = null)
     {
         var groups = shards.GroupBy(s => s.Header.FileId).ToList();
-        if (outputPath is not null && groups.Count > 1)
+        if (outputPath is not null && groups.Count > 1 && !Directory.Exists(outputPath))
             throw new ShardDecodeException("The images belong to multiple different files; omit -o or decode them separately.");
 
         // A mixed capture is one logical decode request. Prove every family complete and
@@ -192,6 +192,8 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
             // exposure: it requests 0700 on Unix and has a protected owner-only DACL on Windows.
             archiveTemp = archive ? CreatePrivateTemporaryDirectory("qrshard-") : null;
             string tempDir = archiveTemp?.Path ?? "";
+            if (archiveTemp is not null)
+                log($"  reassembly temp directory: {tempDir}");
             string finalPath = archive ? "" : ResolveOutputPath(first, outputPath);
             // Never stream unverified bytes into the final pathname. In particular, an explicit -o
             // may already contain the user's only good copy: FileMode.Create used to truncate it
@@ -1055,10 +1057,16 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
 
     private static string ResolveOutputPath(ShardHeader first, string? outputPath)
     {
-        // An explicit -o is the user's own instruction and is used as given; only the name
-        // carried inside the image is untrusted.
+        // An explicit -o that points to an existing directory means "put the file inside that
+        // directory" — the user is naming a destination folder, not a file. Combine it with the
+        // sanitised embedded filename so the restore creates a file, not attempts to overwrite
+        // the directory itself (which fails with "Access to the path is denied").
         if (outputPath is not null)
+        {
+            if (Directory.Exists(outputPath))
+                return Path.Combine(outputPath, SafeFileName(first.FileName));
             return outputPath;
+        }
 
         string safe = SafeFileName(first.FileName);
         string outPath = Path.Combine(Environment.CurrentDirectory, safe);

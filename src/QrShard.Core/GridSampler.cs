@@ -125,8 +125,8 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
 
         // Interior cells (the overwhelming majority) index with precomputed flat deltas — no
         // clamping, no per-offset coordinate math; only cells within one pixel of the capture
-        // edge take the clamped path.
-        var deltas = new int[offsets.Length];
+        // edge take the clamped path. The array is cached on DecodeScratch to avoid per-call allocation.
+        var deltas = scratch.Deltas(offsets.Length);
         for (int k = 0; k < offsets.Length; k++)
             deltas[k] = offsets[k].dy * width + offsets[k].dx;
 

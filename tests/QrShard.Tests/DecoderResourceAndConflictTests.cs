@@ -688,7 +688,7 @@ public class DecoderResourceAndConflictTests
         string sameInvocationSession = tmp.File("same-invocation-conflict.qrsession");
         int decodeCode = new Cli().Run(
             ["decode", firstPath, conflictingPath, "--session", sameInvocationSession, "--json"],
-            new StringWriter(), new StringWriter());
+            new StringWriter(), new StringWriter(), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(3, decodeCode);
         using (ISessionTransaction sameInvocation = new SessionStore().Open(sameInvocationSession))
         {
@@ -699,7 +699,7 @@ public class DecoderResourceAndConflictTests
         var jsonOut = new StringWriter();
         int verifyCode = new Cli().Run(
             ["verify", firstPath, conflictingPath, "--session", sessionPath, "--json"],
-            jsonOut, new StringWriter());
+            jsonOut, new StringWriter(), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(3, verifyCode);
         using (JsonDocument report = JsonDocument.Parse(jsonOut.ToString()))
             Assert.Equal(1, report.RootElement.GetProperty("terminalConflicts").GetInt32());
@@ -769,7 +769,7 @@ public class DecoderResourceAndConflictTests
         var verifyOut = new StringWriter();
         var verifyErr = new StringWriter();
         int verifyCode = new Cli(settings).Run(
-            ["verify", firstPath, changedNamePath, "--json"], verifyOut, verifyErr);
+            ["verify", firstPath, changedNamePath, "--json"], verifyOut, verifyErr, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(1, verifyCode);
         Assert.Contains("inconsistent", verifyErr.ToString(), StringComparison.OrdinalIgnoreCase);
 
@@ -778,7 +778,7 @@ public class DecoderResourceAndConflictTests
         var decodeErr = new StringWriter();
         int decodeCode = new Cli(settings).Run(
             ["decode", firstPath, changedNamePath, "--session", sessionPath, "--json"],
-            decodeOut, decodeErr);
+            decodeOut, decodeErr, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(1, decodeCode);
         Assert.Contains("inconsistent", decodeErr.ToString(), StringComparison.OrdinalIgnoreCase);
         Assert.False(File.Exists(sessionPath));

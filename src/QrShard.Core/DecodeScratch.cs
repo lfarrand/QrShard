@@ -106,4 +106,14 @@ internal sealed class DecodeScratch
 
     public byte[] GatheredSecond(int length) =>
         _gatheredSecond is { } b && b.Length >= length ? b : _gatheredSecond = new byte[length];
+
+    // Cached flat-delta array for GridSampler.ReadUniform — avoids allocating on every call.
+    private int[]? _deltas;
+
+    public int[] Deltas(int length)
+    {
+        if (_deltas is null || _deltas.Length < length)
+            _deltas = new int[length];
+        return _deltas;
+    }
 }

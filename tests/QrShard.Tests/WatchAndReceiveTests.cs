@@ -30,15 +30,15 @@ public class WatchAndReceiveTests
             ["decode", watchDir, "--watch", "--session", session, "-o", output], stdout, stdout));
 
         // Captures arrive in two sittings, like a user screenshotting as the images cycle.
-        await Task.Delay(400);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
         foreach (string f in result.Files.Take(result.ImageCount / 2))
             File.Copy(f, Path.Combine(watchDir, Path.GetFileName(f)));
-        await Task.Delay(1500);
+        await Task.Delay(1500, TestContext.Current.CancellationToken);
         Assert.False(watch.IsCompleted); // still incomplete — must keep watching
         foreach (string f in result.Files.Skip(result.ImageCount / 2))
             File.Copy(f, Path.Combine(watchDir, Path.GetFileName(f)));
 
-        int code = await watch.WaitAsync(OrchestrationTimeout);
+        int code = await watch.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.False(File.Exists(session)); // cleaned up on success
@@ -70,7 +70,7 @@ public class WatchAndReceiveTests
         var watch = Task.Run(() => new Cli().Run(
             ["decode", watchDir, "--watch", "-o", output], stdout, stdout));
 
-        await Task.Delay(400);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
         // Everything except the final image arrives intact.
         foreach (string f in result.Files.SkipLast(1))
             File.Copy(f, Path.Combine(watchDir, Path.GetFileName(f)));
@@ -79,13 +79,13 @@ public class WatchAndReceiveTests
         byte[] whole = File.ReadAllBytes(lastSource);
         File.WriteAllBytes(lastDest, whole[..(whole.Length / 2)]);
 
-        await Task.Delay(1500);
+        await Task.Delay(1500, TestContext.Current.CancellationToken);
         Assert.False(watch.IsCompleted); // the set is still short, as it should be
 
         // Now it is written properly, exactly as a re-saved capture would be.
         File.WriteAllBytes(lastDest, whole);
 
-        int code = await watch.WaitAsync(OrchestrationTimeout);
+        int code = await watch.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
         Assert.Equal(content, File.ReadAllBytes(output));
     }
@@ -137,7 +137,7 @@ public class WatchAndReceiveTests
         Exception? failure = null;
         try
         {
-            await stderr.Signal.Task.WaitAsync(OrchestrationTimeout);
+            await stderr.Signal.Task.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
         }
         catch (Exception ex)
         {
@@ -148,7 +148,7 @@ public class WatchAndReceiveTests
             cancellation.Cancel();
             try
             {
-                code = await watch.WaitAsync(OrchestrationTimeout);
+                code = await watch.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
             }
             catch (Exception cleanupFailure)
             {
@@ -200,7 +200,7 @@ public class WatchAndReceiveTests
         if (!OperatingSystem.IsWindows())
             return; // the default-device path only errors on Windows
         var stderr = new StringWriter();
-        int code = new Cli().Run(["receive"], new StringWriter(), stderr);
+        int code = new Cli().Run(["receive"], new StringWriter(), stderr, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(2, code);
         Assert.Contains("--device", stderr.ToString());
         Assert.Contains("list_devices", stderr.ToString());
