@@ -122,8 +122,17 @@ public class WatchAndReceiveTests
         };
 
         string watchDir = tmp.Sub("conflicting-incoming");
-        File.Copy(encodedPath, Path.Combine(watchDir, "a.png"));
-        Render(conflictingHeader, conflictingPayload, layout, Path.Combine(watchDir, "b.png"));
+        string originalPath = Path.Combine(watchDir, "a.png");
+        string conflictingPath = Path.Combine(watchDir, "b.png");
+        File.Copy(encodedPath, originalPath);
+        Render(conflictingHeader, conflictingPayload, layout, conflictingPath);
+
+        // Present both candidates as one settled batch. On a busy runner rendering b.png can take
+        // longer than the production 500 ms settle window; without this, the watcher may decode
+        // the already-settled one-shard a.png, complete the set, and exit before b.png is eligible.
+        DateTime settledWriteTime = DateTime.UtcNow - TimeSpan.FromSeconds(5);
+        File.SetLastWriteTimeUtc(originalPath, settledWriteTime);
+        File.SetLastWriteTimeUtc(conflictingPath, settledWriteTime);
 
         using var cancellation = new CancellationTokenSource();
         var stdout = new StringWriter();
@@ -137,7 +146,13 @@ public class WatchAndReceiveTests
         Exception? failure = null;
         try
         {
-            await stderr.Signal.Task.WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
+            Task first = await Task.WhenAny(stderr.Signal.Task, watch)
+                .WaitAsync(OrchestrationTimeout, TestContext.Current.CancellationToken);
+            if (first == watch)
+            {
+                code = await watch;
+                Assert.Fail($"Watch mode exited with code {code} before reporting the terminal conflict.");
+            }
         }
         catch (Exception ex)
         {
