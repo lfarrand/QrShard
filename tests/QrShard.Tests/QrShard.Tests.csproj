@@ -31,10 +31,6 @@
     <PackageReference Include="Microsoft.Identity.Client" Version="4.87.0" />
     <PackageReference Include="Microsoft.Identity.Client.Extensions.Msal" Version="4.87.0" />
     <PackageReference Include="Microsoft.IdentityModel.Abstractions" Version="8.22.0" />
-    <PackageReference Include="Microsoft.Testing.Extensions.Telemetry" Version="2.3.3" />
-    <PackageReference Include="Microsoft.Testing.Extensions.TrxReport.Abstractions" Version="2.3.3" />
-    <PackageReference Include="Microsoft.Testing.Platform" Version="2.3.3" />
-    <PackageReference Include="Microsoft.Testing.Platform.MSBuild" Version="2.3.3" />
     <PackageReference Include="OpenTelemetry" Version="1.17.0" />
     <PackageReference Include="OpenTelemetry.Api" Version="1.17.0" />
     <PackageReference Include="OpenTelemetry.Api.ProviderBuilderExtensions" Version="1.17.0" />
@@ -48,6 +44,7 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <PackageReference Include="Microsoft.Testing.Extensions.TrxReport" Version="1.9.1" />
     <PackageReference Include="xunit.v3" Version="3.2.2" />
     <PackageReference Include="xunit.v3.assert" Version="3.2.2" />
     <PackageReference Include="xunit.v3.common" Version="3.2.2" />
