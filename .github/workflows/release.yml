@@ -372,7 +372,7 @@ jobs:
             }
           cp "$manifest" "qrshard-${{ matrix.rid }}-$ASSET_LABEL.spdx.json"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.rid }}
           path: |
@@ -410,7 +410,7 @@ jobs:
           export QRSHARD_PACKAGE_VERSION="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard/QrShard.csproj | head -1)"
           tests/verify-package-consumer.sh
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nuget-packages
           path: nupkg/*.nupkg
@@ -531,7 +531,7 @@ jobs:
           }
           cp "$core_manifest" "release-sbom/qrshard-core-$ASSET_LABEL.spdx.json"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-sbom
           path: release-sbom/*.spdx.json
