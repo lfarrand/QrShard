@@ -13,6 +13,11 @@ namespace QrShard.Tests;
 public class VideoDecodeTests
 {
     private static readonly EncodeOptions Fast = new() { Width = 900, Height = 900, CellPx = 3, BitsPerCell = 4 };
+    // Native-AOT release jobs run the full integration suite while four hosted runners build in
+    // parallel. Windows has repeatedly experienced >10 s scheduler stalls there even though the
+    // same orchestration passes in the ordinary CI job. Keep these joins bounded, but allow enough
+    // wall-clock headroom that host starvation is not misreported as a cancellation defect.
+    private static readonly TimeSpan OrchestrationTimeout = TimeSpan.FromMinutes(1);
 
     private static (byte[] Content, List<string> Files) Encode(TempDir tmp, int size = 100_000,
         EncodeOptions? opt = null, int seed = 42)
@@ -227,14 +232,14 @@ public class VideoDecodeTests
             // exposed the old nested-Task.Run/ManualResetEvent wait as a scheduling race before
             // the test reached any of its cancellation or output assertions.
             Task handshake = source.ProducerBlocked.Task;
-            Task first = await Task.WhenAny(handshake, receive, Task.Delay(TimeSpan.FromSeconds(10)));
+            Task first = await Task.WhenAny(handshake, receive, Task.Delay(OrchestrationTimeout));
             if (first == receive)
             {
                 stats = await receive; // propagate an early product failure instead of hiding it as a timeout
                 Assert.Fail("decode completed before the producer reached the simulated stalled camera read");
             }
             Assert.True(first == handshake, "producer never reached the simulated stalled camera read");
-            stats = await receive.WaitAsync(TimeSpan.FromSeconds(10));
+            stats = await receive.WaitAsync(OrchestrationTimeout);
         }
         catch (Exception ex)
         {
@@ -248,7 +253,7 @@ public class VideoDecodeTests
             {
                 // WaitAsync does not stop its underlying task. Bounded-join it after releasing the
                 // fake camera so TempDir cannot normally be disposed while decode still uses it.
-                await receive.WaitAsync(TimeSpan.FromSeconds(10));
+                await receive.WaitAsync(OrchestrationTimeout);
             }
             catch (Exception cleanupFailure)
             {
@@ -287,7 +292,7 @@ public class VideoDecodeTests
             // scheduled on a constrained CI pool. First prove that both frames reached the live
             // pipeline and that the producer is at the cancellation-aware simulated camera read.
             Task handshake = source.ProducerBlocked.Task;
-            Task first = await Task.WhenAny(handshake, receive, Task.Delay(TimeSpan.FromSeconds(10)));
+            Task first = await Task.WhenAny(handshake, receive, Task.Delay(OrchestrationTimeout));
             if (first == receive && !handshake.IsCompletedSuccessfully)
             {
                 observed = await receive;
@@ -297,7 +302,7 @@ public class VideoDecodeTests
             }
             Assert.True(handshake.IsCompletedSuccessfully,
                 "producer never reached the simulated stalled camera read");
-            observed = await receive.WaitAsync(TimeSpan.FromSeconds(10));
+            observed = await receive.WaitAsync(OrchestrationTimeout);
         }
         catch (Exception ex)
         {
@@ -308,7 +313,7 @@ public class VideoDecodeTests
             source.EmergencyRelease.Set();
             try
             {
-                observed ??= await receive.WaitAsync(TimeSpan.FromSeconds(10));
+                observed ??= await receive.WaitAsync(OrchestrationTimeout);
             }
             catch (Exception cleanupFailure)
             {

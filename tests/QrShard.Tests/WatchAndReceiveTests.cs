@@ -8,6 +8,9 @@ namespace QrShard.Tests;
 public class WatchAndReceiveTests
 {
     private static readonly EncodeOptions Fast = new() { Width = 900, Height = 900, CellPx = 3, BitsPerCell = 4 };
+    // Watch tests deliberately exercise real settling/polling and dedicated-thread cancellation.
+    // Keep their joins finite while tolerating long scheduler stalls on busy hosted runners.
+    private static readonly TimeSpan OrchestrationTimeout = TimeSpan.FromMinutes(1);
 
     [Fact]
     public async Task WatchMode_AssemblesWhenCapturesArriveIncrementally()
@@ -35,7 +38,7 @@ public class WatchAndReceiveTests
         foreach (string f in result.Files.Skip(result.ImageCount / 2))
             File.Copy(f, Path.Combine(watchDir, Path.GetFileName(f)));
 
-        int code = await watch.WaitAsync(TimeSpan.FromSeconds(30));
+        int code = await watch.WaitAsync(OrchestrationTimeout);
         Assert.Equal(0, code);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.False(File.Exists(session)); // cleaned up on success
@@ -82,7 +85,7 @@ public class WatchAndReceiveTests
         // Now it is written properly, exactly as a re-saved capture would be.
         File.WriteAllBytes(lastDest, whole);
 
-        int code = await watch.WaitAsync(TimeSpan.FromSeconds(30));
+        int code = await watch.WaitAsync(OrchestrationTimeout);
         Assert.Equal(0, code);
         Assert.Equal(content, File.ReadAllBytes(output));
     }
@@ -134,7 +137,7 @@ public class WatchAndReceiveTests
         Exception? failure = null;
         try
         {
-            await stderr.Signal.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            await stderr.Signal.Task.WaitAsync(OrchestrationTimeout);
         }
         catch (Exception ex)
         {
@@ -145,7 +148,7 @@ public class WatchAndReceiveTests
             cancellation.Cancel();
             try
             {
-                code = await watch.WaitAsync(TimeSpan.FromSeconds(15));
+                code = await watch.WaitAsync(OrchestrationTimeout);
             }
             catch (Exception cleanupFailure)
             {
