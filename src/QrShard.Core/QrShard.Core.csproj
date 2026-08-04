@@ -16,10 +16,10 @@
     <PackageId>QrShard.Core</PackageId>
     <Version>1.7.2</Version>
     <Authors>Lee Farrand</Authors>
-    <Description>Codec library for QrShard: encode any file into dense QR-style images and decode captures (screenshots, photos, or extracted recording frames) back into the original, bit-for-bit (SHA-256 verified). Public API: QrShardCodec.</Description>
+    <Description>Embeddable .NET 10 codec for QrShard screen-transfer images: encode files, decode image paths or bytes, track incremental sessions, recover damaged or missing shards, and publish SHA-256-verified output.</Description>
     <PackageProjectUrl>https://github.com/lfarrand/QrShard</PackageProjectUrl>
     <RepositoryUrl>https://github.com/lfarrand/QrShard</RepositoryUrl>
-    <PackageTags>qr;file-transfer;air-gap;encoding;erasure-coding</PackageTags>
+    <PackageTags>qr;screen-transfer;codec;file-transfer;air-gap;error-correction;erasure-coding;encryption</PackageTags>
     <Copyright>Copyright (c) 2026 Lee Farrand</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <!-- A package-specific readme: the repository README is written for GitHub and its relative
