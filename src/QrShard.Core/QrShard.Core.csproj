@@ -14,7 +14,7 @@
   <!-- Embeddable codec package; the CLI tool ships separately as QrShard.Tool. -->
   <PropertyGroup>
     <PackageId>QrShard.Core</PackageId>
-    <Version>1.7.2</Version>
+    <Version>1.7.3</Version>
     <Authors>Lee Farrand</Authors>
     <Description>Embeddable .NET 10 codec for QrShard screen-transfer images: encode files, decode image paths or bytes, track incremental sessions, recover damaged or missing shards, and publish SHA-256-verified output.</Description>
     <PackageProjectUrl>https://github.com/lfarrand/QrShard</PackageProjectUrl>
