@@ -25,7 +25,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>qrshard</ToolCommandName>
     <PackageId>QrShard.Tool</PackageId>
-    <Version>1.7.2</Version>
+    <Version>1.7.3</Version>
     <Authors>Lee Farrand</Authors>
     <Description>Cross-platform CLI for transferring files and folders through a screen: dense QR-style shards, screenshots/photos/video/live capture, error and erasure recovery, encryption, and SHA-256-verified restore.</Description>
     <PackageProjectUrl>https://github.com/lfarrand/QrShard</PackageProjectUrl>
