@@ -1,93 +1,173 @@
 # QrShard.Core
 
-The embeddable codec behind [QrShard](https://github.com/lfarrand/QrShard): encode any file into
-dense, QR-style images and decode captured image files or in-memory image bytes — screenshots,
-photos, or frames extracted from recordings/cameras — back into the original file, **bit-for-bit,
-verified by SHA-256**. Direct video-file demuxing and live webcam/screen capture belong to the
-`QrShard.Tool` CLI, not this library's public API.
+QrShard.Core is the embeddable .NET codec behind
+[QrShard](https://github.com/lfarrand/QrShard). It encodes files into dense, self-describing
+QR-style images and decodes captured image paths or in-memory image bytes back into verified files.
+A successful decode is checked against the original length and SHA-256 before output is published.
 
-The image format is custom (not QR-standard) and tuned for screen-to-screenshot transfer. Because
-a screenshot is a lossless pixel copy, each image carries far more than a real QR code: from
-~212 KB per image at the robust default, to ~4.9 MB with the Max4K profile, and up to ~6.5 MB at
-8-bit density on a 4K display.
+Use this package when an application owns capture, transport, storage, or UI. Use
+[QrShard.Tool](https://www.nuget.org/packages/QrShard.Tool) for the complete command-line workflows,
+including folder/archive creation, slideshows, video demuxing, live webcam/screen capture, watched
+folders, clipboard capture, calibration, diagnostics, and JSON output.
+
+The image format is purpose-built for high-capacity screen transfer; it is not the QR Code standard.
+Core and Tool are wire-compatible in both directions.
 
 ## Install
 
-```
+```console
 dotnet add package QrShard.Core
 ```
 
-The package targets and requires **.NET 10**.
+The package targets and requires **.NET 10**. It is pure managed code and has no ffmpeg dependency.
 
-Each release is also mirrored to GitHub Packages, but **nuget.org is the supported install
-source** — GitHub Packages requires an access token with `read:packages` to install from, even
-for public repositories.
-
-Beginning with v1.7.0, the exact pre-publication `.nupkg` attached to GitHub Releases has signed
-SLSA provenance and an SPDX 2.2 SBOM attestation; verification instructions are in the repository
-README. Older releases predate these controls. NuGet.org then repository-signs the uploaded
-package, changing its bytes. NuGet clients can verify that separate repository signature, subject
-to platform and client policy.
-
-## Use
+## Quick start
 
 ```csharp
 using QrShard;
 
 var codec = new QrShardCodec();
 
-// Encode a file into shard images.
-var report = codec.EncodeFile("holiday-photos.zip", "out-dir");
-Console.WriteLine($"{report.ImageCount} image(s)");
+var report = codec.EncodeFile(
+    "report.pdf",
+    "report.shards",
+    new QrShardEncodeOptions
+    {
+        RecoveryPercent = 15,
+        EccParity = 16,
+        CameraMode = false,
+        Password = null,
+    });
 
-// Decode captures back into the original file.
-codec.DecodeImages(Directory.GetFiles("captures"), "holiday-photos.zip");
+Console.WriteLine($"Wrote {report.ImageCount} images at {report.Width}x{report.Height}");
+
+Directory.CreateDirectory("restored");
+IReadOnlyList<QrShardDecodedFile> restored = codec.DecodeImages(
+    Directory.GetFiles("captures"),
+    outputPath: "restored",
+    password: null);
+
+var session = new QrShardDecodeSession(password: null, decodeMemoryBudgetMB: 512);
+foreach (string imagePath in Directory.EnumerateFiles("incoming"))
+{
+    QrShardAddResult added = session.AddImage(imagePath);
+    if (!added.Accepted)
+        Console.Error.WriteLine($"{imagePath}: {added.Error}");
+}
+
+foreach (QrShardFileStatus status in session.Status())
+    Console.WriteLine($"{status.FileName}: {status.MissingImageCount} missing");
+
+if (session.IsComplete)
+    session.Assemble("restored");
 ```
 
-The namespace is `QrShard` (the package *id* is `QrShard.Core`), and `QrShardCodec` has instance
-methods — construct it once and reuse it.
+The namespace is `QrShard`; the NuGet package ID is `QrShard.Core`.
 
-For capture that arrives over time, `QrShardDecodeSession` decodes incrementally: feed images
-(paths or in-memory bytes) as they land, ask which are still missing, and assemble the moment the
-set becomes recoverable. Status keeps an exact `MissingImageCount` while bounding the diagnostic
-`MissingImages` prefix to 256 ordinals. Differing CRC-valid copies from the same family make that
-ordinal a terminal erasure; inconsistent family metadata is rejected. Retained valid shards have
-a byte and metadata-aware count ceiling (4,000 decimal MB by default). A lower embedding-specific
-bound can be selected with
-`new QrShardDecodeSession(password: null, decodeMemoryBudgetMB: 512)`; a resource refusal is returned
-in `QrShardAddResult.Error` without changing the session.
+## Public API
 
-Shards are order-independent, duplicate-tolerant and filename-agnostic, and shards belonging to
-different files can share a folder without being confused for one another.
+| Type/member | Purpose |
+|---|---|
+| `QrShardCodec` | Reusable, thread-safe one-shot encode/decode facade |
+| `EncodeFile(...)` | Encode one file as PNG shard images and return geometry/file details |
+| `DecodeImages(...)` | Decode image paths in any order, repair/recover them, and publish verified output |
+| `QrShardEncodeOptions` | Geometry, colour density, ECC, recovery/fountain, camera, encryption, compression, and interleave settings |
+| `QrShardEncodeReport` | Image counts, capacity, dimensions, and written paths |
+| `QrShardDecodedFile` | Original name, resolved output path, and verified length |
+| `QrShardDecodeSession` | Single-consumer incremental decoder for image files or encoded image bytes |
+| `QrShardFileStatus` | Per-file data/parity counts, exact missing count, bounded missing-index sample, and recoverability |
+| `QrShardAddResult` | Whether an image was accepted, new, duplicate, invalid, conflicting, or resource-refused |
+| `QrShardDecodeException` | Actionable failure from decode or assembly |
 
-`DecodeImages` and `QrShardDecodeSession.Assemble` stage output and verify exact length and
-SHA-256. An existing output directory receives ordinary files under their sanitised original names;
-a single-file result is then atomically moved into place. An archive output directory must
-be absent or empty and is never merged; its complete staged tree is published only after every
-entry succeeds. Replacing an existing file carries forward only its nine Unix rwx bits, or its
-Windows DACL and basic attributes. An existing empty archive destination instead carries its full
-Unix directory mode (including setgid/sticky policy bits), or its Windows DACL and basic
-attributes, onto the published root. Use a fresh path when ownership, extended metadata, or
-hard-link identity matters. Archive decode accepts at most 100,000 tar entries, 128 path segments
-per entry, and 200,000 distinct path nodes. Single-file and prepared-archive payloads are capped at
-1.5 GB.
+`QrShardCodec` instances are thread-safe and reusable. `QrShardDecodeSession` is deliberately not
+thread-safe; feed it from one consumer or provide external synchronisation.
 
-## What it handles
+## Encoding options
 
-- **Reed-Solomon** error correction, including errors-and-erasures decoding driven by the colour
-  classifier's own confidence
-- **Cross-shard parity** or **fountain coding** so whole missing images are rebuilt without
-  recapture
-- **Multi-capture fusion** — several photos that each fail on their own combined into one good read
-- **AES-256-GCM** encryption with versioned AAD binding original length, SHA-256, filename, and
-  transformation/archive semantics
-- **Camera capture** — finder patterns, homography, and rectification for photos and handheld video
+`QrShardEncodeOptions` exposes the stable codec settings:
 
-The wire format is fully specified in [SPEC.md](https://github.com/lfarrand/QrShard/blob/main/SPEC.md);
-an independent implementation can be built from it.
+| Property | Default | Supported values/purpose |
+|---|---:|---|
+| `Width`, `Height` | 2160 | 700–16384 pixels per side |
+| `CellPx` | 3 | 1–64; smaller cells increase density and demand cleaner captures |
+| `BitsPerCell` | 4 | 1–8 bits; controls palette size and density |
+| `EccParity` | 16 | Even, 0–64 Reed-Solomon parity bytes per 255-byte codeword |
+| `RecoveryPercent` | 0 | 0–100% extra Cauchy parity images for whole-image loss |
+| `FountainPercent` | 0 | 0–1000% random-linear coded frames; mutually exclusive with recovery parity |
+| `CameraMode` | `false` | Add finder patterns for rotation/perspective-corrected photos |
+| `Password` | `null` | AES-256-GCM payload encryption |
+| `Compress` | `true` | Brotli-compress when a sample indicates it is worthwhile |
+| `Interleave2` | `false` | Spread vertical as well as horizontal damage; requires ECC |
 
-## Licensing note
+Unlike the CLI, Core does not auto-detect a monitor or read CLI `appsettings.json`; the values in
+`QrShardEncodeOptions` are explicit and deterministic. `EncodeFile` encodes one file. Applications
+that need folder or multi-input archive creation should use QrShard.Tool or prepare their own file
+container before encoding.
 
-QrShard.Core is MIT licensed and uses **SixLabors.ImageSharp 4.0.0** under Apache-2.0 for this
-open-source project; copyright (c) Six Labors. ImageSharp remains an ordinary NuGet dependency of
-the Core package rather than a bundled DLL. QrShard's MIT license is included in the package.
+## Incremental and in-memory decode
+
+`QrShardDecodeSession` is the embedding counterpart to the Tool's session/watch workflows:
+
+- `AddImage(path)` decodes and retains one image file.
+- `AddImageBytes(bytes, label)` accepts an encoded image already held in memory.
+- `Status()` reports progress for every shard family seen.
+- `IsComplete` becomes true when every family can be reconstructed, including through parity or
+  fountain frames.
+- `Assemble(outputPath)` stages, verifies, and publishes the restored file or files.
+
+Duplicates are harmless. If two CRC-valid candidates disagree for the same ordinal, that ordinal
+becomes a terminal erasure rather than first/last-wins. Inconsistent family metadata is rejected.
+`MissingImageCount` is exact; `MissingImages` is capped at the first 256 ordinals and
+`MissingImagesTruncated` indicates whether more were omitted.
+
+The default session retention budget is 4,000 decimal MB. The overload taking
+`decodeMemoryBudgetMB` accepts 1–1,000,000 MB and also derives a metadata-aware shard-count ceiling.
+A resource-refused addition returns its reason in `QrShardAddResult.Error` without changing session
+state.
+
+## Recovery and integrity
+
+Core provides the same image codec and reassembly protections as the Tool:
+
+- Reed-Solomon errors-and-erasures correction within each image.
+- Cross-shard Cauchy parity and fountain recovery for missing whole images.
+- Multi-capture fusion for several individually failed captures of the same shard.
+- Finder detection, homography, refinement, and illumination adaptation for camera-mode images.
+- AES-256-GCM encryption with authenticated file/transformation metadata.
+- Per-shard CRCs, family-consistency checks, exact-length validation, and final SHA-256 verification.
+
+Shards are filename-agnostic, order-independent, and duplicate-tolerant. Captures from different
+files may be supplied together; status and output are tracked per shard family.
+
+## Output safety and limits
+
+Ordinary files are written to private staging paths, length/SHA-256 verified, and atomically moved
+into place. An existing output directory receives restored ordinary files under their sanitised
+original names. Archive payloads can be decoded, but their destination must be absent or empty and
+is never merged into an existing tree.
+
+Single-file and prepared-archive payloads are limited to 1.5 GB. Archive decode accepts at most
+100,000 entries, 128 path segments per entry, and 200,000 distinct path nodes. Replacing an
+existing file preserves only Unix rwx mode, or the Windows DACL and basic attributes; use a fresh
+path when ownership, extended metadata, or hard-link identity matters.
+
+## Compatibility and release integrity
+
+The current decoder is tested against fixtures from every released minor wire-format line. Older
+receivers deliberately reject unknown metadata versions and feature flags, so upgrade the receiver
+first or upgrade both ends together.
+
+Beginning with v1.7.0, immutable GitHub releases include signed SLSA provenance and an
+artifact-specific SPDX 2.2 SBOM attestation for the exact pre-publication package. NuGet.org then
+repository-signs the uploaded package. Verification instructions are in the
+[repository README](https://github.com/lfarrand/QrShard#verifying-a-v170-or-later-tagged-release).
+
+Full documentation: <https://github.com/lfarrand/QrShard>
+
+Wire-format specification: <https://github.com/lfarrand/QrShard/blob/main/SPEC.md>
+
+## License
+
+QrShard.Core is MIT licensed and uses SixLabors.ImageSharp 4.0.0 under Apache-2.0 for this
+open-source project. ImageSharp remains a normal NuGet dependency rather than a bundled assembly.
+The QrShard MIT license is included in the package.

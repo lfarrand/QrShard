@@ -27,10 +27,10 @@
     <PackageId>QrShard.Tool</PackageId>
     <Version>1.7.2</Version>
     <Authors>Lee Farrand</Authors>
-    <Description>Transfer any file between machines through the screen: encode to dense QR-style images, capture by screenshot, photo, or recording, and reconstitute bit-for-bit (SHA-256 verified).</Description>
+    <Description>Cross-platform CLI for transferring files and folders through a screen: dense QR-style shards, screenshots/photos/video/live capture, error and erasure recovery, encryption, and SHA-256-verified restore.</Description>
     <PackageProjectUrl>https://github.com/lfarrand/QrShard</PackageProjectUrl>
     <RepositoryUrl>https://github.com/lfarrand/QrShard</RepositoryUrl>
-    <PackageTags>qr;file-transfer;air-gap;encoding</PackageTags>
+    <PackageTags>qr;screen-transfer;file-transfer;air-gap;video;error-correction;encryption</PackageTags>
     <Copyright>Copyright (c) 2026 Lee Farrand</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <!-- A package-specific readme: the repository README is written for GitHub and its relative

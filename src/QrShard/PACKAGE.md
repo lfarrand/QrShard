@@ -1,100 +1,151 @@
-# QrShard
+# QrShard.Tool
 
-Transfer files between machines **through the screen**. QrShard encodes any file or folder into a
-series of dense, QR-style images, which you display on one machine and capture on another — by
-screenshot, phone photo, screen recording, or live webcam — and reconstitutes the original file
-**bit-for-bit, verified by SHA-256**.
+QrShard.Tool transfers files and folders between machines **through the screen**. It encodes data
+into dense, self-describing QR-style images and restores it from screenshots, photos, recordings,
+the Windows clipboard, a live camera, or a captured display. Every completed restore is checked
+against the original length and SHA-256 before it is published.
 
-Useful when there is no network path: locked-down VDI/RDP sessions, air-gapped machines, kiosks, or
-anywhere the clipboard and file sharing are disabled but the screen is visible.
+Use this package when you want the `qrshard` command and complete sender/receiver workflows. For an
+embeddable .NET API that works with image files or in-memory image bytes, use
+[QrShard.Core](https://www.nuget.org/packages/QrShard.Core).
+
+The image format is purpose-built for high-capacity screen transfer; it is not the QR Code standard.
 
 ## Install
 
-```
-dotnet tool install -g QrShard.Tool
-```
-
-That provides the `qrshard` command. Tagged releases also attach Native-AOT single-file binaries
-for win-x64 / linux-x64 / linux-arm64 / osx-arm64, which need no .NET runtime. The tool package
-itself targets and requires **.NET 10**.
-
-Release executables are named `QrShard.exe` on Windows and case-sensitive `QrShard` on Unix. The
-Linux Native-AOT floors are glibc 2.35 (`linux-x64`) and glibc 2.39 (`linux-arm64`). Binary archives
-are built with .NET SDK 10.0.302. Beginning with v1.7.0, GitHub stores signed SLSA provenance and an
-artifact-specific SPDX 2.2 SBOM attestation for their exact release bytes. Each binary SBOM uses
-its RID-specific Native-AOT restore graph; the tool-package SBOM uses the ordinary package graph.
-Releases produced by the current workflow are immutable. Verification instructions are in the
-repository README; older releases predate these controls. These controls are not platform
-signatures: Windows is not Authenticode-signed. The release workflow applies and verifies an ad-hoc
-macOS signature after stripping, but that signature provides neither publisher identity nor
-Developer ID/notarization. `SHA256SUMS` is plaintext but is itself covered by provenance.
-
-Each release is also mirrored to GitHub Packages, but **nuget.org is the supported install
-source** — GitHub Packages requires an access token with `read:packages` to install from, even
-for public repositories.
-
-NuGet.org repository-signs the package after upload, changing its bytes from the pre-publication
-`.nupkg` attached to GitHub Releases. NuGet clients can verify that repository signature separately,
-subject to platform and client policy; the GitHub attestation applies to the GitHub Release copy.
-
-## Use
-
-```
-qrshard encode holiday-photos.zip          # a folder works too, tar-ed automatically
-qrshard decode captures/ -o holiday-photos.zip
+```console
+dotnet tool install --global QrShard.Tool
 ```
 
-Capture each displayed image at 100% zoom, put the captures in a folder in any order, and decode.
-Damaged captures are repaired by error correction, fused from multiple failed photos, or rebuilt
-from parity images; anything unrecoverable is reported by exact part number.
+Update an existing installation with:
 
-Other modes:
-
-```
-qrshard send report.pdf --video            # slideshow you record instead of capturing by hand
-qrshard decode recording.mp4 -o report.pdf # decode straight from a screen recording
-qrshard receive --device "Integrated Camera"   # live decode from a webcam
-qrshard receive --screen                   # decode this machine's own screen, e.g. an RDP window
-qrshard calibrate                          # find the densest settings your capture chain survives
-qrshard decode captures/ --json            # machine-readable result, for scripting
+```console
+dotnet tool update --global QrShard.Tool
 ```
 
-An existing directory passed to `-o` receives decoded ordinary files under their sanitised original
-names. If recording decode fails, QrShard logs and preserves the sampled BMP frames in a temporary
-directory so they can be inspected or decoded manually.
+The tool targets and requires **.NET 10**. Tagged
+[GitHub releases](https://github.com/lfarrand/QrShard/releases) also provide self-contained
+Native-AOT archives for Windows x64, Linux x64, Linux ARM64, and macOS ARM64.
 
-The HTML slideshow is a relative manifest: keep `slideshow.html` beside its shard images and any
-generated PNG sidecars, then use its **Start fullscreen** button. Missing frame files are skipped as
-erasures. `--slideshow apng` makes a single file but refuses a set above 256 MiB of decoded RGB
-frames; use HTML for larger transfers.
+Video-container decoding and live capture require [ffmpeg](https://ffmpeg.org) on a trusted absolute
+`PATH` entry, or an absolute `FfmpegPath` in `appsettings.json`. Animated PNG, GIF, and WebP
+recordings decode natively.
 
-Density ranges from ~212 KB per image at the robust default to ~4.9 MB with the Max4K profile and
-~6.5 MB at 8-bit density on a 4K display, so a 100 MB file fits in 22 Max4K screenshots. Add
-`-R 10` for per-stripe parity, `-p <password>` for AES-256-GCM encryption, or `--camera` to make
-shards decode from photos. Prefer `--password-file` (strict UTF-8) or `--password-stdin` when argv
-exposure matters. Session-backed restores use an owner-only append journal, persist conflicting
-valid copies as terminal erasures, and require an explicit output to be a fresh path.
+## Quick start
 
-Decoded single files are staged, length/SHA-256-verified, and atomically moved into place. Archive
-destinations must be absent or empty; extraction never merges into an existing tree, and the
-complete staged tree is published only after every entry succeeds. Folder archives preserve
-ordinary/empty directories and carry Unix regular-file owner/group/other rwx bits (including
-executable); extraction applies them subject to the receiver's umask and strips
-setuid/setgid/sticky bits. Folder archives also skip reparse-point links, copy hard-linked names as
-independent files, reject non-portable path aliases, and do not promise ownership, ACL, xattr,
-alternate-stream, sparse-file, directory-mode/metadata, or hard-link fidelity.
-Replacing an existing single-file `-o` carries forward only its nine Unix rwx bits, or its Windows
-DACL and basic attributes. An existing empty archive destination instead carries its full Unix
-directory mode (including setgid/sticky policy bits), or its Windows DACL and basic attributes,
-onto the published root. Use a fresh path if ownership, extended metadata, or hard-link identity
-matters. Archives are limited to 100,000 entries and 128 path segments per entry; decode also caps
-the portable path index at 200,000 distinct nodes. Single-file and prepared-archive payloads are
-capped at 1.5 GB.
+On the sending machine:
+
+```console
+qrshard encode report.pdf
+```
+
+Display the generated images at 100% zoom. On the receiving machine, place captures in a folder and
+run:
+
+```console
+qrshard decode captures --out report.pdf
+```
+
+Captures may be renamed, reordered, or duplicated. Damaged cells are repaired when possible, and
+whole missing images can be reconstructed when recovery images were generated.
+
+## Capture workflows
+
+| Workflow | Sender | Receiver |
+|---|---|---|
+| Screenshots | `qrshard encode file.bin` | `qrshard decode captures` |
+| Browser slideshow | `qrshard send file.bin` | Record one cycle, then `qrshard decode recording.mp4` |
+| Phone photos/video | add `--camera` | Decode photos or the phone recording |
+| Live webcam/capture card | `qrshard send file.bin` | `qrshard receive --device "Integrated Camera"` |
+| Capture this computer's display | show the slideshow in an RDP/VM window | `qrshard receive --screen --region x,y,w,h` |
+| Windows clipboard | display individual shards | `qrshard decode --clipboard --session transfer.qrsession` |
+| Captures arriving in a folder | ordinary encode/send | `qrshard decode incoming --watch --session transfer.qrsession` |
+
+`send` is the one-step form of `encode --video --open`. HTML slideshows are relative manifests, so
+keep `slideshow.html` beside its shard images and generated sidecars. `--slideshow apng` creates one
+animated file but refuses sets above 256 MiB of decoded RGB frame data.
+
+If recording decode remains incomplete after automatic higher-frame-rate retries, QrShard preserves
+sampled BMP frames in the logged temporary directory for inspection or manual decoding.
+
+## What the tool can do
+
+- Encode one file directly, one folder, or multiple files/folders as a portable archive.
+- Write lossless PNG, BMP, TGA, QOI, WebP, or TIFF shard images.
+- Auto-size images to the sender's primary monitor, use named profiles, or accept exact geometry.
+- Create HTML or APNG slideshows for screen-recording transfers.
+- Decode ordinary captures, animated images, common video containers, webcam/capture-card streams,
+  screen regions, watched folders, and Windows clipboard images.
+- Resume image-based transfers across sittings with an owner-only session journal.
+- Emit machine-readable JSON for encode, decode, verify, and info workflows.
+- Preview image counts and geometry with `--dry-run` before rendering a large transfer.
+- Diagnose captures with ECC-damage and classification-quality heatmaps, including failed images.
+- Generate and analyse calibration probes for the real display/camera path.
+- Run a built-in self-test or test a chosen file and settings through simulated capture damage.
+
+Run `qrshard --help` for the complete command and option reference.
+
+## Resilience and security
+
+- **Reed-Solomon errors-and-erasures correction** repairs damaged cells within each image.
+- **Cross-shard Cauchy parity** (`--recovery`) rebuilds whole missing images.
+- **Fountain coding** (`--fountain`) creates random-linear video frames; any sufficient full-rank
+  subset reconstructs each stripe.
+- **Multi-capture fusion** combines several individually failed photos of the same shard.
+- **Camera mode** adds finder patterns, rotation/perspective rectification, illumination correction,
+  pose caching, blur rejection, and temporal averaging for photos and handheld video.
+- **Permuted interleaving** (`--interleave2`) spreads vertical as well as horizontal damage across
+  codewords.
+- **AES-256-GCM** protects payloads when a password is supplied. Prefer `--password-file` or
+  `--password-stdin`; command-line passwords may be exposed in shell history and process listings.
+- Per-shard CRCs, family-consistency checks, exact-length checks, and final SHA-256 verification
+  prevent damaged or mixed captures from being silently published. These checks provide content
+  integrity, not sender identity.
+
+## Files, folders, and safe output
+
+Folder and multi-input transfers use a deliberately portable archive subset. Regular files,
+directories, empty directories, and Unix regular-file rwx bits are supported. Links are not
+followed; unsafe or platform-aliasing paths are rejected.
+
+Single-file and prepared-archive payloads are limited to 1.5 GB. Archives are limited to 100,000
+entries, 128 path segments per entry, and 200,000 distinct path nodes during decode.
+
+Restored files are staged privately, checked, and atomically moved into place. Passing an existing
+directory to `--out` places ordinary restored files inside it under sanitised original names.
+Archives are staged as a complete tree and are never merged into a populated destination; the
+destination must be absent or empty.
+
+## Capacity and configuration
+
+At the robust default (2160 px square, 3 px cells, 4 bits per cell), capacity is approximately
+212 KB per image after default ECC. Pixel-perfect 4K captures can reach about 4.9 MB per image with
+the Max4K profile and about 6.5 MB at 8-bit density. Camera mode deliberately trades density for
+photo tolerance.
+
+An optional `appsettings.json` controls encode defaults, named profiles, PNG/Brotli compression,
+encode/decode memory budgets, decode parallelism, live-receiver settings, watch polling, and the
+absolute ffmpeg path. CLI flags override configuration values. See the
+[full configuration reference](https://github.com/lfarrand/QrShard#configuration-appsettingsjson).
+
+## Compatibility and release integrity
+
+The current decoder is tested against fixtures from every released minor wire-format line. Upgrade
+the receiver first, or upgrade both ends together: older receivers deliberately reject features or
+metadata versions they do not understand.
+
+Beginning with v1.7.0, immutable GitHub releases include SHA-256 sums, signed SLSA provenance, and
+artifact-specific SPDX 2.2 SBOM attestations. NuGet.org repository-signs the uploaded package;
+verification details are in the
+[repository README](https://github.com/lfarrand/QrShard#verifying-a-v170-or-later-tagged-release).
+The package is also mirrored to GitHub Packages, but NuGet.org is the supported install source.
 
 Full documentation: <https://github.com/lfarrand/QrShard>
 
-## Licensing note
+Wire-format specification: <https://github.com/lfarrand/QrShard/blob/main/SPEC.md>
 
-QrShard is MIT licensed and uses **SixLabors.ImageSharp 4.0.0** under Apache-2.0 for this
-open-source project; copyright (c) Six Labors. The tool package carries the Apache-2.0 text,
-QrShard's MIT license, and the exact reviewed .NET third-party notices beside the bundled DLLs.
+## License
+
+QrShard is MIT licensed. QrShard.Tool uses SixLabors.ImageSharp 4.0.0 under Apache-2.0 for this
+open-source project. The package carries the project license and reviewed redistribution notices
+beside its bundled dependencies.
