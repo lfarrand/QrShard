@@ -150,7 +150,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.302
 
@@ -394,7 +394,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.302
 
@@ -430,7 +430,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.302
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -619,42 +619,42 @@ jobs:
           }
 
       - name: Attest build provenance for every release file
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release-assets/*
 
       - name: Attest win-x64 SPDX SBOM
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release-assets/qrshard-win-x64.zip
           sbom-path: release-assets/qrshard-win-x64-${{ github.ref_name }}.spdx.json
 
       - name: Attest linux-x64 SPDX SBOM
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release-assets/qrshard-linux-x64.tar.gz
           sbom-path: release-assets/qrshard-linux-x64-${{ github.ref_name }}.spdx.json
 
       - name: Attest linux-arm64 SPDX SBOM
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release-assets/qrshard-linux-arm64.tar.gz
           sbom-path: release-assets/qrshard-linux-arm64-${{ github.ref_name }}.spdx.json
 
       - name: Attest osx-arm64 SPDX SBOM
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release-assets/qrshard-osx-arm64.tar.gz
           sbom-path: release-assets/qrshard-osx-arm64-${{ github.ref_name }}.spdx.json
 
       - name: Attest tool-package SPDX SBOM
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release-assets/QrShard.Tool.*.nupkg
           sbom-path: release-assets/qrshard-tool-${{ github.ref_name }}.spdx.json
 
       - name: Attest core-package SPDX SBOM
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: release-assets/QrShard.Core.*.nupkg
           sbom-path: release-assets/qrshard-core-${{ github.ref_name }}.spdx.json
@@ -731,7 +731,7 @@ jobs:
       id-token: write
       packages: write
     steps:
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.302
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
