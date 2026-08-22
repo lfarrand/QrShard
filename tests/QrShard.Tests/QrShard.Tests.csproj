@@ -37,7 +37,7 @@
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.17.0" />
     <PackageReference Include="OpenTelemetry.PersistentStorage.Abstractions" Version="1.1.1" />
     <PackageReference Include="OpenTelemetry.PersistentStorage.FileSystem" Version="1.1.1" />
-    <PackageReference Include="System.ClientModel" Version="1.14.0" />
+    <PackageReference Include="System.ClientModel" Version="1.15.0" />
     <PackageReference Include="System.Memory.Data" Version="10.0.10" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
     <PackageReference Include="xunit.analyzers" Version="1.27.0">
