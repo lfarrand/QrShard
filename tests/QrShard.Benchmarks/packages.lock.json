@@ -120,9 +120,9 @@
       },
       "Microsoft.Diagnostics.Tracing.TraceEvent": {
         "type": "Direct",
-        "requested": "[3.2.5, )",
-        "resolved": "3.2.5",
-        "contentHash": "dVHew6DC1WpSrG2fUKg8bLvhr5/9mug41MJtcws4fKLJ4V9Kd2610PYg0mFd837YvJwvwWTYQlGBbWvRZHs2mg==",
+        "requested": "[3.2.6, )",
+        "resolved": "3.2.6",
+        "contentHash": "8GhxriLz9/fIjcmC5VuuBMwORVUOAHjdGqxfuxyYVljtpWBhUsAi/L1RpiRgHdeBgNbhbnRhkF8gHtpZF3At8w==",
         "dependencies": {
           "Microsoft.Diagnostics.NETCore.Client": "0.2.510501",
           "System.Reflection.TypeExtensions": "4.7.0"
