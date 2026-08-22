@@ -953,7 +953,7 @@ through ImageSharp with lossless speed-tuned settings.
 
 ## Building and testing
 
-Requires the exact .NET SDK **10.0.302** enforced by `global.json`. Run `dotnet build -c Release`
+Requires the exact .NET SDK **10.0.400** enforced by `global.json`. Run `dotnet build -c Release`
 at the solution root. `./publish.ps1` and `bash ./publish.sh` create self-contained JIT single-file
 builds; tagged Native-AOT assets are built by the release workflow instead.
 
@@ -1005,7 +1005,7 @@ remote tag is peeled and compared with the event commit again before attestation
 and publication. Runs for the same tag are serialized without cancelling the earlier run.
 
 Four read-only matrix jobs on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and macos-15 use the exact
-.NET SDK 10.0.302 to test and Native-AOT publish win-x64, linux-x64, linux-arm64 and osx-arm64, add
+.NET SDK 10.0.400 to test and Native-AOT publish win-x64, linux-x64, linux-arm64 and osx-arm64, add
 redistribution notices, and smoke-test the **exact** `QrShard[.exe]` bytes (tagged version,
 self-test, and a real parity-recovery round trip). Each of those same-host matrix jobs then pins
 Microsoft.Sbom.DotNetTool 4.1.5 and generates the archive's SPDX 2.2 document from the exact
