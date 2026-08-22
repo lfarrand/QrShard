@@ -35,7 +35,9 @@ jobs:
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
         run: |
           git worktree add ../base ${{ github.event.pull_request.base.sha }}
-          dotnet build ../base/src/QrShard/QrShard.csproj -c Release
+          # Base lock files may still pin the previous SDK's ILLink pack. CI sets
+          # RestoreLockedMode; disable it only for this throwaway base build.
+          dotnet build ../base/src/QrShard/QrShard.csproj -c Release -p:RestoreLockedMode=false
           dotnet build src/QrShard/QrShard.csproj -c Release
 
       - name: Compare round-trip times

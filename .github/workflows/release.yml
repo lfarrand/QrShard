@@ -182,7 +182,8 @@ jobs:
         env:
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
         # One packages.lock.json cannot represent four mutually exclusive RID-specific AOT
-        # graphs. The SDK/runtime/compiler packs are version-pinned by global.json/.NET 10.0.10
+        # graphs. The SDK/runtime/compiler packs follow global.json; the notices step
+        # and SBOM checks pick up the Native AOT pack versions from the restore cache.
         # and semantically checked in the per-RID SBOM below; disable locked mode only for this
         # matrix restore while keeping every framework-dependent restore locked. Write the AOT
         # graph under ignored obj/ so this restore can never rewrite the committed portable graph.
@@ -253,13 +254,27 @@ jobs:
           cp LICENSE "$pub/LICENSE"
           cp THIRD-PARTY-NOTICES.md "$pub/THIRD-PARTY-NOTICES.md"
           cp licenses/Apache-2.0.txt "$pub/IMAGESHARP-APACHE-2.0.txt"
-          runtime="$HOME/.nuget/packages/microsoft.netcore.app.runtime.nativeaot.${{ matrix.rid }}/10.0.10"
+          nuget_root="${NUGET_PACKAGES:-$HOME/.nuget/packages}"
+          runtime_root="$nuget_root/microsoft.netcore.app.runtime.nativeaot.${{ matrix.rid }}"
+          runtime="$(find "$runtime_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)"
+          [ -n "$runtime" ] && [ -f "$runtime/LICENSE.TXT" ] || {
+            echo "::error::Native AOT runtime pack not found under $runtime_root"
+            ls -la "$runtime_root" || true
+            exit 1
+          }
           cp "$runtime/LICENSE.TXT" "$pub/DOTNET-LICENSE.txt"
           cp "$runtime/THIRD-PARTY-NOTICES.TXT" "$pub/DOTNET-THIRD-PARTY-NOTICES.txt"
-          aot="$HOME/.nuget/packages/microsoft.dotnet.ilcompiler/10.0.10"
+          aot_root="$nuget_root/microsoft.dotnet.ilcompiler"
+          aot="$(find "$aot_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)"
+          [ -n "$aot" ] || {
+            echo "::error::ILCompiler pack not found under $aot_root"
+            exit 1
+          }
           cmp "$runtime/THIRD-PARTY-NOTICES.TXT" "$aot/THIRD-PARTY-NOTICES.TXT" || {
             cp "$aot/THIRD-PARTY-NOTICES.TXT" "$pub/DOTNET-AOT-THIRD-PARTY-NOTICES.txt";
           }
+          echo "NATIVEAOT_RUNTIME_VERSION=$(basename "$runtime")" >> "$GITHUB_ENV"
+          echo "ILCOMPILER_VERSION=$(basename "$aot")" >> "$GITHUB_ENV"
 
       - name: Smoke-test the exact binary
         shell: bash
@@ -355,7 +370,9 @@ jobs:
 
           jq -e --arg version "$version" \
             --arg runtime "Microsoft.NETCore.App.Runtime.NativeAOT.${{ matrix.rid }}" \
-            --arg compiler "runtime.${{ matrix.rid }}.Microsoft.DotNet.ILCompiler" '
+            --arg compiler "runtime.${{ matrix.rid }}.Microsoft.DotNet.ILCompiler" \
+            --arg runtimeVer "${NATIVEAOT_RUNTIME_VERSION}" \
+            --arg compilerVer "${ILCOMPILER_VERSION}" '
               .spdxVersion == "SPDX-2.2" and
               (.files | length) == 1 and
               ([.packages[]? | select(
@@ -367,9 +384,9 @@ jobs:
               any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.10") and
               any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.10") and
               ([.packages[]? | select(.name | startswith("Microsoft.NETCore.App.Runtime.NativeAOT."))] | length) == 1 and
-              any(.packages[]?; .name == $runtime and .versionInfo == "10.0.10") and
+              any(.packages[]?; .name == $runtime and .versionInfo == $runtimeVer) and
               ([.packages[]? | select(.name | test("^runtime\\..*\\.Microsoft\\.DotNet\\.ILCompiler$"))] | length) == 1 and
-              any(.packages[]?; .name == $compiler and .versionInfo == "10.0.10")
+              any(.packages[]?; .name == $compiler and .versionInfo == $compilerVer)
             ' "$manifest" >/dev/null || {
               echo "::error::${{ matrix.rid }} SBOM has a wrong-RID, stale, or non-production graph"; exit 1;
             }
