@@ -31,4 +31,8 @@ jobs:
       - name: Deep randomized robustness run
         env:
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
-        run: dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release --filter "FullyQualifiedName~FuzzTests" --logger "console;verbosity=minimal"
+        # xunit.v3 on MTP does not accept the VSTest FullyQualifiedName filter. Passing it
+        # matches nothing (exit 5, "Zero tests ran"). Use xunit's class filter instead.
+        run: >
+          dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release
+          -- --filter-class QrShard.Tests.FuzzTests --minimum-expected-tests 1
