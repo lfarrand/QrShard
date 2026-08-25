@@ -38,4 +38,4 @@ jobs:
         run: >
           dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release
           -- --filter-class QrShard.Tests.FuzzTests --minimum-expected-tests 1
-          --output-console-verbosity detailed
+          --output Detailed
