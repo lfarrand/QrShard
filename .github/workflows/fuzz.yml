@@ -15,7 +15,9 @@ concurrency:
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # 20k seeds × 8 sequential facts finished in ~19m locally and exceeded the old 45m
+    # hang cap on ubuntu-24.04 (the first run that actually selected FuzzTests).
+    timeout-minutes: 120
     env:
       QRSHARD_FUZZ_ITERATIONS: '20000'
       DOTNET_NOLOGO: true
@@ -36,3 +38,4 @@ jobs:
         run: >
           dotnet test tests/QrShard.Tests/QrShard.Tests.csproj -c Release
           -- --filter-class QrShard.Tests.FuzzTests --minimum-expected-tests 1
+          --output Detailed
