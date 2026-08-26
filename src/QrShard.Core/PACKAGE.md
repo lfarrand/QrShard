@@ -19,7 +19,8 @@ Core and Tool are wire-compatible in both directions.
 dotnet add package QrShard.Core
 ```
 
-The package targets and requires **.NET 10**. It is pure managed code and has no ffmpeg dependency.
+The package targets and requires **.NET 10**. It is pure managed code, has no ffmpeg dependency,
+and is analyzer-marked Native AOT / trimming compatible (`IsAotCompatible`).
 
 ## Quick start
 

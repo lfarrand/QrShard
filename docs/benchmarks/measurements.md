@@ -1,3 +1,9 @@
+# Benchmark measurements (v1.7.0 snapshot)
+
+Historical table from the **v1.7.0** run at commit `f07a3e9` (2026-08-02; SDK 10.0.302, runtime
+10.0.10). It is a hardware-specific planning snapshot, not a current-release performance claim.
+See the README [Benchmark snapshot](../../README.md#benchmark-snapshot) for machine details.
+
 | Size | Preset | Images | Encode | Decode | Codec MiB/s | Est. manual (3 s/img) | Est. auto (0.5 s/img) |
 |---|---|---:|---:|---:|---:|---:|---:|
 | 1KB | Default | 1 | 13.9 ms | 47.7 ms | 0.016 | 3.06 s | 561.6 ms |

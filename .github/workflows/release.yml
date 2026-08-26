@@ -135,9 +135,10 @@ jobs:
           - os: macos-15
             rid: osx-arm64
             asset: qrshard-osx-arm64.tar.gz
-            # .NET 10.0.10's Apple runtime archive contains stale Clang module-cache
-            # references. Defer dsymutil/strip to the checked step below so MSBuild's
-            # Exec parser cannot turn dsymutil's successful diagnostic into a failure.
+            # The Apple Native AOT pack restored by SDK 10.0.400 (10.0.11) contains
+            # stale Clang module-cache references. Defer dsymutil/strip to the
+            # checked step below so MSBuild's Exec parser cannot turn dsymutil's
+            # successful diagnostic into a failure.
             strip_symbols: "false"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
