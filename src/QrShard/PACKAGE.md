@@ -25,7 +25,10 @@ dotnet tool update --global QrShard.Tool
 
 The tool targets and requires **.NET 10**. Tagged
 [GitHub releases](https://github.com/lfarrand/QrShard/releases) also provide self-contained
-Native-AOT archives for Windows x64, Linux x64, Linux ARM64, and macOS ARM64.
+Native-AOT archives for Windows x64, Linux x64, Linux ARM64, and macOS ARM64. The Linux archives
+require **glibc 2.35** (`linux-x64`) or **glibc 2.39** (`linux-arm64`) and a system ICU
+installation. Windows archives are not Authenticode-signed. macOS archives carry a verified
+ad-hoc signature after symbol stripping; that is not a Developer ID signature or notarization.
 
 Video-container decoding and live capture require [ffmpeg](https://ffmpeg.org) on a trusted absolute
 `PATH` entry, or an absolute `FfmpegPath` in `appsettings.json`. Animated PNG, GIF, and WebP
@@ -125,7 +128,8 @@ photo tolerance.
 
 An optional `appsettings.json` controls encode defaults, named profiles, PNG/Brotli compression,
 encode/decode memory budgets, decode parallelism, live-receiver settings, watch polling, and the
-absolute ffmpeg path. CLI flags override configuration values. See the
+absolute ffmpeg path. CLI flags override configuration values. Fountain coding (`-F`) is not an
+`EncodeDefaults` or profile key. See the
 [full configuration reference](https://github.com/lfarrand/QrShard#configuration-appsettingsjson).
 
 ## Compatibility and release integrity

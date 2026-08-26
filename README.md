@@ -20,6 +20,7 @@ can be AES-256-GCM encrypted end to end.
 **Contents:** [Platforms](#supported-platforms) · [Install](#installing) ·
 [How to use](#how-to-use-it) · [Options](#commands-and-options) ·
 [Workflow tools](#workflow-tools-sessions-watch-verify-heatmap-calibrate) ·
+[Library](#embedding-qrshardcore) ·
 [Configuration](#configuration-appsettingsjson) · [Capacity](#capacity-and-throughput) ·
 [Sample output](#sample-output) · [Formats](#image-formats) · [Resilience](#resilience) ·
 [Camera capture](#camera-capture) ·
@@ -78,14 +79,10 @@ globalization is deliberately not used or bundled.
   a concurrent invocation fails before changing output. An abnormally terminated publisher leaves
   the lock for inspection and verified manual removal rather than guessing that it is stale.
 - **As a library**: `dotnet add package QrShard.Core` — the embeddable codec, wire-compatible with
-  the CLI. `QrShardCodec.EncodeFile` / `DecodeImages` for one-shot use, plus `QrShardDecodeSession`
-  for **incremental** decoding: feed captures (files or in-memory image bytes) as they arrive,
-  query which images are still missing, and assemble the moment the set is recoverable. Its default
-  retained-shard ceiling is 4,000 decimal MB; embeddings can set a smaller explicit bound with
-  `new QrShardDecodeSession(password: null, decodeMemoryBudgetMB: 512)`. A refused addition leaves
-  session state unchanged and reports the resource limit in `QrShardAddResult.Error`.
+  the CLI. See [Embedding QrShard.Core](#embedding-qrshardcore).
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
-  [Building](#building-and-testing) for the ImageSharp license note).
+  [Building](#building-and-testing) for the ImageSharp license note). The exact SDK is
+  **10.0.400** (`global.json`, `rollForward: disable`).
 
 ### Verifying a v1.7.0-or-later tagged release
 
@@ -214,7 +211,7 @@ so the rest of the desktop is never captured or scanned.
 | `qrshard receive [--device d \| --screen] [options]` | Live decode from a webcam — or from THIS machine's screen (`--screen`): put the slideshow in an RDP/VM window and transfer out of locked-down remotes |
 | `qrshard verify <folder\|images...> [--session f] [--json]` | Report set completeness without writing output |
 | `qrshard info <image> [--heatmap out.png] [--quality-heatmap out.png] [--json]` | Inspect/validate one shard; render an ECC damage map or a capture-quality map (works even on a *failed* capture) |
-| `qrshard calibrate [-o dir] [--camera] / calibrate <folder>` | Probe → capture → recommended density settings |
+| `qrshard calibrate [-o dir] [-r res] [--camera] / calibrate <folder>` | Probe → capture → recommended density settings |
 | `qrshard test [<file> [encode opts]]` | Built-in self-test, or round-trip *your* file at *your* settings through simulated screenshots and report the ECC headroom it used |
 | `qrshard --version` | Print the version (also `-v` / `version`) — the same version the package and release binaries carry |
 | `qrshard --help` | Show usage (also `-h` / `help`) |
@@ -389,9 +386,40 @@ folder must be decoded without it or split up.
   simulated screenshot degradation the self-test uses, and report whether it survives and the
   worst-case ECC headroom it consumed — the "will my file at these settings make it?" check the
   fixed-fixture self-test can't answer. (`test` alone still runs the built-in self-test.)
-- **`calibrate`**: writes a ladder of self-describing density probes; capture them exactly like
-  a real transfer and `qrshard calibrate <capturedFolder>` measures what survived, recommending
-  the densest `-c/-b` that decoded with comfortable ECC headroom on *your* screen/capture pair.
+- **`calibrate`**: writes a ladder of self-describing density probes (`-r` sizes them; `--camera`
+  for the photo ladder); capture them exactly like a real transfer and
+  `qrshard calibrate <capturedFolder>` measures what survived, recommending the densest `-c/-b`
+  that decoded with comfortable ECC headroom on *your* screen/capture pair.
+
+## Embedding QrShard.Core
+
+`QrShard.Core` is the embeddable .NET 10 codec. It has no ffmpeg dependency. Applications that own
+capture, transport, or UI use this package; slideshows, video demuxing, live webcam/screen capture,
+watched folders, clipboard capture, calibration, diagnostics, and JSON output stay in
+`QrShard.Tool`.
+
+| Type | Purpose |
+|---|---|
+| `QrShardCodec` | Reusable, thread-safe one-shot encode/decode facade |
+| `EncodeFile(...)` | Encode one file as PNG shard images |
+| `DecodeImages(...)` | Decode image paths in any order and publish verified output |
+| `QrShardEncodeOptions` | Geometry, density, ECC, recovery/fountain, camera, encryption, compression, interleave |
+| `QrShardEncodeReport` | Image counts, capacity, dimensions, written paths |
+| `QrShardDecodedFile` | Original name, resolved output path, verified length |
+| `QrShardDecodeSession` | Single-consumer incremental decoder for image files or in-memory bytes |
+| `QrShardFileStatus` | Per-file counts, exact missing count, bounded missing-index sample, recoverability |
+| `QrShardAddResult` | Accepted / new / duplicate / invalid / conflicting / resource-refused |
+| `QrShardDecodeException` | Actionable decode or assembly failure |
+
+`QrShardCodec` is thread-safe. `QrShardDecodeSession` is not: feed it from one consumer. Unlike the
+CLI, Core does not auto-detect a monitor or read `appsettings.json`; `QrShardEncodeOptions` is
+explicit. The default session retention budget is 4,000 decimal MB
+(`new QrShardDecodeSession(password: null, decodeMemoryBudgetMB: 512)` for a smaller bound). A
+refused addition leaves session state unchanged and reports the limit in `QrShardAddResult.Error`.
+
+The NuGet page [`QrShard.Core`](https://www.nuget.org/packages/QrShard.Core) carries the same
+public-API table plus encode-option defaults, session rules, and the verbatim sample that
+`tests/verify-package-consumer.sh` compiles against the packed package.
 
 ## Configuration (appsettings.json)
 
@@ -419,6 +447,8 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 | `ReceiveDecodeWorkers` | 0–64 | 0 (auto) | Parallel frame-decode workers for the live receiver |
 | `FfmpegPath` | absolute executable path | safe absolute PATH lookup | Pin the ffmpeg executable. Relative/current/application-directory discovery, including physical symlink/junction aliases, is refused; the child receives a restricted PATH |
 | `EncodeProfiles` | `{ "<name>": { …encode-default keys… } }` | (none) | Named encode presets selected with `--profile <name>`; each starts from `EncodeDefaults` and overrides only the keys it names |
+
+Unknown setting names fail at startup. Fountain coding (`-F` / `QrShardEncodeOptions.FountainPercent`) is not an `EncodeDefaults` or profile key.
 
 ### Tuning for a large machine
 
@@ -970,7 +1000,7 @@ workflows are:
 | **Perf gate** | Base and head builds race the same 30 MB round trip; a >30% median regression fails |
 | **Release** | PR/manual runs exercise the complete read-only Native-AOT/package/SBOM candidate path; canonical `v*` tags alone can enter the protected promotion jobs |
 | **Dependency Submission** | Restores the locked graph and submits it to GitHub on `main` and manual runs |
-| **Fuzz** | Weekly, 20 000-seed deep run of the structure-aware fuzz suite: PNG/image decode, metadata/header parsing, crafted recovery geometry, sessions, encrypted blobs, and clipboard DIBs (the image-sized noise target uses a bounded subset) |
+| **Fuzz** | Weekly Monday 04:17 UTC, 20 000 seeds, 120-minute job timeout. Selects `QrShard.Tests.FuzzTests` with xunit's MTP `--filter-class` (VSTest `FullyQualifiedName` filters match nothing on Microsoft.Testing.Platform). Covers PNG/image decode, metadata/header parsing, crafted recovery geometry, sessions, encrypted blobs, and clipboard DIBs (the image-sized noise target uses a bounded subset) |
 
 The ImageSharp package runs a compile-time license-validation target. GitHub does not expose
 ordinary Actions secrets to fork or Dependabot pull requests, so the CI key is stored separately as
@@ -1015,14 +1045,14 @@ graphs. All six SBOMs validate the staged artifact hash and reject stale, test, 
 SBOM-tool components. The four binary manifests also reject wrong-RID graphs; the package
 manifests reject Native-AOT contamination.
 
-The pinned .NET 10.0.10 Apple runtime archive contains debug references to temporary Swift/Clang
-module-cache files. On macOS the workflow therefore defers only the standard `dsymutil` and `strip`
-post-link operations out of the affected MSBuild `Exec` wrapper; the corresponding
-[upstream fix](https://github.com/dotnet/runtime/pull/124266) is not in the pinned targets. Their real
-exit statuses remain fatal, the diagnostic remains visible, and the workflow requires a non-empty
-dSYM whose Mach-O UUID matches the exact stripped binary. It then applies and strictly verifies a
-fresh ad-hoc signature before that binary can be smoke-tested or archived. The Apple OS, Xcode,
-Clang, and `dsymutil` versions are recorded in the job alongside the pinned .NET toolchain.
+The Native AOT Apple runtime pack restored by SDK 10.0.400 (currently 10.0.11) contains debug
+references to temporary Swift/Clang module-cache files. On macOS the workflow therefore defers only
+the standard `dsymutil` and `strip` post-link operations out of the affected MSBuild `Exec` wrapper;
+the corresponding [upstream fix](https://github.com/dotnet/runtime/pull/124266) is not in those
+targets. Their real exit statuses remain fatal, the diagnostic remains visible, and the workflow
+requires a non-empty dSYM whose Mach-O UUID matches the exact stripped binary. It then applies and
+strictly verifies a fresh ad-hoc signature before that binary can be smoke-tested or archived. The
+Apple OS, Xcode, Clang, and `dsymutil` versions are recorded in the job alongside the SDK.
 
 The committed NuGet lock files describe the portable framework-dependent graph used by ordinary
 builds, tests, packaging, and dependency submission. Each Native-AOT matrix restore writes its
@@ -1035,8 +1065,9 @@ configured reviewer must explicitly approve the run; self-review is permitted be
 repository currently has one maintainer, while administrator bypass is disabled. That
 artifact-only, no-checkout job creates signed SLSA provenance for every release file, attaches each
 of the six artifact-specific signed SBOM predicates, and creates one complete draft containing the
-four archives, both packages, six SBOM documents, and `SHA256SUMS`. A downstream no-checkout NuGet
-OIDC job first validates both exact package names and their bounded ZIP structure, then performs a
+four archives, both packages, six SBOM documents, and `SHA256SUMS`. A downstream no-checkout
+NuGet OIDC job pins the 10.0.400 SDK explicitly because it has no checkout and therefore cannot
+read `global.json`. It first validates both exact package names and their bounded ZIP structure, then performs a
 read-only two-registry preflight. Any existing NuGet.org copy must have a valid repository signature
 and be semantically identical apart from that signature; any GitHub Packages copy must be
 byte-identical. Only after **all** existing copies pass does it publish missing immutable versions,
@@ -1089,7 +1120,9 @@ global-tool package. Repository/CI build-validation keys are never committed; wh
 build target requests one, use your own gitignored `sixlabors.lic` or the `SixLaborsLicenseKey`
 environment variable. This is a technical notice, not legal advice.
 
-- `dotnet test` — the xUnit suite. Covers the codec math (CRC vectors, GF(2⁸) field
+- `dotnet test` — Microsoft.Testing.Platform with xunit.v3 MTP v2 (`global.json`
+  `"test": { "runner": "Microsoft.Testing.Platform" }`). Use xunit/MTP filters such as
+  `--filter-class`, not VSTest `--filter`. Covers the codec math (CRC vectors, GF(2⁸) field
   laws, Reed-Solomon incl. errors-and-erasures, interleaving, Cauchy and fountain erasure
   codes), round trips across every density/ECC/format/flag combination, simulated screenshots
   and camera photos, non-truecolor capture shapes, video recordings (duplicates, torn frames,

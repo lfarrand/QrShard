@@ -193,8 +193,8 @@ without its attestation.
 The release executable is `QrShard.exe` on Windows and case-sensitive `QrShard` on Unix.
 The `linux-x64` and `linux-arm64` Native-AOT assets require glibc 2.35 and 2.39 respectively.
 The macOS candidate also requires successful symbol extraction and stripping plus a non-empty dSYM
-whose Mach-O UUID matches the shipped binary. Those operations run directly because the pinned
-.NET 10.0.10 Apple runtime archive contains stale temporary module-cache debug references that its
+whose Mach-O UUID matches the shipped binary. Those operations run directly because the Native AOT Apple runtime pack restored by
+SDK 10.0.400 (currently 10.0.11) contains stale temporary module-cache debug references that its
 MSBuild wrapper misclassifies; an actual `dsymutil`, `strip`, signing, or signature-verification
 failure still stops the release.
 
