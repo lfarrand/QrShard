@@ -27,4 +27,4 @@ Bumps under `tests/QrShard.Tests` (Binder, EnvironmentVariables, Options.Configu
 
 ## ADS restore
 
-Non-required Automatic Dependency Submission `submit-nuget` fails on Linux restore of `QrShard.Recorder.csproj` (`NETSDK1100`). It does not block merge.
+GitHub Automatic Dependency Submission `submit-nuget` restores every csproj on Linux. Display and Recorder keep `<EnableWindowsTargeting>true</EnableWindowsTargeting>` so that restore does not raise NETSDK1100. Do not put that property in `Directory.Build.props`.
