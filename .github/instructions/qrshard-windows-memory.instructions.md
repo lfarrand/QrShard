@@ -28,6 +28,10 @@ Leave HTML `SlideshowWriter` and ffmpeg `receive --screen` as the non-Windows se
 
 Pin `Vortice.Direct3D11` at 3.8.3 on `QrShard.Recorder` only. Provenance is RemoteDisplayCapture `8e8594f7`.
 
+## Linux restore of Windows TFMs
+
+Set `<EnableWindowsTargeting>true</EnableWindowsTargeting>` on Display and Recorder only (not `Directory.Build.props`). GitHub Automatic Dependency Submission restores every csproj on Linux and otherwise fails with NETSDK1100. Do not put `UseWPF` / `net10.0-windows` on `QrShard.slnx`.
+
 ## Documentation fence
 
 Describe Display/Recorder as repository hosts plus tagged `qrshard-display-win-x64.zip` / `qrshard-recorder-win-x64.zip` assets. They are not NuGet packages and not inside Native-AOT CLI archives. Session PhotoFusion is shipped from 1.7.6; **1.7.5** skipped the in-process session path. Do not launch `QrShard.Display.exe` in CI (`MessageBox` hangs).
