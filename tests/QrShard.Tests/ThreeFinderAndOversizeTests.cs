@@ -81,6 +81,68 @@ public class ThreeFinderAndOversizeTests
             Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y));
     }
 
+    [Fact]
+    public void AnExtraClusterNoLongerDisablesThreeFinderReconstruction()
+    {
+        // One occluded finder plus a nearby extra 1:1:3:1:1 cluster used to take the four-finder
+        // path and fail closed: the 4-tuple is implausibly tight, and ThreeFinderQuad never ran.
+        var quad = new QuadSelector().ChooseQuad([
+            At(100, 100, 10), At(900, 100, 10), At(100, 900, 10),
+            At(110, 100, 10)]);
+
+        Assert.NotNull(quad);
+        Assert.Contains(quad.Points, p => Math.Abs(p.X - 900) < 1e-6 && Math.Abs(p.Y - 900) < 1e-6);
+    }
+
+    [Fact]
+    public void AModuleMismatchedExtraFallsBackToTheBestThreeSubset()
+    {
+        // The extra's module fails the 4-tuple 2.0 bound (and the tighter 1.02 three-finder bound
+        // when paired with any real finder), so only the three agreeing finders reconstruct.
+        var quad = new QuadSelector().ChooseQuad([
+            At(100, 100, 10), At(900, 100, 10), At(100, 900, 10),
+            At(500, 400, 25)]);
+
+        Assert.NotNull(quad);
+        Assert.Contains(quad.Points, p => Math.Abs(p.X - 900) < 1e-6 && Math.Abs(p.Y - 900) < 1e-6);
+    }
+
+    [Fact]
+    public void TwoExtrasStillReconstructFromTheBestThreeSubset()
+    {
+        var quad = new QuadSelector().ChooseQuad([
+            At(100, 100, 10), At(900, 100, 10), At(100, 900, 10),
+            At(110, 100, 10), At(100, 110, 10)]);
+
+        Assert.NotNull(quad);
+        Assert.Contains(quad.Points, p => Math.Abs(p.X - 900) < 1e-6 && Math.Abs(p.Y - 900) < 1e-6);
+    }
+
+    [Fact]
+    public void AFourCornerLockRanksAboveALargerThreeFinderReconstruction()
+    {
+        // The decoy sits on the top-edge line, so every 4-tuple that includes it fails convexity
+        // or the opposite-edge check. Completing the L of (TL, BL, decoy) would invent a much
+        // larger parallelogram; a successful 4-corner lock must still win.
+        var quad = new QuadSelector().ChooseQuad([
+            At(100, 100, 10), At(900, 100, 10), At(900, 900, 10), At(100, 900, 10),
+            At(2500, 100, 10)]);
+
+        Assert.NotNull(quad);
+        Assert.Contains(quad.Points, p => Math.Abs(p.X - 100) < 1e-6 && Math.Abs(p.Y - 100) < 1e-6);
+        Assert.Contains(quad.Points, p => Math.Abs(p.X - 900) < 1e-6 && Math.Abs(p.Y - 100) < 1e-6);
+        Assert.Contains(quad.Points, p => Math.Abs(p.X - 900) < 1e-6 && Math.Abs(p.Y - 900) < 1e-6);
+        Assert.Contains(quad.Points, p => Math.Abs(p.X - 100) < 1e-6 && Math.Abs(p.Y - 900) < 1e-6);
+        Assert.DoesNotContain(quad.Points, p => Math.Abs(p.X - 2500) < 1);
+    }
+
+    [Fact]
+    public void FourCollinearClustersStillReturnNull()
+    {
+        Assert.Null(new QuadSelector().ChooseQuad([
+            At(100, 100, 10), At(300, 100, 10), At(500, 100, 10), At(700, 100, 10)]));
+    }
+
     /// <summary>Records whether the quad selector was consulted at all.</summary>
     private sealed class SpySelector : IQuadSelector
     {

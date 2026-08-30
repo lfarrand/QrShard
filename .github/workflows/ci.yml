@@ -39,7 +39,12 @@ jobs:
         env:
           # Scoped to compilation: third-party report/checkout actions never receive it.
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
-        run: dotnet build -c Release -warnaserror
+        run: dotnet build QrShard.slnx -c Release -warnaserror
+
+      # WPF + DXGI sidecars are net10.0-windows; Linux/macOS SDK builds cannot compile them.
+      - name: Build Windows sidecars
+        if: runner.os == 'Windows'
+        run: dotnet build QrShard.Windows.slnx -c Release -warnaserror
 
       - name: Test
         run: >

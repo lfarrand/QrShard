@@ -18,7 +18,9 @@ and rebuilt; multiple failed photos of the same image can be *fused* into a good
 can be AES-256-GCM encrypted end to end.
 
 **Contents:** [Platforms](#supported-platforms) · [Install](#installing) ·
-[How to use](#how-to-use-it) · [Options](#commands-and-options) ·
+[How to use](#how-to-use-it) ·
+[Windows hosts](#windows-display-and-recorder-from-source) ·
+[Options](#commands-and-options) ·
 [Workflow tools](#workflow-tools-sessions-watch-verify-heatmap-calibrate) ·
 [Library](#embedding-qrshardcore) ·
 [Configuration](#configuration-appsettingsjson) · [Capacity](#capacity-and-throughput) ·
@@ -37,7 +39,7 @@ cross-platform construction of AES-GCM associated data.
 
 | Target | Current CI/release evidence | Monitor auto-detection (`-r auto`) | Benchmark machine spec |
 |---|---|---|---|
-| Windows x64 (`windows-2025`) | build/test + interop + `win-x64` Native-AOT release smoke | `EnumDisplaySettings` physical pixels | WMI |
+| Windows x64 (`windows-2025`) | build/test + interop + `win-x64` Native-AOT CLI smoke + Display/Recorder zip publish | `EnumDisplaySettings` physical pixels | WMI |
 | Linux x64 (`ubuntu-22.04`) | build/test + interop + `linux-x64` Native-AOT release smoke | `xrandr` on X11/XWayland; headless fallback | OS + .NET + cores only |
 | Linux arm64 (`ubuntu-24.04-arm`) | build/test + interop + `linux-arm64` Native-AOT release smoke | `xrandr` on X11/XWayland; headless fallback | OS + .NET + cores only |
 | macOS arm64 (`macos-15`) | build/test + interop + `osx-arm64` Native-AOT release smoke | CoreGraphics Retina pixel dimensions | OS + .NET + cores only |
@@ -47,6 +49,21 @@ cross-platform construction of AES-GCM associated data.
 Hosted runners do **not** exercise a physical monitor, webcam, capture card, real Retina/DPI
 scaling, or a real X11 desktop. Treat live capture and display auto-detection as implemented but
 hardware-dependent; run `qrshard calibrate` on the actual sender/receiver setup.
+
+The HTML slideshow (`--slideshow` / `qrshard send`) and `receive --screen` (ffmpeg **gdigrab** on
+Windows, not DXGI) are the cross-platform sender and live-capture path. Pixel-perfect Windows
+present and a lossless compositor dump live in separate hosts:
+
+| Surface | Where it lives | Who builds it | Who does not |
+|---|---|---|---|
+| `qrshard` CLI + Core | `QrShard.slnx`, `net10.0` | Every CI OS | — |
+| `QrShard.Windows.Logic` | `QrShard.slnx`, `net10.0` | Every CI OS (parse / TIFF / termination tests) | — |
+| `QrShard.Display`, `QrShard.Recorder` | `QrShard.Windows.slnx`, `net10.0-windows` | Windows CI, `release.yml` `windows-hosts`, and a local Windows Desktop SDK | Linux CI, macOS CI, Native-AOT CLI jobs, nuget.org `QrShard.Tool` / `QrShard.Core` |
+
+Hosted Windows CI compiles the sidecars; it does **not** prove real DXGI, HDR, or 1:1 DPI. Those
+hosts ship in the repository. From v1.7.6, tagged GitHub Releases also attach self-contained
+`qrshard-display-win-x64.zip` and `qrshard-recorder-win-x64.zip`. They are not in
+`dotnet tool install`, not inside tagged Native-AOT CLI archives, and not on nuget.org.
 
 Video decoding and the live receiver additionally need [ffmpeg](https://ffmpeg.org) on an absolute,
 trusted `PATH` entry (or pinned with `FfmpegPath`)
@@ -63,12 +80,15 @@ globalization is deliberately not used or bundled.
 
 - **dotnet tool**: `dotnet tool install -g QrShard.Tool` → the `qrshard` command (needs the
   .NET 10 runtime).
-- **Standalone binaries**: tagged releases attach Native-AOT single-file binaries for
+- **Standalone binaries**: tagged releases attach Native-AOT single-file CLI binaries for
   win-x64 / linux-x64 / linux-arm64 / osx-arm64 — no .NET install needed (see the Linux glibc
   floors above). The executable is named `QrShard.exe` on Windows and case-sensitive `QrShard`
-  on Unix. Beginning with v1.7.0, GitHub stores signed SLSA build-provenance and SPDX 2.2 SBOM
-  attestations for the archives and release packages. These attestations authenticate the exact
-  GitHub Release bytes; they are not platform code signatures. Windows is not Authenticode-signed.
+  on Unix. Beginning with v1.7.6 the same GitHub Release also attaches self-contained win-x64
+  zips `qrshard-display-win-x64.zip` and `qrshard-recorder-win-x64.zip` (Windows Desktop runtime
+  bundled; not Native AOT; not Authenticode-signed). Beginning with v1.7.0, GitHub stores signed
+  SLSA build-provenance and SPDX 2.2 SBOM attestations for the archives and release packages.
+  These attestations authenticate the exact GitHub Release bytes; they are not platform code
+  signatures. Windows is not Authenticode-signed.
   The release workflow applies and verifies an ad-hoc macOS signature after stripping, but does not
   provide a Developer ID signature, notarization, or publisher identity.
 - **Local single-file publish**: `./publish.ps1` (or `.sh`) creates self-contained, single-file
@@ -83,6 +103,11 @@ globalization is deliberately not used or bundled.
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
   [Building](#building-and-testing) for the ImageSharp license note). The exact SDK is
   **10.0.400** (`global.json`, `rollForward: disable`).
+- **Windows 1:1 hosts**: download `qrshard-display-win-x64.zip` / `qrshard-recorder-win-x64.zip`
+  from a v1.7.6-or-later GitHub Release, or `dotnet build QrShard.Windows.slnx -c Release` on a
+  machine with the **Windows Desktop SDK** (WPF + WinForms). See
+  [Windows Display and Recorder](#windows-display-and-recorder-from-source). `UseWPF` /
+  `net10.0-windows` stay off `QrShard.slnx` so Linux CI can build.
 
 ### Verifying a v1.7.0-or-later tagged release
 
@@ -110,8 +135,9 @@ gh release verify-asset "$tag" "$asset" --repo lfarrand/QrShard
 The first command verifies SLSA provenance; the second verifies the artifact-specific SPDX
 document and its staged file hash. Each Native-AOT archive has its own RID-specific restored graph,
 including that RID's Native-AOT runtime/compiler packs; each `.nupkg` has a separate ordinary
-framework-dependent package graph. The third command verifies the asset digest and its association
-with the immutable GitHub Release. `SHA256SUMS` and the six standalone SBOM JSON files have
+framework-dependent package graph. Each Windows host zip has its own self-contained Desktop
+runtime graph. The third command verifies the asset digest and its association
+with the immutable GitHub Release. `SHA256SUMS` and the eight standalone SBOM JSON files have
 provenance and immutable-release coverage, but are not themselves subjects of an SBOM predicate.
 `SHA256SUMS` remains a plaintext convenience index, but its bytes and every listed release file are
 also covered by provenance attestations. Releases produced by the current workflow, beginning with
@@ -201,6 +227,50 @@ of a locked-down remote: run the slideshow inside the RDP or VM window and decod
 screen. Narrow it to just that window with `--region x,y,w,h` (e.g. `--region 100,80,1920,1080`)
 so the rest of the desktop is never captured or scanned.
 
+### Windows Display and Recorder (from source)
+
+These are **not** `qrshard` verbs. The HTML/`--slideshow` player and `receive --screen` (ffmpeg
+gdigrab) stay the cross-platform path. When you need pixel-perfect present on a nominated monitor,
+or a lossless dump of every compositor frame (missed-frame counts and optional HDR float TIFF),
+build `QrShard.Windows.slnx` on a Windows Desktop SDK, or download the tagged
+`qrshard-display-win-x64.zip` / `qrshard-recorder-win-x64.zip` assets. The hosts are not in the
+NuGet packages and not inside the Native-AOT CLI archives.
+
+Typical lossless chain: `qrshard encode` → `QrShard.Display` 1:1 → `QrShard.Recorder` dump →
+`qrshard decode`. Display and Recorder do not reference `QrShard.Core` and do not decode shards.
+They are the RemoteDisplayCapture tools (commit `8e8594f7`), absorbed so that repo can be archived.
+
+```
+QrShard.Display <image-folder> [frames-per-second] [memory-cap] [once]
+QrShard.Recorder <output-folder>
+```
+
+`once` may appear anywhere among Display's arguments. Extra Recorder argv after the output folder
+is ignored.
+
+| Host | Argv | What it does |
+|---|---|---|
+| `QrShard.Display` | folder; optional fps (default **0.5**); optional memory-cap (`2`, `2GB`, `512MB`; a bare number is GiB; default **2 GiB**); optional `once` | WPF, never scaled. jpg/jpeg/png/bmp/gif only (no tiff/webp). Slideshow at ≤5 fps; flipbook above that (pre-decode, max 1000 fps; the cap refuses rather than shrinks). `once` holds `TerminationColor`. Esc / Space / Left / Right / Up / Down. |
+| `QrShard.Recorder` | output folder only | DXGI Desktop Duplication of `CaptureScreen`. Writes `yyyyMMdd-N.png` / `.tif` / `.bmp`. Reports missed frames. Stops on a uniform `TerminationColor` (tolerance in `App.config`) or Ctrl+C. `HdrCapture=true` stores 32-bit float scRGB TIFF. |
+
+**Display** (`src/QrShard.Display/appsettings.json`, copied beside the exe):
+
+| Key | Meaning |
+|---|---|
+| `BorderColor` | Letterbox around images smaller than the monitor |
+| `TerminationColor` | Full-screen colour after `once` (keep in sync with Recorder) |
+| `DisplayScreen` | `0` = primary; `1..N` = detected screen |
+
+**Recorder** (`src/QrShard.Recorder/App.config`):
+
+| Key | Meaning |
+|---|---|
+| `TerminationColor` | Stop when the screen is that uniform colour |
+| `TerminationTolerance` | Per-channel slack 0–255 (default 30) |
+| `HdrCapture` | `true` → float TIFF; keep termination black |
+| `CaptureScreen` | `0` = primary; `1..N` = detected screen |
+| `OutputFormat` | `png` (default), `tiff`, or `bmp` |
+
 ## Commands and options
 
 | Command | Description |
@@ -215,6 +285,9 @@ so the rest of the desktop is never captured or scanned.
 | `qrshard test [<file> [encode opts]]` | Built-in self-test, or round-trip *your* file at *your* settings through simulated screenshots and report the ECC headroom it used |
 | `qrshard --version` | Print the version (also `-v` / `version`) — the same version the package and release binaries carry |
 | `qrshard --help` | Show usage (also `-h` / `help`) |
+
+There is no `qrshard display` or `qrshard record`. Those are separate Windows executables. See
+[Windows Display and Recorder](#windows-display-and-recorder-from-source).
 
 ### `encode` options
 
@@ -406,7 +479,7 @@ watched folders, clipboard capture, calibration, diagnostics, and JSON output st
 | `QrShardEncodeOptions` | Geometry, density, ECC, recovery/fountain, camera, encryption, compression, interleave |
 | `QrShardEncodeReport` | Image counts, capacity, dimensions, written paths |
 | `QrShardDecodedFile` | Original name, resolved output path, verified length |
-| `QrShardDecodeSession` | Single-consumer incremental decoder for image files or in-memory bytes |
+| `QrShardDecodeSession` | Single-consumer incremental decoder. Retains failed ECC grids and runs `PhotoFusion.Fuse` once two or more failures are kept (same salvage as folder `DecodeImages`). Signatures are unchanged. nuget.org `QrShard.Core` **1.7.5** skipped that fusion |
 | `QrShardFileStatus` | Per-file counts, exact missing count, bounded missing-index sample, recoverability |
 | `QrShardAddResult` | Accepted / new / duplicate / invalid / conflicting / resource-refused |
 | `QrShardDecodeException` | Actionable decode or assembly failure |
@@ -414,8 +487,11 @@ watched folders, clipboard capture, calibration, diagnostics, and JSON output st
 `QrShardCodec` is thread-safe. `QrShardDecodeSession` is not: feed it from one consumer. Unlike the
 CLI, Core does not auto-detect a monitor or read `appsettings.json`; `QrShardEncodeOptions` is
 explicit. The default session retention budget is 4,000 decimal MB
-(`new QrShardDecodeSession(password: null, decodeMemoryBudgetMB: 512)` for a smaller bound). A
-refused addition leaves session state unchanged and reports the limit in `QrShardAddResult.Error`.
+(`new QrShardDecodeSession(password: null, decodeMemoryBudgetMB: 512)` for a smaller bound) and
+covers retained successful shards and fusion salvage. A refused addition leaves session state
+unchanged and reports the limit in `QrShardAddResult.Error`. CLI folder decode and `--session`
+already fused through `CollectShards` on 1.7.5; the in-process session is the path that skipped
+fusion on nuget.org 1.7.5.
 
 The NuGet page [`QrShard.Core`](https://www.nuget.org/packages/QrShard.Core) carries the same
 public-API table plus encode-option defaults, session rules, and the verbatim sample that
@@ -501,9 +577,9 @@ silently produces the wrong bytes. So:
 > **Upgrade the receiver first, or upgrade both ends together.** A sender on 1.6.0 **or newer**
 > talking to a receiver on 1.5.x produces images the receiver cannot read.
 
-Header *flags* are a separate extensibility mechanism: a new feature need not change the metadata
-layout version, but an older reader still rejects a set that uses a flag it does not know. That is
-fail-safe feature negotiation, not reverse compatibility.
+Header *flags* signal features independently of the version nibble, but the one-byte flag field
+is exhausted: all eight bits are assigned. A future capability that is not a valid combination of
+those bits requires a new metadata or header version. Unknown flag bits remain rejected (fail-safe).
 
 ## Capacity and throughput
 
@@ -657,7 +733,9 @@ Six independent layers, from within-cell to whole-transfer:
 3. **Multi-capture fusion**: several photos of the same shard that each fail on their own are
    combined — per-codeword selection with a majority vote from three captures up; with exactly
    two, the spatial clusters where the captures disagree are hypothesis-tested (glare moves
-   between shots; the payload CRC gates the answer).
+   between shots; the payload CRC gates the answer). Folder decode and CLI `--session` have
+   done this since 1.7.5. **1.7.6** also fuses on `QrShardDecodeSession`; nuget.org
+   `QrShard.Core` 1.7.5 does not.
 4. **Cross-shard parity** (`--recovery`) or **fountain coding** (`--fountain`): whole missing
    images are rebuilt without recapture. Parity is a systematic Cauchy erasure code — any *S*
    of the stripe's *S+P* images reconstruct it. Fountain frames are random linear combinations
@@ -980,25 +1058,37 @@ through ImageSharp with lossless speed-tuned settings.
   `info --heatmap` to see where a problem capture is actually damaged.
 - Rotation/perspective needs `--camera` shards; the default screenshot profile assumes an
   axis-aligned capture. For recordings, `-F 100` fountain coding makes lost frames irrelevant.
+- Pixel-perfect Windows chain: encode a PNG folder → `QrShard.Display` at 1:1 → `QrShard.Recorder`
+  lossless dump → `qrshard decode`. HTML slideshows **scale** (`object-fit: contain`); Display
+  never does. On other OS, or without the Desktop SDK: HTML slideshow + ffmpeg `receive --screen`.
 
 ## Building and testing
 
-Requires the exact .NET SDK **10.0.400** enforced by `global.json`. Run `dotnet build -c Release`
-at the solution root. `./publish.ps1` and `bash ./publish.sh` create self-contained JIT single-file
-builds; tagged Native-AOT assets are built by the release workflow instead.
+Requires the exact .NET SDK **10.0.400** enforced by `global.json`.
+
+| Solution | TFM | Projects | Command | Who can run it |
+|---|---|---|---|---|
+| `QrShard.slnx` | `net10.0` | Core, CLI, `Windows.Logic`, tests, benches | `dotnet build -c Release` / `dotnet test tests/QrShard.Tests/QrShard.Tests.csproj` | Linux, macOS, Windows |
+| `QrShard.Windows.slnx` | `net10.0-windows` on the hosts; Logic stays `net10.0` | Logic, Display, Recorder | `dotnet build QrShard.Windows.slnx -c Release` | Windows Desktop SDK only |
+
+`dotnet build` at the repository root builds `QrShard.slnx` only. A Linux build compiles Logic and
+runs its tests; it cannot compile Display or Recorder. Do not add `UseWPF` to the main slnx.
+
+`./publish.ps1` and `bash ./publish.sh` create self-contained JIT single-file CLI builds; tagged
+Native-AOT CLI assets and the two Windows host zips are built by the release workflow instead.
 
 The repository's build, security-analysis, dependency, release-candidate, and scheduled assurance
 workflows are:
 
 | Workflow | What it guards |
 |---|---|
-| **CI** | Build + the full suite on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and macos-15 — every platform a release binary is published for. Each job renders totals, a per-class breakdown and the slowest tests into the run summary |
+| **CI** | Build + the full suite on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and macos-15 — every platform a CLI release binary is published for. The Windows job also `dotnet build QrShard.Windows.slnx -c Release -warnaserror`. Linux and macOS jobs do not. Interop / Package stay CLI-only. Tagged Release also publishes Display/Recorder zips. Each job renders totals, a per-class breakdown and the slowest tests into the run summary |
 | **CodeQL** | Production C# and GitHub Actions analysis on every PR/main push, weekly, and on manual dispatch; C# uses the default remote model plus hostile local-file contents (the precise trust boundary is documented in `SECURITY.md`) |
 | **Dependency Review** | Rejects a pull request that introduces a dependency with a low-or-higher known vulnerability |
 | **Interop** | Four encoders x four decoders: shards encoded on each OS/arch must decode on every other, forcing parity reconstruction (where the x64 and arm64 GF(2⁸) paths could disagree) and covering the encrypted path |
 | **Package** | Packs both NuGet packages and consumes them from *outside* the repo — compiles the readme's own code sample against the packed package, round-trips through the public API, and installs the dotnet tool |
 | **Perf gate** | Base and head builds race the same 30 MB round trip; a >30% median regression fails |
-| **Release** | PR/manual runs exercise the complete read-only Native-AOT/package/SBOM candidate path; canonical `v*` tags alone can enter the protected promotion jobs |
+| **Release** | PR/manual runs exercise the complete read-only Native-AOT/package/SBOM/`windows-hosts` candidate path; canonical `v*` tags alone can enter the protected promotion jobs |
 | **Dependency Submission** | Restores the locked graph and submits it to GitHub on `main` and manual runs |
 | **Fuzz** | Weekly Monday 04:17 UTC, 20 000 seeds, 120-minute job timeout. Selects `QrShard.Tests.FuzzTests` with xunit's MTP `--filter-class` (VSTest `FullyQualifiedName` filters match nothing on Microsoft.Testing.Platform). Covers PNG/image decode, metadata/header parsing, crafted recovery geometry, sessions, encrypted blobs, and clipboard DIBs (the image-sized noise target uses a bounded subset) |
 
@@ -1026,7 +1116,7 @@ state rather than immutable files; re-verify them after a repository transfer or
 
 Tagged releases are stable-only: preflight requires canonical `vMAJOR.MINOR.PATCH` tags (so NuGet
 normalization cannot disguise an occupied version), requires the tag commit to be on `main`,
-requires the tag version to match both project versions, and fails closed unless the live `release` environment has
+requires the tag version to match the CLI, Core, Display, Recorder, and Windows.Logic project versions, and fails closed unless the live `release` environment has
 a required reviewer and exactly one `v*` deployment tag policy, and the repository has the exact
 tag update/deletion rules and ref pattern described above. GitHub deliberately hides a ruleset's
 bypass actors from the read-only workflow token, so the current no-bypass setting remains a
@@ -1039,11 +1129,14 @@ Four read-only matrix jobs on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and m
 redistribution notices, and smoke-test the **exact** `QrShard[.exe]` bytes (tagged version,
 self-test, and a real parity-recovery round trip). Each of those same-host matrix jobs then pins
 Microsoft.Sbom.DotNetTool 4.1.5 and generates the archive's SPDX 2.2 document from the exact
-RID-aware publish graph. A separate read-only job packs each NuGet package once and consumer-tests
-those exact packages; a clean package-SBOM job generates the two ordinary framework-dependent
-graphs. All six SBOMs validate the staged artifact hash and reject stale, test, benchmark, and
-SBOM-tool components. The four binary manifests also reject wrong-RID graphs; the package
-manifests reject Native-AOT contamination.
+RID-aware publish graph. A fifth read-only `windows-hosts` job on windows-2025 publishes
+self-contained Display and Recorder win-x64 folders (no test suite; Recorder usage smoke and
+Display FileVersion only), then generates two Desktop-runtime SBOMs. A separate read-only job
+packs each NuGet package once and consumer-tests those exact packages; a clean package-SBOM job
+generates the two ordinary framework-dependent graphs. All eight SBOMs validate the staged
+artifact hash and reject stale, test, benchmark, and SBOM-tool components. The four Native-AOT
+manifests also reject wrong-RID graphs; the package manifests reject Native-AOT contamination;
+the host manifests reject Native-AOT and ImageSharp and require the win-x64 Desktop runtime.
 
 The Native AOT Apple runtime pack restored by SDK 10.0.400 (currently 10.0.11) contains debug
 references to temporary Swift/Clang module-cache files. On macOS the workflow therefore defers only
@@ -1056,16 +1149,17 @@ Apple OS, Xcode, Clang, and `dsymutil` versions are recorded in the job alongsid
 
 The committed NuGet lock files describe the portable framework-dependent graph used by ordinary
 builds, tests, packaging, and dependency submission. Each Native-AOT matrix restore writes its
-mutually exclusive RID graph to an ignored `obj/aot/<rid>/packages.lock.json`, preventing a local or
-CI AOT publish from contaminating those committed portable lock files; the per-RID SBOM checks the
-exact runtime and compiler-pack versions instead.
+mutually exclusive RID graph to an ignored `obj/aot/<rid>/packages.lock.json`. The Windows host
+publishes write ignored `obj/rid/win-x64/packages.lock.json` files. Neither restore may rewrite
+the committed portable locks; the per-archive SBOMs check the exact runtime pack versions instead.
 
 Only after those jobs pass does `create-draft` wait at the protected `release` environment. Its
 configured reviewer must explicitly approve the run; self-review is permitted because the
 repository currently has one maintainer, while administrator bypass is disabled. That
 artifact-only, no-checkout job creates signed SLSA provenance for every release file, attaches each
-of the six artifact-specific signed SBOM predicates, and creates one complete draft containing the
-four archives, both packages, six SBOM documents, and `SHA256SUMS`. A downstream no-checkout
+of the eight artifact-specific signed SBOM predicates, and creates one complete draft containing the
+six archives (four Native-AOT CLI plus Display and Recorder), both packages, eight SBOM documents,
+and `SHA256SUMS`. A downstream no-checkout
 NuGet OIDC job pins the 10.0.400 SDK explicitly because it has no checkout and therefore cannot
 read `global.json`. It first validates both exact package names and their bounded ZIP structure, then performs a
 read-only two-registry preflight. Any existing NuGet.org copy must have a valid repository signature

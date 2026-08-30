@@ -47,7 +47,8 @@ public class VideoEscalationTests
         var decoder = MakeDecoder(source);
         string output = tmp.File("out.bin");
         var log = new List<string>();
-        decoder.Decode("recording.mp4", output, 8, log.Add, out var stats, escalateFps: true);
+        decoder.Decode("recording.mp4", output, 8, log.Add, out var stats, escalateFps: true,
+            cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(source.Passes >= 2, "should have re-extracted at a higher fps");
         Assert.Contains(log, m => m.Contains("re-extracting at 16"));
@@ -65,7 +66,8 @@ public class VideoEscalationTests
         var decoder = MakeDecoder(source);
         // Single pass, half the images, no parity → assembly fails with a missing-image error.
         Assert.Throws<ShardDecodeException>(
-            () => decoder.Decode("recording.mp4", tmp.File("out.bin"), 8, _ => { }, out _, escalateFps: false));
+            () => decoder.Decode("recording.mp4", tmp.File("out.bin"), 8, _ => { }, out _, escalateFps: false,
+                cancellationToken: TestContext.Current.CancellationToken));
         Assert.Equal(1, source.Passes);
     }
 

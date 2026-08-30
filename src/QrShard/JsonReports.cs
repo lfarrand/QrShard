@@ -20,7 +20,7 @@ internal sealed class JsonReports
             w.WriteString("outputDir", outputDir);
             w.WriteNumber("imageCount", plan.ImageCount);
             w.WriteNumber("dataImages", plan.DataImages);
-            w.WriteNumber("recoveryImages", plan.ParityImages);
+            w.WriteNumber("parityImages", plan.ParityImages);
             w.WriteNumber("bytesPerImage", plan.BytesPerImage);
             w.WriteNumber("width", plan.Width);
             w.WriteNumber("height", plan.Height);

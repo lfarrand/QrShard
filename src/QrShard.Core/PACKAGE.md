@@ -126,6 +126,10 @@ The default session retention budget is 4,000 decimal MB. The overload taking
 A resource-refused addition returns its reason in `QrShardAddResult.Error` without changing session
 state.
 
+`QrShardDecodeSession` retains failed ECC captures and runs the same multi-capture fusion as
+`DecodeImages` once two or more failures of a shard are kept. **1.7.5** skipped that session
+fusion; folder `DecodeImages` fused on 1.7.5 already.
+
 ## Recovery and integrity
 
 Core provides the same image codec and reassembly protections as the Tool:

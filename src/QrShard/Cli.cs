@@ -107,6 +107,9 @@ internal sealed class Cli(AppSettings? settings = null)
                     !slideshowKind.Equals("html", StringComparison.OrdinalIgnoreCase) &&
                     !slideshowKind.Equals("apng", StringComparison.OrdinalIgnoreCase))
                     return Help(@out, err, "--slideshow must be exactly 'html' or 'apng'.");
+                int intervalMs = SlideshowWriter.DefaultIntervalMs;
+                if (video)
+                    intervalMs = GetValidatedSlideshowIntervalMs(named);
                 if (positional.Count == 0)
                     return Help(@out, err, "encode requires one or more input files or folders.");
                 foreach (string p in positional)
@@ -176,7 +179,6 @@ internal sealed class Cli(AppSettings? settings = null)
                 string? slideshowPath = null;
                 if (video)
                 {
-                    int intervalMs = GetInt(named, "-i", "--interval", SlideshowWriter.DefaultIntervalMs);
                     bool apng = string.Equals(Get(named, "--slideshow"), "apng", StringComparison.OrdinalIgnoreCase);
                     slideshowPath = apng
                         ? services.Slideshow.WriteApng(outDir, result.Files, intervalMs)
@@ -198,7 +200,6 @@ internal sealed class Cli(AppSettings? settings = null)
                           $"can recover up to {result.StripeParity} lost image(s) per {result.StripeData + result.StripeParity}.");
                 if (slideshowPath is not null)
                 {
-                    int intervalMs = GetInt(named, "-i", "--interval", SlideshowWriter.DefaultIntervalMs);
                     @out.WriteLine($"Slideshow: {ShardHeader.Display(slideshowPath)} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
                     @out.WriteLine(slideshowPath.EndsWith(".apng", StringComparison.OrdinalIgnoreCase)
                         ? "  Open it and record the screen for at least one full cycle."
@@ -275,7 +276,8 @@ internal sealed class Cli(AppSettings? settings = null)
                     // Escalate fps automatically for file recordings unless the user pinned --fps.
                     bool userSetFps = Get(named, "--fps") is not null;
                     var fromVideo = services.VideoDecoder.Decode(positional[0], Get(named, "-o", "--out"), fps,
-                        decLog, out _, password, decodeWorkers: 1, escalateFps: !userSetFps);
+                        decLog, out _, password, decodeWorkers: 1, escalateFps: !userSetFps,
+                        cancellationToken: cancellationToken);
                     return ReportRestored(@out, fromVideo, djson);
                 }
 
@@ -551,7 +553,7 @@ internal sealed class Cli(AppSettings? settings = null)
                 var live = new VideoDecoder(services.Decoder, source,
                     services.Assembler, services.Parity, new CameraRectifier(), settings);
                 var received = live.Decode(sourceLabel, Get(named, "-o", "--out"), fps, @out.WriteLine, out var liveStats,
-                    receivePassword, workers);
+                    receivePassword, workers, cancellationToken: cancellationToken);
                 @out.WriteLine($"Restored {received.Count} file(s) after examining {liveStats.FramesExamined} frame(s).");
                 return 0;
             }
@@ -1451,6 +1453,17 @@ internal sealed class Cli(AppSettings? settings = null)
         return v is null ? fallback : int.Parse(v);
     }
 
+    private static int GetValidatedSlideshowIntervalMs(Dictionary<string, string> named)
+    {
+        string? raw = Get(named, "-i", "--interval");
+        if (raw is null)
+            return SlideshowWriter.DefaultIntervalMs;
+        if (!int.TryParse(raw, out int intervalMs) || intervalMs < SlideshowWriter.MinIntervalMs)
+            throw new ArgumentException(
+                $"-i/--interval must be an integer of at least {SlideshowWriter.MinIntervalMs}.");
+        return intervalMs;
+    }
+
     private static double GetDouble(Dictionary<string, string> named, string key, double fallback)
     {
         string? v = Get(named, key);
@@ -1924,6 +1937,10 @@ internal sealed class Cli(AppSettings? settings = null)
             Capture tips: screenshot the image displayed at 100% zoom; include the full black
             frame with some white margin; avoid fractional display scaling for cell sizes < 3.
             ECC absorbs localized damage (cursor, notification toast, mild JPEG artifacts).
+            Windows 1:1 present/archive (not qrshard verbs; GitHub Release zips or
+            build QrShard.Windows.slnx):
+            QrShard.Display <folder> [fps] [memory-cap] [once]
+            QrShard.Recorder <output-folder>. See the repository README.
             """);
         return error is null ? 0 : 2;
     }

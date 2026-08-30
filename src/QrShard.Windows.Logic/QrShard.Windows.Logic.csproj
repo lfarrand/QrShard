@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <Version>1.7.6</Version>
+    <RootNamespace>QrShard</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="QrShard.Display" />
+    <InternalsVisibleTo Include="QrShard.Recorder" />
+    <InternalsVisibleTo Include="QrShard.Tests" />
+  </ItemGroup>
+
+</Project>

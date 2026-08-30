@@ -156,6 +156,65 @@ public class ResourceBoundTests
     }
 
     [Fact]
+    public void UniformPath_DoesNotTrustFiveBitLutWinnerAsConfident()
+    {
+        // Illumination's allowed floor is gain 0.2. Adjacent 8-bit R levels then sit 7 units
+        // apart and share a 5-bit RGB cube. The first sample in that cube used to own the LUT
+        // slot; a later cell whose true nearest is the other level was written as the cached
+        // winner with dist 16 — under ConfidentDist 200 — so FEC treated a wrong symbol as reliable.
+        const double gain = 0.2;
+        var theoretical = new Palette().Build(8);
+        var dimmed = new Rgb24[theoretical.Length];
+        for (int i = 0; i < theoretical.Length; i++)
+            dimmed[i] = new Rgb24(
+                (byte)(theoretical[i].R * gain + 0.5),
+                (byte)(theoretical[i].G * gain + 0.5),
+                (byte)(theoretical[i].B * gain + 0.5));
+
+        static int Quant5(byte r, byte g, byte b) => (r >> 3 << 10) | (g >> 3 << 5) | (b >> 3);
+
+        var paletteMath = new Palette();
+        byte seedR = dimmed[0].R, seedG = dimmed[0].G, seedB = dimmed[0].B;
+        int seed = paletteMath.Nearest(dimmed, seedR, seedG, seedB);
+        const byte probeR = 4, probeG = 0, probeB = 0;
+        Assert.Equal(Quant5(seedR, seedG, seedB), Quant5(probeR, probeG, probeB));
+        int exact = paletteMath.Nearest(dimmed, probeR, probeG, probeB);
+        Assert.NotEqual(seed, exact);
+        int lutDr = probeR - dimmed[seed].R, lutDg = probeG - dimmed[seed].G, lutDb = probeB - dimmed[seed].B;
+        Assert.True(lutDr * lutDr + lutDg * lutDg + lutDb * lutDb <= 200,
+            "precondition: distance to the 5-bit LUT winner would have looked confident");
+
+        var layout = new Layout
+        {
+            BitsPerCell = 8,
+            CellPx = 1,
+            GridW = 2,
+            GridH = 1,
+            MetaH = 1,
+            InnerW = 4,
+            InnerH = 7,
+            EccParity = 16,
+            FinderModule = 0,
+        };
+        const int w = 4, h = 7;
+        var px = new Rgb24[w * h];
+        // col = floor(DataLeft + (gx+0.5)*CellPx) → 1, 2; row = floor(DataTop + 0.5) → 3
+        px[3 * w + 1] = new Rgb24(seedR, seedG, seedB);
+        px[3 * w + 2] = new Rgb24(probeR, probeG, probeB);
+        var palettes = new PaletteSet(dimmed, dimmed, dimmed, Interpolate: false);
+
+        byte[] stream = new GridSampler().ReadDataGrid(
+            new Bitmap(px, w, h), new InnerRect(0, 0, w, h), layout, palettes,
+            new DecodeScratch(), out bool[]? suspects, out _);
+
+        var bits = new BitStream();
+        Assert.Equal(seed, bits.ReadCell(stream, 0, 8));
+        Assert.Equal(exact, bits.ReadCell(stream, 8, 8));
+        Assert.NotNull(suspects);
+        Assert.False(suspects[1]);
+    }
+
+    [Fact]
     public void ScratchBuffers_AreHandedBackWhenAMuchSmallerImageFollows()
     {
         // Buffers grew to the largest image a worker had ever seen and were never released, so one

@@ -80,11 +80,40 @@ public class DecodeSafetyRoundTests
         using var doc = System.Text.Json.JsonDocument.Parse(dry);
         int plannedImages = doc.RootElement.GetProperty("imageCount").GetInt32();
         Assert.True(doc.RootElement.GetProperty("dryRun").GetBoolean());
+        Assert.True(doc.RootElement.TryGetProperty("parityImages", out var plannedParity));
+        Assert.False(doc.RootElement.TryGetProperty("recoveryImages", out _));
 
         // The dry-run count must equal what a real encode actually produces.
         var report = new ShardEncoder().Encode(input, tmp.Sub("real"),
             new EncodeOptions { Width = 900, Height = 900, RecoveryPercent = 20 });
         Assert.Equal(report.ImageCount, plannedImages);
+        Assert.Equal(report.ParityImages, plannedParity.GetInt32());
+    }
+
+    [Theory]
+    [InlineData("50")]
+    [InlineData("abc")]
+    public void VideoInterval_Invalid_Exits1_WritesNothing(string interval)
+    {
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("in.bin", TestData.Random(2000));
+        string shards = tmp.File("s");
+        var (code, _, err) = Run("encode", input, "-o", shards, "-r", "900", "--video", "-i", interval);
+        Assert.Equal(1, code);
+        Assert.Contains("interval", err);
+        Assert.False(Directory.Exists(shards));
+    }
+
+    [Fact]
+    public void DryRun_VideoInvalidInterval_Exits1_WritesNothing()
+    {
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("in.bin", TestData.Random(2000));
+        string shards = tmp.File("s");
+        var (code, _, err) = Run("encode", input, "-o", shards, "-r", "900", "--video", "--interval", "50", "--dry-run");
+        Assert.Equal(1, code);
+        Assert.Contains("interval", err);
+        Assert.False(Directory.Exists(shards));
     }
 
     // ---- Item 5: graceful incomplete decode ----

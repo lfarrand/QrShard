@@ -40,6 +40,14 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         var groups = shards.GroupBy(s => s.Header.FileId).ToList();
         if (outputPath is not null && groups.Count > 1 && !Directory.Exists(outputPath))
             throw new ShardDecodeException("The images belong to multiple different files; omit -o or decode them separately.");
+        // Directory -o is the archive publish root AND the combine-root for every file family.
+        // One destination cannot be both; a later file would merge into the just-extracted tree.
+        if (outputPath is not null && Directory.Exists(outputPath) &&
+            groups.Any(g => (g.First().Header.Flags & ShardHeader.FlagArchive) != 0) &&
+            groups.Any(g => (g.First().Header.Flags & ShardHeader.FlagArchive) == 0))
+            throw new ShardDecodeException(
+                "A directory -o cannot be both an archive extraction root and a folder of independent files. " +
+                "Omit -o or decode the archive and file families separately.");
 
         // A mixed capture is one logical decode request. Prove every family complete and
         // internally consistent before the first path is published; otherwise sort/group order
@@ -251,13 +259,14 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
                 return new RestoredFile(first.FileName, destDir, written);
             }
 
-            // Preserve the documented explicit-output behaviour, but delay replacement until the
-            // staged file is complete and verified. Without -o, overwrite:false also closes the
-            // check/use race after ResolveOutputPath selected an unused name.
-            if (outputPath is not null && File.Exists(finalPath))
+            // A file-path -o authorizes replacing that destination after verification. Directory
+            // -o is only a parent: the child name is untrusted, so publish like no -o (no
+            // overwrite, no metadata-preserving replacement of an occupied child).
+            bool replaceAuthorized = outputPath is not null && !Directory.Exists(outputPath);
+            if (replaceAuthorized && File.Exists(finalPath))
                 PublishVerifiedReplacement(payloadPath, finalPath);
             else
-                File.Move(payloadPath, finalPath, overwrite: outputPath is not null);
+                File.Move(payloadPath, finalPath, overwrite: replaceAuthorized);
             log($"  SHA-256 verified ✓  '{ShardHeader.Display(first.FileName)}' → " +
                 $"{ShardHeader.Display(finalPath)} ({written:N0} bytes)");
             return new RestoredFile(first.FileName, finalPath, written);
@@ -1057,19 +1066,15 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
 
     private static string ResolveOutputPath(ShardHeader first, string? outputPath)
     {
-        // An explicit -o that points to an existing directory means "put the file inside that
-        // directory" — the user is naming a destination folder, not a file. Combine it with the
-        // sanitised embedded filename so the restore creates a file, not attempts to overwrite
-        // the directory itself (which fails with "Access to the path is denied").
-        if (outputPath is not null)
-        {
-            if (Directory.Exists(outputPath))
-                return Path.Combine(outputPath, SafeFileName(first.FileName));
+        // A file-path -o is the destination the caller named and may replace after verification.
+        // A directory -o is only a parent folder: the child comes from the untrusted header
+        // FileName, so an occupied child gets .restored-N exactly as a decode with no -o would.
+        if (outputPath is not null && !Directory.Exists(outputPath))
             return outputPath;
-        }
 
+        string directory = outputPath ?? Environment.CurrentDirectory;
         string safe = SafeFileName(first.FileName);
-        string outPath = Path.Combine(Environment.CurrentDirectory, safe);
+        string outPath = Path.Combine(directory, safe);
         if (!PathOccupied(outPath))
             return outPath;
 
@@ -1083,7 +1088,7 @@ internal sealed class ShardAssembler(IParityReassembler parityReassembler, Paylo
         string ext = Path.GetExtension(safe);
         for (int n = 1; n < 10_000; n++)
         {
-            string candidate = Path.Combine(Environment.CurrentDirectory,
+            string candidate = Path.Combine(directory,
                 n == 1 ? $"{stem}.restored{ext}" : $"{stem}.restored-{n}{ext}");
             if (!PathOccupied(candidate))
                 return candidate;

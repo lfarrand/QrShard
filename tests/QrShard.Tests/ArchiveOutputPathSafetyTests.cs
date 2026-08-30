@@ -205,6 +205,31 @@ public class ArchiveOutputPathSafetyTests
     }
 
     [Fact]
+    public void MixedArchiveAndFile_RefuseASharedDirectoryOutput()
+    {
+        // The same directory -o is both the archive publish root and the combine-root for every
+        // file family. Refuse that mix so a later file cannot merge into the just-published tree.
+        using var tmp = new TempDir();
+        string dest = tmp.Sub("out");
+        var archive = CraftArchiveShard("bundle.tar", BuildTar("a.txt", "from archive"u8.ToArray()));
+        byte[] fileBytes = "independent file"u8.ToArray();
+        var fileHeader = new ShardHeader
+        {
+            FileId = 0x5151, Index = 0, Count = 1, PayloadLength = fileBytes.Length,
+            PayloadCrc32 = new Crc().Crc32(fileBytes), TotalLength = fileBytes.Length,
+            OriginalLength = fileBytes.Length, Flags = 0, Sha256 = SHA256.HashData(fileBytes),
+            FileName = "note.txt", StripeData = 0, StripeParity = 0,
+        };
+        var file = new DecodedShard(fileHeader, fileBytes, "file.png", 0, 0);
+
+        var ex = Assert.Throws<ShardDecodeException>(() =>
+            new ShardAssembler().Assemble([archive, file], dest, _ => { }));
+
+        Assert.Contains("directory -o", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFileSystemEntries(dest));
+    }
+
+    [Fact]
     public void InvalidArchiveDoesNotPreventALaterIndependentFileFromRestoring()
     {
         using var tmp = new TempDir();

@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/QrShard.Windows.Logic/QrShard.Windows.Logic.csproj" />
+    <Project Path="src/QrShard.Display/QrShard.Display.csproj" />
+    <Project Path="src/QrShard.Recorder/QrShard.Recorder.csproj" />
+  </Folder>
+</Solution>

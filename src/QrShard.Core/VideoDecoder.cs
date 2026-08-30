@@ -82,7 +82,8 @@ internal sealed class VideoDecoder(
     }
 
     public List<RestoredFile> Decode(string path, string? outputPath, double extractFps, Action<string> log,
-        out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1, bool escalateFps = false)
+        out VideoDecodeStats stats, string? password = null, int decodeWorkers = 1, bool escalateFps = false,
+        CancellationToken cancellationToken = default)
     {
         var shards = new List<DecodedShard>();
         var seen = new Dictionary<(ulong FileId, int Index, bool Parity), DecodedShard?>();
@@ -90,41 +91,46 @@ internal sealed class VideoDecoder(
         int totalExamined = 0, totalDecoded = 0;
         bool stoppedEarly = false;
 
-        // Capture frames to a directory so a manual decode can be attempted on error.
-        // Frames are written as uncompressed BMP (no PNG compression overhead) on a background
-        // thread so file I/O never blocks the decode pipeline.
-        string captureDir = Path.Combine(Path.GetTempPath(), $"qrshard-frames-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(captureDir);
+        // File recordings (and QRSHARD_DUMP_FRAMES) keep a temp BMP dump so a failed
+        // decode can be retried by hand. Live receive skips this: a 4K 10 fps grab is
+        // ~24 MiB/frame and would fill the disk before the transfer completed.
+        bool dumpFrames = ShouldDumpFrames(path);
+        string? captureDir = null;
+        Channel<CapturedFrame>? captureChannel = null;
+        Task? writerTask = null;
         int savedFrameCount = 0;
-        log($"  frames directory: {captureDir}");
-        var captureChannel = Channel.CreateBounded<CapturedFrame>(new BoundedChannelOptions(4)
-        {
-            FullMode = BoundedChannelFullMode.DropOldest,
-            SingleReader = true,
-        });
-        var writerTask = Task.Run(() => WriteFramesBackground(captureChannel.Reader, captureDir));
+        bool preserveCaptureDir = false;
 
-        // A re-extractable file source (not live capture) that decodes incomplete can be
-        // re-run at a higher extraction rate — the transfer may cycle faster than the frames
-        // we sampled. Passes accumulate into the shard set, stopping the moment it completes.
-        double fps = extractFps;
-        var ladder = escalateFps && IsVideoFile(path) ? new[] { fps, fps * 2, fps * 4 } : [fps];
-        for (int pass = 0; pass < ladder.Length; pass++)
+        try
         {
-            double passFps = ladder[pass];
-            if (pass > 0)
-                log($"  set still incomplete — re-extracting at {passFps} fps");
-            int shardsBefore = shards.Count;
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (dumpFrames)
+            {
+                captureDir = Path.Combine(Path.GetTempPath(), $"qrshard-frames-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(captureDir);
+                log($"  frames directory: {captureDir}");
+                captureChannel = Channel.CreateBounded<CapturedFrame>(new BoundedChannelOptions(4)
+                {
+                    FullMode = BoundedChannelFullMode.DropOldest,
+                    SingleReader = true,
+                });
+                writerTask = Task.Run(() => WriteFramesBackground(captureChannel.Reader, captureDir));
+            }
+
+            IEnumerable<Bitmap> MaybeSave(IEnumerable<Bitmap> source) =>
+                captureChannel is null ? source : SaveFrames(source);
 
             IEnumerable<Bitmap> SaveFrames(IEnumerable<Bitmap> source)
             {
+                Channel<CapturedFrame> channel = captureChannel!;
                 foreach (var frame in source)
                 {
                     int index = Interlocked.Increment(ref savedFrameCount);
                     try
                     {
                         var pixels = frame.Px.AsSpan(0, frame.Width * frame.Height).ToArray();
-                        captureChannel.Writer.TryWrite(new CapturedFrame(pixels, frame.Width, frame.Height, index));
+                        channel.Writer.TryWrite(new CapturedFrame(pixels, frame.Width, frame.Height, index));
                     }
                     catch
                     {
@@ -134,55 +140,101 @@ internal sealed class VideoDecoder(
                 }
             }
 
-            bool complete = decodeWorkers > 1
-                ? CollectShardsParallel(token => SaveFrames(frameSource.Frames(path, passFps, token)),
-                    shards, seen, successful, log, decodeWorkers, out var passStats)
-                : CollectShards(SaveFrames(frameSource.Frames(path, passFps)), shards, seen, successful, log, out passStats);
-            totalExamined += passStats.FramesExamined;
-            totalDecoded += passStats.FramesDecoded;
-            stoppedEarly = passStats.StoppedEarly;
-            if (complete)
-                break;
-            // A re-extraction pass samples the video more densely than the last, so if it added
-            // no new shards the video's decodable content is saturated — a still-denser pass
-            // cannot reveal shards that simply are not in it. Stop rather than re-demux again.
-            if (pass > 0 && shards.Count == shardsBefore)
+            // A re-extractable file source (not live capture) that decodes incomplete can be
+            // re-run at a higher extraction rate — the transfer may cycle faster than the frames
+            // we sampled. Passes accumulate into the shard set, stopping the moment it completes.
+            double fps = extractFps;
+            var ladder = escalateFps && IsVideoFile(path) ? new[] { fps, fps * 2, fps * 4 } : [fps];
+            for (int pass = 0; pass < ladder.Length; pass++)
             {
-                log("  higher-rate pass found no new shards — video is fully sampled, stopping");
-                break;
+                cancellationToken.ThrowIfCancellationRequested();
+                double passFps = ladder[pass];
+                if (pass > 0)
+                    log($"  set still incomplete — re-extracting at {passFps} fps");
+                int shardsBefore = shards.Count;
+
+                bool complete = decodeWorkers > 1
+                    ? CollectShardsParallel(token => MaybeSave(frameSource.Frames(path, passFps, token)),
+                        shards, seen, successful, log, decodeWorkers, cancellationToken, out var passStats)
+                    : CollectShards(MaybeSave(frameSource.Frames(path, passFps, cancellationToken)),
+                        shards, seen, successful, log, out passStats);
+                totalExamined += passStats.FramesExamined;
+                totalDecoded += passStats.FramesDecoded;
+                stoppedEarly = passStats.StoppedEarly;
+                if (complete)
+                    break;
+                // A re-extraction pass samples the video more densely than the last, so if it added
+                // no new shards the video's decodable content is saturated — a still-denser pass
+                // cannot reveal shards that simply are not in it. Stop rather than re-demux again.
+                if (pass > 0 && shards.Count == shardsBefore)
+                {
+                    log("  higher-rate pass found no new shards — video is fully sampled, stopping");
+                    break;
+                }
             }
-        }
 
-        captureChannel.Writer.Complete();
-        try { writerTask.GetAwaiter().GetResult(); } catch { }
+            stats = new VideoDecodeStats(totalExamined, totalDecoded, shards.Count, stoppedEarly);
+            log($"  video: examined {stats.FramesExamined} frame(s), fully decoded {stats.FramesDecoded}, " +
+                $"collected {stats.ShardsCollected} shard(s){(stats.StoppedEarly ? ", stopped early — set complete" : "")}");
+            if (shards.Count == 0)
+            {
+                preserveCaptureDir = captureDir is not null;
+                throw new ShardDecodeException("No decodable shard images were found in the video.");
+            }
 
-        stats = new VideoDecodeStats(totalExamined, totalDecoded, shards.Count, stoppedEarly);
-        log($"  video: examined {stats.FramesExamined} frame(s), fully decoded {stats.FramesDecoded}, " +
-            $"collected {stats.ShardsCollected} shard(s){(stats.StoppedEarly ? ", stopped early — set complete" : "")}");
-        if (shards.Count == 0)
-        {
-            log($"  captured frames preserved in: {captureDir}");
-            throw new ShardDecodeException("No decodable shard images were found in the video.");
-        }
-
-        bool success = false;
-        try
-        {
-            var result = assembler.Assemble(shards, outputPath, log, password);
-            success = true;
-            return result;
+            try
+            {
+                return assembler.Assemble(shards, outputPath, log, password);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException
+                                       and not ShardResourceLimitException and not ShardFamilyMismatchException)
+            {
+                preserveCaptureDir = captureDir is not null;
+                throw;
+            }
         }
         finally
         {
-            if (success)
+            if (captureChannel is not null)
             {
-                try { Directory.Delete(captureDir, recursive: true); } catch { }
+                captureChannel.Writer.TryComplete();
+                if (writerTask is not null)
+                {
+                    try { writerTask.GetAwaiter().GetResult(); } catch { }
+                }
             }
-            else
+
+            if (captureDir is not null)
             {
-                log($"  captured frames preserved in: {captureDir}");
+                if (preserveCaptureDir)
+                    log($"  captured frames preserved in: {captureDir}");
+                else
+                {
+                    try { Directory.Delete(captureDir, recursive: true); } catch { }
+                }
             }
         }
+    }
+
+    /// <summary>Live receive must not persist every full-resolution BMP. Dump only a real
+    /// file recording, or when <c>QRSHARD_DUMP_FRAMES</c> is set.</summary>
+    private static bool ShouldDumpFrames(string path)
+    {
+        if (Environment.GetEnvironmentVariable("QRSHARD_DUMP_FRAMES") is not null)
+            return true;
+        if (!File.Exists(path))
+            return false;
+        try
+        {
+            FileAttributes attrs = File.GetAttributes(path);
+            if ((attrs & (FileAttributes.Device | FileAttributes.Directory)) != 0)
+                return false;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
+        {
+            return false;
+        }
+        return IsVideoFile(path) || IsAnimatedImage(path);
     }
 
     // ---------- Shard collection with dedupe + early stop ----------
@@ -456,10 +508,10 @@ internal sealed class VideoDecoder(
         List<DecodedShard> shards,
         Dictionary<(ulong FileId, int Index, bool Parity), DecodedShard?> seen,
         ShardDecoder.SuccessfulShardRetentionBudget successful,
-        Action<string> log, int workers,
+        Action<string> log, int workers, CancellationToken cancellationToken,
         out VideoDecodeStats stats)
     {
-        using var cts = new CancellationTokenSource();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         IEnumerable<Bitmap> frames = frameFactory(cts.Token);
         using IEnumerator<Bitmap> enumerator = frames.GetEnumerator();
         if (!enumerator.MoveNext())

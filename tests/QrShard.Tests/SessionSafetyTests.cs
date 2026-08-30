@@ -167,6 +167,47 @@ public sealed class SessionSafetyTests
     }
 
     [Fact]
+    public void SameLengthReplacementWithAValidSessionPrefixIsNotDeletedAfterAppend()
+    {
+        // The no-handle Delete path is covered above. After Save the journal inode is still
+        // open: a Unix unlink+recreate (same-length QRSS-prefix swap via rename) must be
+        // refused while that handle is held, not closed-then-moved.
+        using var tmp = new TempDir();
+        List<DecodedShard> source = Shards(tmp);
+        Assert.True(source.Count >= 2);
+        string path = tmp.File("identity-append.qrsession");
+        var store = new SessionStore();
+        store.Save(path, [source[0]]);
+        byte[] prefix = File.ReadAllBytes(path)[..9];
+
+        using ISessionTransaction transaction = store.Open(path);
+        transaction.Save([source[1]]);
+        int length = checked((int)new FileInfo(path).Length);
+        byte[] replacement = TestData.Random(length, seed: 7332);
+        prefix.CopyTo(replacement); // valid QRSS v2 prefix and format CRC
+        string planted = tmp.File("planted.qrsession");
+        File.WriteAllBytes(planted, replacement);
+
+        try
+        {
+            File.Move(planted, path, overwrite: true);
+        }
+        catch (Exception ex) when (OperatingSystem.IsWindows() &&
+            ex is IOException or UnauthorizedAccessException)
+        {
+            // Windows FileShare.Read omits FILE_SHARE_DELETE, so the open journal already
+            // blocks the directory-entry swap. Delete must still remove the authenticated file.
+            transaction.Delete();
+            Assert.False(File.Exists(path));
+            return;
+        }
+
+        Assert.Throws<InvalidDataException>(() => transaction.Delete());
+        Assert.True(File.Exists(path));
+        Assert.Equal(replacement, File.ReadAllBytes(path));
+    }
+
+    [Fact]
     public void MixedMetadataForOneFileIdIsRejectedBeforeSessionPublication()
     {
         using var tmp = new TempDir();
@@ -519,6 +560,28 @@ public sealed class SessionSafetyTests
         Assert.Equal(2, File.ReadAllBytes(path)[4]);
         Assert.Equal(source.Select(s => s.Payload), loaded.Select(s => s.Payload));
         Assert.Equal(2, new SessionStore().Load(path).Count);
+    }
+
+    [Fact]
+    public void LegacyV1MigrateDoesNotOverwriteASameLengthQrSsPrefixReplacement()
+    {
+        // LoadExisting closes its read handle before the v2 snapshot is published. The hook
+        // plants a same-length QRSS-prefix swap after staging and before File.Move overwrite.
+        using var tmp = new TempDir();
+        List<DecodedShard> source = Shards(tmp).Take(2).ToList();
+        string path = tmp.File("legacy-swap.qrsession");
+        WriteLegacy(path, source);
+        byte[] original = File.ReadAllBytes(path);
+        byte[] replacement = TestData.Random(original.Length, seed: 4242);
+        original.AsSpan(0, Math.Min(9, original.Length)).CopyTo(replacement);
+
+        var store = new SessionStore
+        {
+            TestingBeforeReplaceExistingPublish = dest => File.WriteAllBytes(dest, replacement),
+        };
+
+        Assert.Throws<InvalidDataException>(() => store.Load(path));
+        Assert.Equal(replacement, File.ReadAllBytes(path));
     }
 
     [Fact]

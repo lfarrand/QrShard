@@ -108,7 +108,8 @@ public class VideoDecodeTests
         string recording = BuildApng(tmp, RecordingPlan(files));
 
         string output = tmp.File("out.bin");
-        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats);
+        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats,
+            cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.Equal(files.Count, stats.ShardsCollected);
         // The duplicate pre-filter must have skipped the repeats.
@@ -130,7 +131,8 @@ public class VideoDecodeTests
         string recording = BuildApng(tmp, plan);
 
         string output = tmp.File("out.bin");
-        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats);
+        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats,
+            cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.True(stats.StoppedEarly);
         Assert.True(stats.FramesExamined <= files.Count + 1,
@@ -152,7 +154,8 @@ public class VideoDecodeTests
 
         string output = tmp.File("out.bin");
         var log = new List<string>();
-        new VideoDecoder().Decode(recording, output, 8, log.Add, out var stats);
+        new VideoDecoder().Decode(recording, output, 8, log.Add, out var stats,
+            cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.True(stats.StoppedEarly);
         Assert.Contains(log, m => m.Contains("recovered 1 missing image"));
@@ -167,7 +170,8 @@ public class VideoDecodeTests
         string recording = BuildApng(tmp, RecordingPlan(shown, duplicates: 1));
 
         var ex = Assert.Throws<ShardDecodeException>(
-            () => new VideoDecoder().Decode(recording, tmp.File("out.bin"), 8, _ => { }, out _));
+            () => new VideoDecoder().Decode(recording, tmp.File("out.bin"), 8, _ => { }, out _,
+                cancellationToken: TestContext.Current.CancellationToken));
         Assert.Contains("missing image(s) 1", ex.Message);
     }
 
@@ -180,7 +184,8 @@ public class VideoDecodeTests
             new ShardAssembler(), new ParityReassembler(), new CameraRectifier());
 
         var ex = Assert.Throws<ShardDecodeException>(() =>
-            decoder.Decode("ignored", null, 8, _ => { }, out _, decodeWorkers: workers));
+            decoder.Decode("ignored", null, 8, _ => { }, out _, decodeWorkers: workers,
+                cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Contains("No decodable shard images", ex.Message);
     }
@@ -196,7 +201,8 @@ public class VideoDecodeTests
             AppSettings.Load(settingsPath));
 
         var ex = Assert.Throws<ShardResourceLimitException>(() =>
-            decoder.Decode("ignored", null, 8, _ => { }, out _));
+            decoder.Decode("ignored", null, 8, _ => { }, out _,
+                cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Contains("DecodeMemoryBudgetMB=64", ex.Message);
     }
@@ -220,7 +226,7 @@ public class VideoDecodeTests
         Task<VideoDecodeStats> receive = Task.Factory.StartNew(() =>
             {
                 decoder.Decode("live-device", output, 8, _ => { }, out VideoDecodeStats stats,
-                    decodeWorkers: 2);
+                    decodeWorkers: 2, cancellationToken: TestContext.Current.CancellationToken);
                 return stats;
             }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
@@ -281,7 +287,8 @@ public class VideoDecodeTests
             new ShardAssembler(), new ParityReassembler(), new CameraRectifier());
 
         Task<Exception?> receive = Task.Factory.StartNew(() => Record.Exception(() =>
-                decoder.Decode("live-device", null, 8, _ => { }, out _, decodeWorkers: 2)),
+                decoder.Decode("live-device", null, 8, _ => { }, out _, decodeWorkers: 2,
+                    cancellationToken: TestContext.Current.CancellationToken)),
             CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         Exception? observed = null;
@@ -442,7 +449,8 @@ public class VideoDecodeTests
         }
 
         string output = tmp.File("out.bin");
-        new VideoDecoder().Decode(mp4, output, 8, _ => { }, out var stats);
+        new VideoDecoder().Decode(mp4, output, 8, _ => { }, out var stats,
+            cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.True(stats.FramesDecoded < stats.FramesExamined); // dedupe active at 8 fps vs 2 img/s
     }

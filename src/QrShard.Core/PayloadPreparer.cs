@@ -24,7 +24,8 @@ internal interface IPayloadPreparer
 /// Chooses how the input is exposed to the encoder:
 ///  - empty file → trivial in-memory source;
 ///  - compressible content (per a mid-file sample for large files) → Brotli-compressed in
-///    memory, when that actually wins;
+///    memory, when that actually wins and the four-input-length peak fits the encode budget
+///    (otherwise Open skips compression explicitly; FlagCompressed stays unset);
 ///  - everything else → a memory-mapped source, so large incompressible files (zips, media)
 ///    are streamed per-chunk and never materialized as a managed array;
 ///  - a password additionally AES-256-GCM encrypts the (possibly compressed) payload — this
@@ -70,27 +71,39 @@ internal sealed class PayloadPreparer(PayloadCipher cipher,
             // injected embedding source). Establish ownership before that first read so no failure
             // path strands a mapped view or file handle.
             sha = (sha256Factory ?? PayloadSource.ComputeSha256)(mapped);
-            if (compress && CompressionMaterializationFitsBudget(length, cfg.EncodeMemoryBudgetMB) &&
-                LooksCompressible(mapped))
+            if (compress)
             {
-                var original = new byte[checked((int)length)];
-                byte[]? compressed = null;
-                try
+                bool compressionFitsBudget = CompressionMaterializationFitsBudget(length, cfg.EncodeMemoryBudgetMB);
+                if (!compressionFitsBudget)
                 {
-                    mapped.Read(0, original);
-                    compressed = Compress(original, cfg.PayloadCompressionLevel);
-                    if (compressed.Length < original.Length)
-                    {
-                        material = compressed;
-                        compressed = null; // ownership transferred; clear after encryption or return it
-                        flags |= ShardHeader.FlagCompressed | ShardHeader.FlagBrotli;
-                    }
+                    // Compression requested but skipped: Brotli's four-input-length peak does
+                    // not fit EncodeMemoryBudgetMB. The default 2000 MB budget therefore skips
+                    // above 500 MB (protocol max is 1.5 GB). This is an optional optimization,
+                    // not a failure. Callers already observe the outcome because FlagCompressed
+                    // stays unset on the flags out.
+                    flags = (byte)(flags & ~(ShardHeader.FlagCompressed | ShardHeader.FlagBrotli));
                 }
-                finally
+                else if (LooksCompressible(mapped))
                 {
-                    ClearPlaintext(original);
-                    if (compressed is not null)
-                        ClearPlaintext(compressed); // compression lost or threw after allocating output
+                    var original = new byte[checked((int)length)];
+                    byte[]? compressed = null;
+                    try
+                    {
+                        mapped.Read(0, original);
+                        compressed = Compress(original, cfg.PayloadCompressionLevel);
+                        if (compressed.Length < original.Length)
+                        {
+                            material = compressed;
+                            compressed = null; // ownership transferred; clear after encryption or return it
+                            flags |= ShardHeader.FlagCompressed | ShardHeader.FlagBrotli;
+                        }
+                    }
+                    finally
+                    {
+                        ClearPlaintext(original);
+                        if (compressed is not null)
+                            ClearPlaintext(compressed); // compression lost or threw after allocating output
+                    }
                 }
             }
 

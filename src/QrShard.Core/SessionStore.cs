@@ -86,6 +86,12 @@ internal sealed class SessionStore(Crc crc, AppSettings settings) : ISessionStor
     {
     }
 
+    /// <summary>
+    /// Test hook invoked after the v2 snapshot is staged and before the destination is
+    /// re-hashed for an overwrite publish. Production callers leave this null.
+    /// </summary>
+    internal Action<string>? TestingBeforeReplaceExistingPublish { get; set; }
+
     /// <summary>Focused-test constructor for exercising admission limits without large fixtures.</summary>
     internal SessionStore(long maxStoredBytes) : this(new Crc(), new AppSettings())
     {
@@ -181,9 +187,13 @@ internal sealed class SessionStore(Crc crc, AppSettings settings) : ISessionStor
                 if (loaded.IsLegacy)
                 {
                     // A complete v1 file is migrated only after every entry has validated. The
-                    // private, flushed v2 snapshot is atomically published over it, so a failed
-                    // conversion leaves the original bytes untouched.
-                    expectedIdentity = store.WriteSnapshotAtomic(path, shards, replaceExisting: true);
+                    // private, flushed v2 snapshot is published over the pathname only when that
+                    // name still hashes as the loaded object. LoadExisting has already closed its
+                    // read handle, so a same-length QRSS-prefix swap in that window must not be
+                    // destroyed by File.Move(..., overwrite: true). A failed conversion still
+                    // leaves the original bytes untouched.
+                    expectedIdentity = store.WriteSnapshotAtomic(path, shards, replaceExisting: true,
+                        requiredDestinationIdentity: expectedIdentity);
                     validLength = new FileInfo(path).Length;
                     observedLength = validLength;
                     journalFrames = shards.Count;
@@ -353,22 +363,34 @@ internal sealed class SessionStore(Crc crc, AppSettings settings) : ISessionStor
         public void Delete()
         {
             ThrowIfUnavailable();
-            byte[] identity = append is null ? expectedIdentity : HashOpenStream(append);
-            CloseAppend(durable: false);
             if (!exists)
             {
+                CloseAppend(durable: false);
                 deleted = true;
                 return;
             }
 
-            // Move the directory entry to an unpredictable sibling first, then authenticate the
-            // moved bytes before deleting them. This closes the validate-then-delete pathname race:
-            // a same-size replacement with a copied QRSS header is restored (or preserved in the
-            // quarantine if another object appeared at the original name), never destroyed.
+            // Identity comes from the live journal inode when we still hold it. Hashing the
+            // handle, then closing it, then moving the pathname would drop the last link of the
+            // authenticated object on Unix after an unlink+recreate, and the name that moved
+            // would be the interloper. Confirm the directory entry still names that object
+            // while the handle is open; only then displace the name.
+            byte[] identity = append is null ? expectedIdentity : HashOpenStream(append);
+            RequirePathStillHoldsIdentity(path, identity,
+                "Session changed before it could be deleted; the replacement was preserved and deletion was refused.");
+
             string quarantine = Path.Combine(Path.GetDirectoryName(path)!,
                 $".{Path.GetFileName(path)}.qrshard-delete-{Guid.NewGuid():N}.tmp");
             try
             {
+                if (append is null || OperatingSystem.IsWindows())
+                {
+                    // Windows refuses rename of a file whose handle was opened without
+                    // FILE_SHARE_DELETE. That same share already blocked pathname replacement,
+                    // so it is safe to release the handle immediately before the move.
+                    CloseAppend(durable: false);
+                }
+
                 File.Move(path, quarantine, overwrite: false);
                 long actualLength = new FileInfo(quarantine).Length;
                 byte[] actualIdentity;
@@ -381,12 +403,16 @@ internal sealed class SessionStore(Crc crc, AppSettings settings) : ISessionStor
                     throw new InvalidDataException(
                         "Session changed before it could be deleted; the replacement was preserved and deletion was refused.");
                 }
+
+                CloseAppend(durable: false);
                 File.Delete(quarantine);
             }
             catch
             {
                 // A failure after the move must remain recoverable. Restore only into an empty
-                // pathname; never overwrite a newer object installed concurrently.
+                // pathname; never overwrite a newer object installed concurrently. The journal
+                // handle stays open until this method returns (Unix) or until the Windows
+                // pre-move close above, so a mismatched quarantine is never the last link we drop.
                 if (File.Exists(quarantine))
                     RestoreUnexpectedReplacement(quarantine);
                 throw;
@@ -821,7 +847,7 @@ internal sealed class SessionStore(Crc crc, AppSettings settings) : ISessionStor
     }
 
     private byte[] WriteSnapshotAtomic(string path, IReadOnlyCollection<DecodedShard> shards,
-        bool replaceExisting)
+        bool replaceExisting, byte[]? requiredDestinationIdentity = null)
     {
         if (shards.Count > MaxJournalFrames)
             throw new InvalidDataException($"Session exceeds the explicit limit of {MaxJournalFrames:N0} journal frames.");
@@ -839,6 +865,13 @@ internal sealed class SessionStore(Crc crc, AppSettings settings) : ISessionStor
             }
             using (var read = new FileStream(temp, FileMode.Open, FileAccess.Read, FileShare.Read))
                 identity = SHA256.HashData(read);
+            if (replaceExisting)
+            {
+                ArgumentNullException.ThrowIfNull(requiredDestinationIdentity);
+                TestingBeforeReplaceExistingPublish?.Invoke(path);
+                RequirePathStillHoldsIdentity(path, requiredDestinationIdentity,
+                    "Session changed before it could be migrated; the replacement was preserved and migration was refused.");
+            }
             File.Move(temp, path, overwrite: replaceExisting);
             return identity;
         }
@@ -848,6 +881,27 @@ internal sealed class SessionStore(Crc crc, AppSettings settings) : ISessionStor
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
+    }
+
+    // Re-hash the directory entry and require it to still be the authenticated object. Callers
+    // that hold a journal handle must do this before closing that handle or moving the name.
+    private static void RequirePathStillHoldsIdentity(string path, byte[] expectedIdentity, string message)
+    {
+        byte[] actual;
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            actual = SHA256.HashData(stream);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException
+            or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException(message, ex);
+        }
+
+        if (!CryptographicOperations.FixedTimeEquals(expectedIdentity, actual))
+            throw new InvalidDataException(message);
     }
 
     private static void WriteFormatHeader(Stream stream)

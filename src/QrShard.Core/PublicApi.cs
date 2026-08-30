@@ -135,9 +135,11 @@ public sealed record QrShardAddResult(bool Accepted, bool WasNew, string? Error)
 /// <summary>
 /// Incremental decode: feed captures one at a time as they arrive (files or in-memory image
 /// bytes), inspect what is still missing, and assemble the moment the set is recoverable —
-/// the embedding counterpart to the CLI's --session/--watch. Not thread-safe; drive it from a
-/// single consumer. Duplicate captures are harmless (deduplicated by file/part identity). Retained
-/// valid shards are bounded by a configurable memory/count budget; a rejected addition reports the
+/// the embedding counterpart to the CLI's --session/--watch. Failed ECC captures are retained
+/// and fused the same way folder decode is, so two glare shots of one shard can complete the
+/// set. Not thread-safe; drive it from a single consumer. Duplicate captures are harmless
+/// (deduplicated by file/part identity). Retained valid shards and failed-capture fusion
+/// material are bounded by a configurable memory/count budget; a rejected addition reports the
 /// limit through <see cref="QrShardAddResult.Error"/> without changing session state.
 /// </summary>
 public sealed class QrShardDecodeSession
@@ -149,6 +151,9 @@ public sealed class QrShardDecodeSession
     private readonly ShardAssembler _assembler = new();
     private readonly DecodeScratch _scratch = new();
     private readonly List<DecodedShard> _shards = [];
+    private readonly List<FailedCapture> _failures = [];
+    private readonly PhotoFusion _fusion = new();
+    private readonly ShardDecoder.FailedCaptureRetentionBudget _salvage;
     private readonly Dictionary<(ulong, int, bool), DecodedShard?> _seen = [];
     private readonly Dictionary<ulong, ShardHeader> _families = [];
     private readonly long _retainedByteLimit;
@@ -165,9 +170,10 @@ public sealed class QrShardDecodeSession
     }
 
     /// <summary>
-    /// Creates an incremental session whose retained valid shards are limited to
-    /// <paramref name="decodeMemoryBudgetMB"/> decimal megabytes. The same budget also derives a
-    /// metadata-aware unique-shard count ceiling. Values from 1 through 1,000,000 are accepted.
+    /// Creates an incremental session whose retained valid shards and failed-capture fusion
+    /// material are limited to <paramref name="decodeMemoryBudgetMB"/> decimal megabytes. The
+    /// same budget also derives a metadata-aware unique-shard count ceiling. Values from 1
+    /// through 1,000,000 are accepted.
     /// </summary>
     public QrShardDecodeSession(string? password, int decodeMemoryBudgetMB)
     {
@@ -178,31 +184,38 @@ public sealed class QrShardDecodeSession
         _retainedByteLimit = checked(decodeMemoryBudgetMB * 1_000_000L);
         _retainedCountLimit =
             ShardDecoder.SuccessfulShardRetentionBudget.MaximumInputCountForByteLimit(_retainedByteLimit);
+        _salvage = new ShardDecoder.FailedCaptureRetentionBudget(decodeMemoryBudgetMB);
     }
 
     /// <summary>Decodes an image file and adds its shard to the session.</summary>
     public QrShardAddResult AddImage(string path)
     {
+        var diagnostics = NewSalvageDiagnostics();
         try
         {
-            return Add(_decoder.DecodeImage(path, _scratch));
+            DecodedShard shard = _decoder.DecodeImage(path, _scratch, diagnostics);
+            ReleaseFailedCapture(diagnostics);
+            return Add(shard);
         }
         catch (ShardDecodeException ex)
         {
-            return new QrShardAddResult(false, false, ex.Message);
+            return AddFailedCapture(diagnostics, path, ex);
         }
     }
 
     /// <summary>Decodes an in-memory encoded image (PNG/BMP/…) and adds its shard.</summary>
     public QrShardAddResult AddImageBytes(ReadOnlySpan<byte> imageBytes, string label = "image")
     {
+        var diagnostics = NewSalvageDiagnostics();
         try
         {
-            return Add(_decoder.DecodeImageBytes(imageBytes, _scratch, label));
+            DecodedShard shard = _decoder.DecodeImageBytes(imageBytes, _scratch, label, diagnostics);
+            ReleaseFailedCapture(diagnostics);
+            return Add(shard);
         }
         catch (ShardDecodeException ex)
         {
-            return new QrShardAddResult(false, false, ex.Message);
+            return AddFailedCapture(diagnostics, label, ex);
         }
     }
 
@@ -253,6 +266,48 @@ public sealed class QrShardDecodeSession
     private static long ConflictRetentionCharge(DecodedShard shard) => checked(
         2L * ShardHeader.Size(shard.Header.FileName) + 2L * shard.SourceFile.Length +
         ShardDecoder.SuccessfulShardRetentionBudget.PerShardOverheadBytes);
+
+    private DecodeDiagnostics NewSalvageDiagnostics() => new()
+    {
+        TryReserveSalvage = TryReserveFailedCapture,
+    };
+
+    private bool TryReserveFailedCapture(Layout layout, int bytes)
+    {
+        long charge = ShardDecoder.FailedCaptureRetentionBudget.WorkingSetCharge(bytes);
+        if (charge > _retainedByteLimit - _retainedBytes)
+            return false;
+        if (!_salvage.TryReserve(layout, bytes))
+            return false;
+        _retainedBytes += charge;
+        return true;
+    }
+
+    private void ReleaseFailedCapture(DecodeDiagnostics diagnostics)
+    {
+        if (diagnostics.SalvageReservedBytes > 0)
+            _retainedBytes = checked(_retainedBytes -
+                ShardDecoder.FailedCaptureRetentionBudget.WorkingSetCharge(diagnostics.SalvageReservedBytes));
+        _salvage.Release(diagnostics);
+    }
+
+    private QrShardAddResult AddFailedCapture(DecodeDiagnostics diagnostics, string label,
+        ShardDecodeException ex)
+    {
+        if (diagnostics is { CellsLayout: not null, Cells: not null })
+        {
+            _failures.Add(new FailedCapture(diagnostics.CellsLayout, diagnostics.Cells, label));
+            if (_failures.Count >= 2)
+            {
+                foreach (DecodedShard shard in _fusion.Fuse(_failures, static _ => { }))
+                    _ = Add(shard);
+            }
+            return new QrShardAddResult(false, false, ex.Message);
+        }
+
+        ReleaseFailedCapture(diagnostics);
+        return new QrShardAddResult(false, false, ex.Message);
+    }
 
     /// <summary>True when every file in the session can be fully reassembled.</summary>
     public bool IsComplete => _families.Count > 0 &&

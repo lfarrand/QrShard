@@ -34,7 +34,8 @@ public class EncodeErgonomicsTests
 
         // The APNG decodes as a recording, byte-for-byte.
         string output = tmp.File("out.bin");
-        new VideoDecoder().Decode(apng, output, 8, _ => { }, out _);
+        new VideoDecoder().Decode(apng, output, 8, _ => { }, out _,
+            cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(content, File.ReadAllBytes(output));
     }
 
@@ -107,6 +108,8 @@ public class EncodeErgonomicsTests
         Assert.Equal(0, code);
         using var doc = System.Text.Json.JsonDocument.Parse(output); // throws if polluted
         Assert.True(doc.RootElement.GetProperty("imageCount").GetInt32() >= 1);
+        Assert.True(doc.RootElement.TryGetProperty("parityImages", out _));
+        Assert.False(doc.RootElement.TryGetProperty("recoveryImages", out _));
         Assert.NotEmpty(doc.RootElement.GetProperty("files").EnumerateArray());
     }
 
