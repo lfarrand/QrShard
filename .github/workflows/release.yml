@@ -389,7 +389,7 @@ jobs:
                 (.name | startswith("QrShard")) and .versionInfo != $version)] | length) == 0 and
               any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.0.0") and
               any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.10") and
-              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.10") and
+              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.11") and
               ([.packages[]? | select(.name | startswith("Microsoft.NETCore.App.Runtime.NativeAOT."))] | length) == 1 and
               any(.packages[]?; .name == $runtime and .versionInfo == $runtimeVer) and
               ([.packages[]? | select(.name | test("^runtime\\..*\\.Microsoft\\.DotNet\\.ILCompiler$"))] | length) == 1 and
@@ -708,7 +708,7 @@ jobs:
             jq -e '
               any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.0.0") and
               any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.10") and
-              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.10")
+              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.11")
             ' "$manifest" >/dev/null || {
               echo "::error::$label SBOM is missing pinned production dependencies"; exit 1;
             }
