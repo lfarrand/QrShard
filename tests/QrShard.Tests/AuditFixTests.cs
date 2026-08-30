@@ -139,7 +139,8 @@ public class AuditFixTests
 
         // decodeWorkers >= 2 selects the pipelined path where the producer runs on its own task.
         var ex = Record.Exception(() =>
-            decoder.Decode("crash.bin", tmp.File("out.bin"), 8, _ => { }, out _, null, decodeWorkers: 2));
+            decoder.Decode("crash.bin", tmp.File("out.bin"), 8, _ => { }, out _, null, decodeWorkers: 2,
+                cancellationToken: TestContext.Current.CancellationToken));
         var typed = Assert.IsType<ShardDecodeException>(ex); // not AggregateException
         Assert.Contains("producer boom", typed.Message);
     }

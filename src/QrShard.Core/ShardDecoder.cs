@@ -366,11 +366,17 @@ internal sealed class ShardDecoder(
         return diagnostics;
     }
 
-    public DecodedShard DecodeImage(string path, DecodeScratch scratch) => DecodeImage(path, scratch, null);
+    public DecodedShard DecodeImage(string path, DecodeScratch scratch) =>
+        DecodeImage(path, scratch, diagnostics: null, plannedMaxPixels: 0);
 
     /// <summary>Decodes one image already in memory (encoded bytes), for callers that receive
     /// captures over a wire rather than as files — the incremental session path.</summary>
-    public DecodedShard DecodeImageBytes(ReadOnlySpan<byte> imageBytes, DecodeScratch scratch, string label)
+    public DecodedShard DecodeImageBytes(ReadOnlySpan<byte> imageBytes, DecodeScratch scratch, string label) =>
+        DecodeImageBytes(imageBytes, scratch, label, null);
+
+    /// <summary>In-memory decode that records failed-capture cells for session fusion.</summary>
+    internal DecodedShard DecodeImageBytes(ReadOnlySpan<byte> imageBytes, DecodeScratch scratch, string label,
+        DecodeDiagnostics? diagnostics)
     {
         Image<Rgb24> image;
         try
@@ -395,65 +401,17 @@ internal sealed class ShardDecoder(
         {
             bmp = ToBitmap(image, scratch);
         }
-        return DecodeBitmapWithCameraFallback(bmp, scratch, label);
+        return DecodeBitmapWithCameraFallback(bmp, scratch, label, diagnostics);
     }
 
     /// <summary>Axis-aligned decode with the camera-rectification fallback, shared by the file
     /// and in-memory entry points.</summary>
-    private DecodedShard DecodeBitmapWithCameraFallback(Bitmap bmp, DecodeScratch scratch, string label)
+    private DecodedShard DecodeBitmapWithCameraFallback(Bitmap bmp, DecodeScratch scratch, string label,
+        DecodeDiagnostics? diagnostics)
     {
         try
         {
-            return DecodeBitmap(bmp, scratch, label, null);
-        }
-        catch (ShardDecodeException axisAlignedError)
-        {
-            Bitmap? rectified;
-            string? cameraRefusal = null;
-            try
-            {
-                rectified = cameraRectifier.TryRectify(bmp);
-            }
-            catch (ShardDecodeException ex)
-            {
-                // The camera path can decline for a reason the user can act on, and the message
-                // saying so was being thrown away. AdaptiveBinarizer refuses a photo over 80
-                // megapixels with "Image is WxH; too large for camera-capture binarization ...
-                // Crop closer to the shard, or capture at a lower resolution." — composed
-                // deliberately, and then unreachable, because all three TryRectify call sites
-                // swallowed it and rethrew the axis-aligned error instead. A real 9000x9000 photo
-                // reported "Could not locate the black frame", which is both wrong and unhelpful.
-                //
-                // The same file is explicit that the OTHER "too large" refusal, ToBitmap's, is
-                // deliberately allowed to propagate. One oversize message was preserved on purpose
-                // and its neighbour discarded unconditionally.
-                rectified = null;
-                cameraRefusal = ex.Message;
-            }
-            if (rectified is null)
-                throw cameraRefusal is null
-                    ? axisAlignedError
-                    : new ShardDecodeException($"{axisAlignedError.Message} (camera capture: {cameraRefusal})");
-            try
-            {
-                return DecodeBitmap(rectified, scratch, label, null);
-            }
-            catch (ShardDecodeException cameraError)
-            {
-                throw new ShardDecodeException(
-                    $"Camera-rectified decode failed: {cameraError.Message} (axis-aligned attempt: {axisAlignedError.Message})");
-            }
-        }
-    }
-
-    private DecodedShard DecodeImage(string path, DecodeScratch scratch, DecodeDiagnostics? diagnostics,
-        long plannedMaxPixels = 0)
-    {
-        Bitmap bmp = LoadBitmap(path, scratch, plannedMaxPixels);
-
-        try
-        {
-            return DecodeBitmap(bmp, scratch, path, diagnostics);
+            return DecodeBitmap(bmp, scratch, label, diagnostics);
         }
         catch (ShardSuppressedException)
         {
@@ -465,16 +423,11 @@ internal sealed class ShardDecoder(
         }
         catch (ShardDecodeException) when (diagnostics?.SuccessfulShardAdmissionRefused == true)
         {
-            // This is a run-wide resource refusal, not evidence of perspective distortion. A
-            // camera retry would repeat expensive rectification and count the same valid shard a
-            // second time before arriving at the identical budget decision.
+            // Run-wide resource refusal, not evidence of perspective distortion.
             throw;
         }
         catch (ShardDecodeException axisAlignedError)
         {
-            // Camera fallback: photos are rotated/perspective-distorted, which the axis-aligned
-            // pipeline cannot handle. If the image carries camera-profile finder patterns,
-            // rectify it into an axis-aligned canvas and run the same pipeline on that.
             Bitmap? rectified;
             string? cameraRefusal = null;
             try
@@ -501,10 +454,9 @@ internal sealed class ShardDecoder(
                 throw cameraRefusal is null
                     ? axisAlignedError
                     : new ShardDecodeException($"{axisAlignedError.Message} (camera capture: {cameraRefusal})");
-
             try
             {
-                return DecodeBitmap(rectified, scratch, path, diagnostics);
+                return DecodeBitmap(rectified, scratch, label, diagnostics);
             }
             catch (ShardDecodeException cameraError)
             {
@@ -512,6 +464,13 @@ internal sealed class ShardDecoder(
                     $"Camera-rectified decode failed: {cameraError.Message} (axis-aligned attempt: {axisAlignedError.Message})");
             }
         }
+    }
+
+    internal DecodedShard DecodeImage(string path, DecodeScratch scratch, DecodeDiagnostics? diagnostics,
+        long plannedMaxPixels = 0)
+    {
+        Bitmap bmp = LoadBitmap(path, scratch, plannedMaxPixels);
+        return DecodeBitmapWithCameraFallback(bmp, scratch, path, diagnostics);
     }
 
     /// <summary>Reads a bitmap into the scratch's pooled pixel buffer, preferring the fast PNG
@@ -757,23 +716,31 @@ internal sealed class ShardDecoder(
         }
 
         // Copy the (classic-order) cells into the diagnostics on failure — the raw material
-        // for multi-capture fusion. First failing attempt wins (scratch buffers are reused).
+        // for multi-capture fusion. A later camera attempt that also sampled a grid replaces
+        // the pair; first-wins stays only when the retry never reached sampling.
         void Salvage()
         {
-            // Only the folder path supplies an admission hook and only ECC layouts are fusible.
+            // Only folder/session supply an admission hook and only ECC layouts are fusible.
             // Diagnose consumes margins/codeword errors, not a private copy of the cell stream.
-            if (diagnostics is not null && diagnostics.Cells is null && layout.EccParity > 0 &&
-                diagnostics.TryReserveSalvage is not null)
+            if (diagnostics is null || layout.EccParity <= 0 || diagnostics.TryReserveSalvage is null)
+                return;
+
+            int salvageLength = protectedLength;
+            if (diagnostics.Cells is null)
             {
-                int salvageLength = protectedLength;
                 if (!diagnostics.TryReserveSalvage(layout, salvageLength))
                     return;
-                diagnostics.Cells = work.AsSpan(0, salvageLength).ToArray();
                 diagnostics.SalvageReservedBytes = salvageLength;
-                // Recorded WITH the cells, not read back later: Layout is overwritten by the
-                // camera-rectified retry while these cells stay from the first attempt.
-                diagnostics.CellsLayout = layout;
             }
+            else if (salvageLength > diagnostics.SalvageReservedBytes)
+            {
+                // Keep the first buffer: replacing with a larger sample would exceed the
+                // reservation already charged against the salvage budget.
+                return;
+            }
+
+            diagnostics.Cells = work.AsSpan(0, salvageLength).ToArray();
+            diagnostics.CellsLayout = layout;
         }
 
         byte[] stream;
@@ -1169,7 +1136,9 @@ internal sealed class ShardDecoder(
         // Two-capture cluster fusion peaks below 3x retained bytes per capture: the two captures,
         // recovered stream, compact bucket/frontier/byte tags and one candidate. Charging every
         // retained capture at 3x also covers the cheaper >=3-capture majority path.
-        private const int FusionWorkingSetFactor = 3;
+        internal const int FusionWorkingSetFactor = 3;
+
+        internal static long WorkingSetCharge(int bytes) => checked((long)bytes * FusionWorkingSetFactor);
         private readonly object gate = new();
         private readonly long byteLimit;
         private readonly Dictionary<(int GridW, int GridH, int Bits, int Ecc, bool Interleave2), int> groupCounts = [];
@@ -1203,7 +1172,7 @@ internal sealed class ShardDecoder(
             lock (gate)
             {
                 groupCounts.TryGetValue(key, out int count);
-                long charge = checked((long)bytes * FusionWorkingSetFactor);
+                long charge = WorkingSetCharge(bytes);
                 if (bytes <= 0 || count >= PhotoFusion.MaxCapturesPerGroup ||
                     (count == 0 && groupCounts.Count >= PhotoFusion.MaxFusionGroups) ||
                     charge > byteLimit - reservedBytes)

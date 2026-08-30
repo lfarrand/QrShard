@@ -56,7 +56,13 @@ jobs:
             echo "::error::release tags must use canonical stable vMAJOR.MINOR.PATCH form"
             exit 1
           fi
-          for project in src/QrShard/QrShard.csproj src/QrShard.Core/QrShard.Core.csproj; do
+          for project in \
+            src/QrShard/QrShard.csproj \
+            src/QrShard.Core/QrShard.Core.csproj \
+            src/QrShard.Display/QrShard.Display.csproj \
+            src/QrShard.Recorder/QrShard.Recorder.csproj \
+            src/QrShard.Windows.Logic/QrShard.Windows.Logic.csproj
+          do
             project_version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' "$project" | head -1)"
             [ "$version" = "$project_version" ] || {
               echo "::error::tag version $version does not match $project version $project_version"; exit 1;
@@ -438,6 +444,190 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  windows-hosts:
+    needs: preflight
+    runs-on: windows-2025
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Record toolchain
+        run: dotnet --info
+
+      - name: Publish Display and Recorder (self-contained win-x64)
+        run: |
+          dotnet publish src/QrShard.Display/QrShard.Display.csproj -c Release -r win-x64 --self-contained true -p:PublishAot=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:CopyOutputSymbolsToPublishDirectory=false -p:RestoreLockedMode=false -p:NuGetLockFilePath=obj/rid/win-x64/packages.lock.json -warnaserror
+          dotnet publish src/QrShard.Recorder/QrShard.Recorder.csproj -c Release -r win-x64 --self-contained true -p:PublishAot=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:CopyOutputSymbolsToPublishDirectory=false -p:RestoreLockedMode=false -p:NuGetLockFilePath=obj/rid/win-x64/packages.lock.json -warnaserror
+
+      - name: Verify portable lock files remained unchanged
+        run: git diff --exit-code -- src/QrShard.Display/packages.lock.json src/QrShard.Recorder/packages.lock.json src/QrShard.Windows.Logic/packages.lock.json
+
+      - name: Include redistribution notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          nuget_root="${NUGET_PACKAGES:-$HOME/.nuget/packages}"
+          desktop_root="$nuget_root/microsoft.windowsdesktop.app.runtime.win-x64"
+          core_root="$nuget_root/microsoft.netcore.app.runtime.win-x64"
+          desktop="$(find "$desktop_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)"
+          core="$(find "$core_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)"
+          [ -n "$desktop" ] && [ -f "$desktop/LICENSE" ] || {
+            echo "::error::Windows Desktop runtime pack not found under $desktop_root"
+            ls -la "$desktop_root" || true
+            exit 1
+          }
+          [ -n "$core" ] && [ -f "$core/LICENSE.TXT" ] && [ -f "$core/THIRD-PARTY-NOTICES.TXT" ] || {
+            echo "::error::.NET runtime pack notices not found under $core_root"
+            ls -la "$core_root" || true
+            exit 1
+          }
+          for pub in \
+            src/QrShard.Display/bin/Release/net10.0-windows/win-x64/publish \
+            src/QrShard.Recorder/bin/Release/net10.0-windows/win-x64/publish
+          do
+            [ -d "$pub" ] || { echo "::error::missing publish directory $pub"; exit 1; }
+            cp LICENSE "$pub/LICENSE"
+            cp THIRD-PARTY-NOTICES.md "$pub/THIRD-PARTY-NOTICES.md"
+            cp "$core/LICENSE.TXT" "$pub/DOTNET-LICENSE.txt"
+            cp "$core/THIRD-PARTY-NOTICES.TXT" "$pub/DOTNET-THIRD-PARTY-NOTICES.txt"
+            cp "$desktop/LICENSE" "$pub/DOTNET-DESKTOP-LICENSE.txt"
+          done
+          echo "WINDOWS_DESKTOP_RUNTIME_VERSION=$(basename "$desktop")" >> "$GITHUB_ENV"
+          echo "NETCORE_RUNTIME_VERSION=$(basename "$core")" >> "$GITHUB_ENV"
+
+      - name: Smoke-test Recorder usage
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="src/QrShard.Recorder/bin/Release/net10.0-windows/win-x64/publish/QrShard.Recorder.exe"
+          [ -f "$bin" ] || { echo "::error::no Recorder exe at $bin"; exit 1; }
+          set +e
+          out="$("$bin" 2>&1)"
+          code=$?
+          set -e
+          [ "$code" -eq 1 ] || {
+            echo "::error::Recorder usage smoke expected exit 1, got $code"
+            printf '%s\n' "$out"
+            exit 1
+          }
+          printf '%s\n' "$out" | grep -q 'Usage: QrShard.Recorder' || {
+            echo "::error::Recorder usage text missing"
+            printf '%s\n' "$out"
+            exit 1
+          }
+
+      - name: Smoke-test Display FileVersion
+        shell: pwsh
+        run: |
+          $exe = "src/QrShard.Display/bin/Release/net10.0-windows/win-x64/publish/QrShard.Display.exe"
+          if (-not (Test-Path $exe)) { throw "no Display exe at $exe" }
+          $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe))
+          $version = ([regex]::Match((Get-Content src/QrShard.Display/QrShard.Display.csproj -Raw), '<Version>([^<]+)</Version>')).Groups[1].Value
+          $parts = $version.Split('.')
+          if ($info.FileMajorPart -ne [int]$parts[0] -or $info.FileMinorPart -ne [int]$parts[1] -or $info.FileBuildPart -ne [int]$parts[2]) {
+            throw "Display FileVersion $($info.FileVersion) does not match $version"
+          }
+
+      - name: Archive Display
+        shell: pwsh
+        run: Compress-Archive -Path src/QrShard.Display/bin/Release/net10.0-windows/win-x64/publish/* -DestinationPath qrshard-display-win-x64.zip
+
+      - name: Archive Recorder
+        shell: pwsh
+        run: Compress-Archive -Path src/QrShard.Recorder/bin/Release/net10.0-windows/win-x64/publish/* -DestinationPath qrshard-recorder-win-x64.zip
+
+      - name: Generate and validate Windows-host SPDX SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard.Display/QrShard.Display.csproj | head -1)"
+          recorder_version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard.Recorder/QrShard.Recorder.csproj | head -1)"
+          [ "$version" = "$recorder_version" ] || {
+            echo "::error::Display version $version does not match Recorder version $recorder_version"
+            exit 1
+          }
+          tool_dir="$RUNNER_TEMP/sbom-tool"
+          dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.5 --tool-path "$tool_dir"
+          sbom_tool="$tool_dir/sbom-tool"
+          [ "${{ runner.os }}" = Windows ] && sbom_tool="$sbom_tool.exe"
+
+          generate_host_sbom() {
+            local zip="$1" component_dir="$2" product="$3" output_name="$4"
+            local input_dir="$RUNNER_TEMP/sbom-input-$product"
+            local output_dir="$RUNNER_TEMP/sbom-output-$product"
+            mkdir -p "$input_dir" "$output_dir"
+            cp "$zip" "$input_dir/"
+            "$sbom_tool" generate \
+              -b "$input_dir" -bc "$GITHUB_WORKSPACE/$component_dir" -m "$output_dir" \
+              -pn "$product" -pv "$version" -ps "Lee Farrand" \
+              -nsb "https://github.com/$GITHUB_REPOSITORY" -mi SPDX:2.2 \
+              -F false -pm true -V Warning
+            "$sbom_tool" validate -b "$input_dir" -m "$output_dir/_manifest" \
+              -o "$RUNNER_TEMP/$product-validation.json" -mi SPDX:2.2 -F false -n true -V Warning
+            local manifest="$output_dir/_manifest/spdx_2.2/manifest.spdx.json"
+            jq -e --arg version "$version" \
+              --arg netcoreVer "${NETCORE_RUNTIME_VERSION}" \
+              --arg desktopVer "${WINDOWS_DESKTOP_RUNTIME_VERSION}" '
+                .spdxVersion == "SPDX-2.2" and
+                (.files | length) == 1 and
+                ([.packages[]? | select(
+                  (.name | ascii_downcase) |
+                  test("^(xunit|benchmarkdotnet|microsoft\\.sbom)"))] | length) == 0 and
+                ([.packages[]? | select(
+                  (.name | startswith("QrShard")) and .versionInfo != $version)] | length) == 0 and
+                ([.packages[]? | select(.name | startswith("Microsoft.NETCore.App.Runtime.NativeAOT."))] | length) == 0 and
+                ([.packages[]? | select(.name | test("^runtime\\..*\\.Microsoft\\.DotNet\\.ILCompiler$"))] | length) == 0 and
+                ([.packages[]? | select(.name == "SixLabors.ImageSharp")] | length) == 0 and
+                any(.packages[]?; .name == "Microsoft.NETCore.App.Runtime.win-x64" and .versionInfo == $netcoreVer) and
+                any(.packages[]?; .name == "Microsoft.WindowsDesktop.App.Runtime.win-x64" and .versionInfo == $desktopVer) and
+                ([.packages[]? | select(.name | startswith("Microsoft.NETCore.App.Runtime."))] | length) == 1 and
+                ([.packages[]? | select(.name | startswith("Microsoft.WindowsDesktop.App.Runtime."))] | length) == 1
+              ' "$manifest" >/dev/null || {
+                echo "::error::$product SBOM has a stale, Native-AOT, or non-host graph"; exit 1;
+              }
+            cp "$manifest" "$output_name"
+          }
+
+          generate_host_sbom qrshard-display-win-x64.zip src/QrShard.Display \
+            QrShard.Display.win-x64 "qrshard-display-win-x64-$ASSET_LABEL.spdx.json"
+          jq -e '([.packages[]? | select(.name | startswith("Vortice"))] | length) == 0' \
+            "$RUNNER_TEMP/sbom-output-QrShard.Display.win-x64/_manifest/spdx_2.2/manifest.spdx.json" >/dev/null || {
+              echo "::error::Display SBOM must not include Vortice"; exit 1;
+            }
+
+          generate_host_sbom qrshard-recorder-win-x64.zip src/QrShard.Recorder \
+            QrShard.Recorder.win-x64 "qrshard-recorder-win-x64-$ASSET_LABEL.spdx.json"
+          jq -e 'any(.packages[]?; .name == "Vortice.Direct3D11" and .versionInfo == "3.8.3")' \
+            "$RUNNER_TEMP/sbom-output-QrShard.Recorder.win-x64/_manifest/spdx_2.2/manifest.spdx.json" >/dev/null || {
+              echo "::error::Recorder SBOM is missing pinned Vortice.Direct3D11 3.8.3"; exit 1;
+            }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-display-win-x64
+          path: |
+            qrshard-display-win-x64.zip
+            qrshard-display-win-x64-${{ env.ASSET_LABEL }}.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-recorder-win-x64
+          path: |
+            qrshard-recorder-win-x64.zip
+            qrshard-recorder-win-x64-${{ env.ASSET_LABEL }}.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+
   sbom:
     needs: packages
     runs-on: ubuntu-24.04
@@ -560,7 +750,7 @@ jobs:
           retention-days: 7
 
   create-draft:
-    needs: [binaries, packages, sbom]
+    needs: [binaries, packages, sbom, windows-hosts]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -596,6 +786,8 @@ jobs:
             qrshard-linux-x64.tar.gz
             qrshard-linux-arm64.tar.gz
             qrshard-osx-arm64.tar.gz
+            qrshard-display-win-x64.zip
+            qrshard-recorder-win-x64.zip
             "QrShard.Tool.$version.nupkg"
             "QrShard.Core.$version.nupkg"
             "qrshard-win-x64-$GITHUB_REF_NAME.spdx.json"
@@ -604,6 +796,8 @@ jobs:
             "qrshard-osx-arm64-$GITHUB_REF_NAME.spdx.json"
             "qrshard-tool-$GITHUB_REF_NAME.spdx.json"
             "qrshard-core-$GITHUB_REF_NAME.spdx.json"
+            "qrshard-display-win-x64-$GITHUB_REF_NAME.spdx.json"
+            "qrshard-recorder-win-x64-$GITHUB_REF_NAME.spdx.json"
           )
           [ "$(find . -maxdepth 1 -type f | wc -l)" -eq "${#expected[@]}" ] || {
             echo "::error::release candidate contains an unexpected number of files"; exit 1;
@@ -676,6 +870,18 @@ jobs:
         with:
           subject-path: release-assets/QrShard.Core.*.nupkg
           sbom-path: release-assets/qrshard-core-${{ github.ref_name }}.spdx.json
+
+      - name: Attest display-win-x64 SPDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release-assets/qrshard-display-win-x64.zip
+          sbom-path: release-assets/qrshard-display-win-x64-${{ github.ref_name }}.spdx.json
+
+      - name: Attest recorder-win-x64 SPDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release-assets/qrshard-recorder-win-x64.zip
+          sbom-path: release-assets/qrshard-recorder-win-x64-${{ github.ref_name }}.spdx.json
 
       - name: Create one complete draft release
         env:
@@ -1034,7 +1240,7 @@ jobs:
           done
 
   publish-release:
-    needs: [binaries, packages, sbom, create-draft, publish-nuget]
+    needs: [binaries, packages, sbom, create-draft, publish-nuget, windows-hosts]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1086,6 +1292,8 @@ jobs:
             qrshard-linux-x64.tar.gz
             qrshard-linux-arm64.tar.gz
             qrshard-osx-arm64.tar.gz
+            qrshard-display-win-x64.zip
+            qrshard-recorder-win-x64.zip
             "QrShard.Tool.$version.nupkg"
             "QrShard.Core.$version.nupkg"
             "qrshard-win-x64-$ASSET_LABEL.spdx.json"
@@ -1094,6 +1302,8 @@ jobs:
             "qrshard-osx-arm64-$ASSET_LABEL.spdx.json"
             "qrshard-tool-$ASSET_LABEL.spdx.json"
             "qrshard-core-$ASSET_LABEL.spdx.json"
+            "qrshard-display-win-x64-$ASSET_LABEL.spdx.json"
+            "qrshard-recorder-win-x64-$ASSET_LABEL.spdx.json"
           )
           [ "$(find expected-assets -maxdepth 1 -type f | wc -l)" -eq "${#expected[@]}" ] || {
             echo "::error::workflow artifacts changed before publication"; exit 1;

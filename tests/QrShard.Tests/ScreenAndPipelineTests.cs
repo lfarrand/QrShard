@@ -78,7 +78,8 @@ public class ScreenAndPipelineTests
         frames.ForEach(f => f.Dispose());
 
         string output = tmp.File("out.bin");
-        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats, null, decodeWorkers: 3);
+        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats, null, decodeWorkers: 3,
+            cancellationToken: TestContext.Current.CancellationToken);
         // The invariants that hold regardless of scheduling: correct round trip, the completion
         // cancellation fired, and the duplicate pre-filter ran. NOT asserted: FramesExamined <
         // total — the producer prefetches into a bounded queue while workers decode, so on a

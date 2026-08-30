@@ -44,7 +44,8 @@ public class CameraVideoAndCalibrationTests
         frames.ForEach(f => f.Dispose());
 
         string output = tmp.File("out.bin");
-        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats);
+        new VideoDecoder().Decode(recording, output, 8, _ => { }, out var stats,
+            cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(content, File.ReadAllBytes(output));
         Assert.True(stats.StoppedEarly || stats.ShardsCollected == result.ImageCount);
     }
@@ -70,7 +71,8 @@ public class CameraVideoAndCalibrationTests
         frames.ForEach(f => f.Dispose());
 
         string output = tmp.File("out.bin");
-        new VideoDecoder().Decode(recording, output, 8, _ => { }, out _);
+        new VideoDecoder().Decode(recording, output, 8, _ => { }, out _,
+            cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(content, File.ReadAllBytes(output));
     }
 

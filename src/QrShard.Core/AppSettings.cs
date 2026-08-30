@@ -29,6 +29,15 @@ internal sealed class AppSettings
         "Resolution", "CellPx", "BitsPerCell", "EccParity", "RecoveryPercent", "ImageFormat", "Compress",
     };
 
+    private static readonly Dictionary<string, CompressionLevel> CompressionLevels =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            [nameof(CompressionLevel.Optimal)] = CompressionLevel.Optimal,
+            [nameof(CompressionLevel.Fastest)] = CompressionLevel.Fastest,
+            [nameof(CompressionLevel.SmallestSize)] = CompressionLevel.SmallestSize,
+            [nameof(CompressionLevel.NoCompression)] = CompressionLevel.NoCompression,
+        };
+
     private static readonly Lazy<AppSettings> Cached = new(() => Load(DefaultPath));
 
     public static string DefaultPath => Path.Combine(AppContext.BaseDirectory, "appsettings.json");
@@ -94,7 +103,7 @@ internal sealed class AppSettings
 
     /// <summary>Named encode presets applied by <c>--profile &lt;name&gt;</c>; flags still override.</summary>
     public IReadOnlyDictionary<string, EncodeDefaultSettings> EncodeProfiles { get; private set; } =
-        new Dictionary<string, EncodeDefaultSettings>();
+        new Dictionary<string, EncodeDefaultSettings>(StringComparer.Ordinal);
 
     internal sealed class EncodeDefaultSettings
     {
@@ -121,11 +130,15 @@ internal sealed class AppSettings
             {
                 CommentHandling = JsonCommentHandling.Skip,
                 AllowTrailingCommas = true,
+                AllowDuplicateProperties = false,
             });
         }
         catch (JsonException ex)
         {
-            throw new InvalidOperationException($"{file} is not valid JSON: {ex.Message}");
+            throw new InvalidOperationException(
+                ex.Message.Contains("Duplicate", StringComparison.OrdinalIgnoreCase)
+                    ? $"{file}: duplicate JSON property names are not allowed. {ex.Message}"
+                    : $"{file} is not valid JSON: {ex.Message}");
         }
 
         using (document)
@@ -193,16 +206,20 @@ internal sealed class AppSettings
             {
                 if (profiles.ValueKind != JsonValueKind.Object)
                     throw Invalid("EncodeProfiles", profiles.ToString(), "an object of named profiles");
-                var parsed = new Dictionary<string, EncodeDefaultSettings>(StringComparer.OrdinalIgnoreCase);
+                var parsed = new Dictionary<string, EncodeDefaultSettings>(StringComparer.Ordinal);
+                var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var profile in profiles.EnumerateObject())
                 {
+                    if (!names.Add(profile.Name))
+                        throw Invalid($"EncodeProfiles.{profile.Name}", profile.Name,
+                            "a unique profile name (duplicate names and names that differ only by case collide)");
                     if (profile.Value.ValueKind != JsonValueKind.Object)
                         throw Invalid($"EncodeProfiles.{profile.Name}", profile.Value.ToString(), "an object of encode settings");
                     // Each profile starts from the resolved EncodeDefaults, so a preset only
                     // states the fields it changes.
                     var p = Clone(settings.EncodeDefaults);
                     ParseEncodeSettings(profile.Value, p, $"EncodeProfiles.{profile.Name}", Invalid);
-                    parsed[profile.Name] = p;
+                    parsed.Add(profile.Name, p);
                 }
                 settings.EncodeProfiles = parsed;
             }
@@ -276,10 +293,16 @@ internal sealed class AppSettings
 
     private static void ValidateKnownProperties(JsonElement obj, HashSet<string> known, string prefix)
     {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var property in obj.EnumerateObject())
+        {
+            if (!seen.Add(property.Name))
+                throw new InvalidOperationException(
+                    $"appsettings.json: duplicate setting '{prefix}{property.Name}'.");
             if (!known.Contains(property.Name))
                 throw new InvalidOperationException(
                     $"appsettings.json: unknown setting '{prefix}{property.Name}'. Check its spelling.");
+        }
     }
 
     private static CompressionLevel ReadLevel(JsonElement parent, string name, CompressionLevel fallback)
@@ -289,7 +312,7 @@ internal sealed class AppSettings
         if (element.ValueKind != JsonValueKind.String)
             throw WrongType(name, "a string", element);
         string value = element.GetString() ?? "";
-        if (!Enum.TryParse(value, ignoreCase: true, out CompressionLevel parsed) || !Enum.IsDefined(parsed))
+        if (!CompressionLevels.TryGetValue(value, out CompressionLevel parsed))
             throw new InvalidOperationException(
                 $"appsettings.json: invalid {name} '{value}'. " +
                 "Possible values: Optimal, Fastest, SmallestSize, NoCompression.");

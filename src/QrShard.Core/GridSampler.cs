@@ -113,12 +113,23 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         return Math.Clamp((int)Math.Floor(inner.Y0 + yEnc * sy), 0, height - 1);
     }
 
+    /// <summary>
+    /// Exact nearest-palette index and its squared RGB distance. A 5-bit quantized LUT is too
+    /// coarse for confidence: illumination gain 0.2 packs adjacent 8-bit levels into one 8-unit
+    /// cube, and distance to that cube's first winner can sit under <see cref="ConfidentDist"/>.
+    /// </summary>
+    private int ClassifyExact(Rgb24[] palette, byte r, byte g, byte b, out long dist)
+    {
+        int v = paletteMath.Nearest(palette, r, g, b);
+        long dr = r - palette[v].R, dg = g - palette[v].G, db = b - palette[v].B;
+        dist = dr * dr + dg * dg + db * db;
+        return v;
+    }
+
     private void ReadUniform(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, DecodeScratch scratch,
         double sx, double sy, int bits, int[]? cellMargins)
     {
-        // Lazy nearest-color lookup keyed on 5-bit-per-channel quantized RGB.
-        int[] lut = scratch.ResetNearestColorLut();
         int width = bmp.Width, height = bmp.Height;
         var px = bmp.Px;
         int[] cols = ColumnPixels(inner, layout, sx, width);
@@ -147,12 +158,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     foreach (int delta in deltas)
                     {
                         var c = px[baseIndex + delta];
-                        int key = (c.R >> 3 << 10) | (c.G >> 3 << 5) | (c.B >> 3);
-                        int v = lut[key];
-                        if (v < 0)
-                            lut[key] = v = paletteMath.Nearest(palette, c.R, c.G, c.B);
-                        long dr = c.R - palette[v].R, dg = c.G - palette[v].G, db = c.B - palette[v].B;
-                        long dist = dr * dr + dg * dg + db * db;
+                        int v = ClassifyExact(palette, c.R, c.G, c.B, out long dist);
                         if (dist < bestDist)
                         {
                             bestDist = dist;
@@ -170,12 +176,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                         int xi = Math.Clamp(colX + dx, 0, width - 1);
                         int yi = Math.Clamp(rowY + dy, 0, height - 1);
                         var c = px[yi * width + xi];
-                        int key = (c.R >> 3 << 10) | (c.G >> 3 << 5) | (c.B >> 3);
-                        int v = lut[key];
-                        if (v < 0)
-                            lut[key] = v = paletteMath.Nearest(palette, c.R, c.G, c.B);
-                        long dr = c.R - palette[v].R, dg = c.G - palette[v].G, db = c.B - palette[v].B;
-                        long dist = dr * dr + dg * dg + db * db;
+                        int v = ClassifyExact(palette, c.R, c.G, c.B, out long dist);
                         if (dist < bestDist)
                         {
                             bestDist = dist;

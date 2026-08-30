@@ -30,6 +30,17 @@ single-file `-o` can replace a file that user could already replace. Point `-o` 
 sensible. Archive output is stricter: its destination must be absent or empty and is never merged
 into an existing tree.
 
+### Windows Display and Recorder
+
+`QrShard.Recorder` captures **every compositor frame** on the nominated `CaptureScreen`, including
+other windows. Treat the output folder as a full-desktop recording. `QrShard.Display` only presents
+local stills 1:1; it is not a decoder and does not read shard payloads. Neither host is in the
+Native-AOT `QrShard` binary or the nuget.org `QrShard.Tool` package. From v1.7.6 they also
+attach as self-contained win-x64 GitHub Release zips; they remain Windows Desktop SDK
+builds from `QrShard.Windows.slnx`. ffmpeg `receive --screen` remains the documented path for
+decoding a remote window without dumping the whole desktop. Keep Display `TerminationColor` in
+sync with Recorder so a single-pass run can stop the capture without extra keystrokes.
+
 ## What the format guarantees
 
 A successful decode means the reconstructed file matched a SHA-256 carried inside the shards, so

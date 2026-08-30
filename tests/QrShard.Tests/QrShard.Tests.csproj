@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -60,6 +60,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\QrShard.Core\QrShard.Core.csproj" />
     <ProjectReference Include="..\..\src\QrShard\QrShard.csproj" />
+    <ProjectReference Include="..\..\src\QrShard.Windows.Logic\QrShard.Windows.Logic.csproj" />
   </ItemGroup>
 
   <!-- Frozen cross-version interop fixtures (shards from released tags); copied so the tests

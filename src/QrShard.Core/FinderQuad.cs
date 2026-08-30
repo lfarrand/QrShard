@@ -16,7 +16,11 @@ internal sealed class QuadSelector(CameraMath math) : IQuadSelector
     {
     }
 
-    /// <summary>Chooses the four clusters that best form the finder rectangle (largest valid convex quad).</summary>
+    /// <summary>
+    /// Chooses the clusters that best form the finder rectangle: the largest valid 4-corner
+    /// lock, or (when that search fails) the best 3-subset reconstructed through
+    /// <see cref="ThreeFinderQuad"/>.
+    /// </summary>
     public FinderQuad? ChooseQuad(List<FinderCluster> clusters)
     {
         var strong = clusters.Where(c => c.Count >= 2).OrderByDescending(c => c.Count).Take(12).ToList();
@@ -25,7 +29,7 @@ internal sealed class QuadSelector(CameraMath math) : IQuadSelector
             // finders. Reconstruct the fourth by parallelogram completion so a common handheld
             // capture that today fails outright still decodes — the payload CRC gates any bad
             // reconstruction, so a wrong quad simply produces a capture that does not decode.
-            return strong.Count == 3 ? ThreeFinderQuad(strong) : null;
+            return BestThreeSubset(strong);
 
         FinderQuad? best = null;
         double bestArea = 0;
@@ -56,6 +60,33 @@ internal sealed class QuadSelector(CameraMath math) : IQuadSelector
             {
                 bestArea = area;
                 best = new FinderQuad(pts, avgModule);
+            }
+        }
+        // A 4-corner lock always ranks above reconstruction. Only when no 4-tuple survives
+        // (one occluded finder plus extra 1:1:3:1:1 clusters) do we try 3-subsets.
+        return best ?? BestThreeSubset(strong);
+    }
+
+    /// <summary>
+    /// Best parallelogram completion over every 3-subset of <paramref name="strong"/>.
+    /// Ranked by reconstructed area so a true L outranks a smaller accidental one.
+    /// </summary>
+    private FinderQuad? BestThreeSubset(List<FinderCluster> strong)
+    {
+        FinderQuad? best = null;
+        double bestArea = 0;
+        for (int a = 0; a < strong.Count - 2; a++)
+        for (int b = a + 1; b < strong.Count - 1; b++)
+        for (int c = b + 1; c < strong.Count; c++)
+        {
+            var reconstructed = ThreeFinderQuad([strong[a], strong[b], strong[c]]);
+            if (reconstructed is null)
+                continue;
+            double area = ConvexArea(reconstructed.Points);
+            if (area > bestArea)
+            {
+                bestArea = area;
+                best = reconstructed;
             }
         }
         return best;

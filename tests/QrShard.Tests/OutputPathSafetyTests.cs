@@ -362,6 +362,22 @@ public class OutputPathSafetyTests
     }
 
     [Fact]
+    public void DirectoryOutput_DoesNotReplaceAnOccupiedChildNamedByTheHeader()
+    {
+        // Directory -o is a folder, not a replace target. The header FileName is untrusted, so
+        // an occupied child (taxes.xlsx sitting in the folder the user named) must get
+        // .restored-N rather than PublishVerifiedReplacement.
+        using var tmp = new TempDir();
+        string dest = tmp.Sub("out");
+        string occupied = tmp.WriteFile(Path.Combine("out", "taxes.xlsx"), "keep me"u8.ToArray());
+
+        new ShardAssembler().Assemble([CraftShard("taxes.xlsx", "replacement"u8.ToArray())], dest, _ => { });
+
+        Assert.Equal("keep me", File.ReadAllText(occupied));
+        Assert.Equal("replacement", File.ReadAllText(Path.Combine(dest, "taxes.restored.xlsx")));
+    }
+
+    [Fact]
     public void SafeFileName_LeavesTheHeaderValueItselfUntouched()
     {
         // The original name is still what gets logged and bound as AES-GCM associated data, so

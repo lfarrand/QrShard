@@ -85,6 +85,71 @@ public class AppSettingsTests
         Assert.Contains("Optimal, Fastest, SmallestSize, NoCompression", ex.Message);
     }
 
+    [Theory]
+    [InlineData("{ \"PngCompressionLevel\": \"Fastest\", \"PngCompressionLevel\": \"Optimal\" }")]
+    [InlineData("{ \"EncodeDefaults\": { \"CellPx\": 1, \"CellPx\": 2 } }")]
+    [InlineData("{ \"EncodeProfiles\": { \"dense\": { \"CellPx\": 1 }, \"dense\": { \"CellPx\": 2 } } }")]
+    public void DuplicateJsonProperties_FailLoudly(string json)
+    {
+        using var tmp = new TempDir();
+        var ex = Assert.Throws<InvalidOperationException>(() => LoadJson(tmp, json));
+        Assert.Contains("duplicate", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void EncodeProfiles_CaseCollidingNames_FailLoudly()
+    {
+        using var tmp = new TempDir();
+        var ex = Assert.Throws<InvalidOperationException>(() => LoadJson(tmp,
+            """
+            {
+              "EncodeProfiles": {
+                "Fast": { "CellPx": 1 },
+                "fast": { "CellPx": 2 }
+              }
+            }
+            """));
+        Assert.Contains("EncodeProfiles", ex.Message);
+        Assert.Contains("fast", ex.Message);
+    }
+
+    [Fact]
+    public void EncodeProfiles_StoresNamesOrdinarily_WithoutLastWins()
+    {
+        using var tmp = new TempDir();
+        var settings = LoadJson(tmp,
+            """
+            {
+              "EncodeProfiles": {
+                "Fast": { "CellPx": 1 },
+                "Slow": { "CellPx": 4 }
+              }
+            }
+            """);
+        Assert.True(settings.EncodeProfiles.ContainsKey("Fast"));
+        Assert.False(settings.EncodeProfiles.ContainsKey("fast"));
+        Assert.Equal(1, settings.EncodeProfiles["Fast"].CellPx);
+        Assert.Equal(4, settings.EncodeProfiles["Slow"].CellPx);
+        Assert.Equal(2, settings.EncodeProfiles.Count);
+    }
+
+    [Theory]
+    [InlineData("PngCompressionLevel", "0")]
+    [InlineData("PngCompressionLevel", "1")]
+    [InlineData("PngCompressionLevel", "2")]
+    [InlineData("PngCompressionLevel", "3")]
+    [InlineData("PayloadCompressionLevel", "0")]
+    [InlineData("PayloadCompressionLevel", "2")]
+    public void CompressionLevel_RejectsEnumIntegerStrings(string setting, string value)
+    {
+        using var tmp = new TempDir();
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            LoadJson(tmp, $$"""{ "{{setting}}": "{{value}}" }"""));
+        Assert.Contains(setting, ex.Message);
+        Assert.Contains(value, ex.Message);
+        Assert.Contains("Optimal, Fastest, SmallestSize, NoCompression", ex.Message);
+    }
+
     [Fact]
     public void MalformedJson_FailsLoudly()
     {

@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/QrShard.Core/QrShard.Core.csproj" />
     <Project Path="src/QrShard/QrShard.csproj" />
+    <Project Path="src/QrShard.Windows.Logic/QrShard.Windows.Logic.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/QrShard.Benchmarks/QrShard.Benchmarks.csproj" />

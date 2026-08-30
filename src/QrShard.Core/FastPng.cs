@@ -39,6 +39,9 @@ internal sealed class FastPng
         BinaryPrimitives.WriteInt32BigEndian(ihdr[4..], height);
         ihdr[8] = 8;
         ihdr[9] = 2;
+        ihdr[10] = 0; // compression method: deflate
+        ihdr[11] = 0; // filter method: adaptive
+        ihdr[12] = 0; // interlace: none
         WriteChunk(fs, "IHDR", ihdr);
 
         // IDAT, streamed: length is back-patched, CRC accumulated over type + data as written.

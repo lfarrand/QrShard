@@ -68,4 +68,85 @@ public class PublicApiTests
         Assert.Throws<ArgumentException>(() => new QrShardCodec().EncodeFile(
             input, tmp.Sub("shards"), new QrShardEncodeOptions { RecoveryPercent = 10, FountainPercent = 10 }));
     }
+
+    private static readonly QrShardEncodeOptions Compact = new() { Width = 700, Height = 700 };
+
+    [Theory]
+    [InlineData(nameof(QrShardEncodeOptions.CellPx))]
+    [InlineData(nameof(QrShardEncodeOptions.BitsPerCell))]
+    [InlineData(nameof(QrShardEncodeOptions.EccParity))]
+    [InlineData(nameof(QrShardEncodeOptions.FountainPercent))]
+    [InlineData(nameof(QrShardEncodeOptions.CameraMode))]
+    [InlineData(nameof(QrShardEncodeOptions.Compress))]
+    [InlineData(nameof(QrShardEncodeOptions.Interleave2))]
+    public void EncodeFile_AppliesEachMappedOption(string field)
+    {
+        using var tmp = new TempDir();
+        byte[] content = field == nameof(QrShardEncodeOptions.Compress)
+            ? TestData.CompressibleText(256)
+            : TestData.Random(80);
+        string input = tmp.WriteFile("input.bin", content);
+
+        QrShardEncodeOptions options = field switch
+        {
+            nameof(QrShardEncodeOptions.CellPx) => Compact with { CellPx = 8 },
+            nameof(QrShardEncodeOptions.BitsPerCell) => Compact with { BitsPerCell = 2 },
+            nameof(QrShardEncodeOptions.EccParity) => Compact with { EccParity = 32 },
+            nameof(QrShardEncodeOptions.FountainPercent) => Compact with { FountainPercent = 100 },
+            nameof(QrShardEncodeOptions.CameraMode) => Compact with { CameraMode = true },
+            nameof(QrShardEncodeOptions.Compress) => Compact with { Compress = false },
+            nameof(QrShardEncodeOptions.Interleave2) => Compact with { Interleave2 = true },
+            _ => throw new ArgumentOutOfRangeException(nameof(field), field, "Unknown mapped field."),
+        };
+
+        var codec = new QrShardCodec();
+        var report = codec.EncodeFile(input, tmp.Sub("shards"), options);
+
+        var diag = new ShardDecoder().Diagnose(report.Files[0]);
+        Assert.NotNull(diag.Layout);
+        Assert.NotNull(diag.Shard);
+        Layout layout = diag.Layout;
+        ShardHeader header = diag.Shard.Header;
+
+        switch (field)
+        {
+            case nameof(QrShardEncodeOptions.CellPx):
+                Assert.Equal(8, layout.CellPx);
+                break;
+            case nameof(QrShardEncodeOptions.BitsPerCell):
+                Assert.Equal(2, layout.BitsPerCell);
+                break;
+            case nameof(QrShardEncodeOptions.EccParity):
+                Assert.Equal(32, layout.EccParity);
+                Assert.Equal(32, diag.Shard.EccParity);
+                break;
+            case nameof(QrShardEncodeOptions.FountainPercent):
+                Assert.True(report.ParityImages >= 1);
+                Assert.Equal(ShardHeader.FlagFountain, header.Flags & ShardHeader.FlagFountain);
+                Assert.True(header.StripeParity > 0);
+                break;
+            case nameof(QrShardEncodeOptions.CameraMode):
+                var camera = Layout.Create(Compact.Width, Compact.Height, Compact.CellPx,
+                    Compact.BitsPerCell, Compact.EccParity, cameraFinders: true);
+                var screenshot = Layout.Create(Compact.Width, Compact.Height, Compact.CellPx,
+                    Compact.BitsPerCell, Compact.EccParity);
+                Assert.Equal(camera.GridH, layout.GridH);
+                Assert.True(layout.GridH < screenshot.GridH);
+                Assert.Equal(camera.Height, report.Height);
+                break;
+            case nameof(QrShardEncodeOptions.Compress):
+                Assert.Equal(0, header.Flags & ShardHeader.FlagCompressed);
+                break;
+            case nameof(QrShardEncodeOptions.Interleave2):
+                Assert.True(layout.Interleave2);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(field), field, "Unknown mapped field.");
+        }
+
+        string output = tmp.File("out.bin");
+        IReadOnlyList<QrShardDecodedFile> restored = codec.DecodeImages(report.Files, output);
+        Assert.Single(restored);
+        Assert.Equal(content, File.ReadAllBytes(output));
+    }
 }

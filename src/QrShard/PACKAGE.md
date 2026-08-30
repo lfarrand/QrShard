@@ -63,6 +63,13 @@ whole missing images can be reconstructed when recovery images were generated.
 | Capture this computer's display | show the slideshow in an RDP/VM window | `qrshard receive --screen --region x,y,w,h` |
 | Windows clipboard | display individual shards | `qrshard decode --clipboard --session transfer.qrsession` |
 | Captures arriving in a folder | ordinary encode/send | `qrshard decode incoming --watch --session transfer.qrsession` |
+| Windows 1:1 lossless dump (repository hosts, not this package) | `QrShard.Display` from `QrShard.Windows.slnx` | `QrShard.Recorder` dump, then `qrshard decode` |
+
+`QrShard.Display` and `QrShard.Recorder` are Windows Desktop SDK executables in the
+[QrShard repository](https://github.com/lfarrand/QrShard). They are **not** shipped in this NuGet
+tool, inside tagged Native-AOT CLI archives, or as `qrshard display` / `qrshard record` verbs.
+From v1.7.6 the GitHub Release attaches them as separate self-contained win-x64 zips. HTML
+`send` and ffmpeg `receive --screen` remain the workflows this package actually installs.
 
 `send` is the one-step form of `encode --video --open`. HTML slideshows are relative manifests, so
 keep `slideshow.html` beside its shard images and generated sidecars. `--slideshow apng` creates one
@@ -85,6 +92,10 @@ sampled BMP frames in the logged temporary directory for inspection or manual de
 - Diagnose captures with ECC-damage and classification-quality heatmaps, including failed images.
 - Generate and analyse calibration probes for the real display/camera path.
 - Run a built-in self-test or test a chosen file and settings through simulated capture damage.
+
+The repository also contains `QrShard.Display` (1:1 WPF player) and `QrShard.Recorder` (DXGI
+lossless archive). Download the tagged win-x64 zips or build them with
+`dotnet build QrShard.Windows.slnx -c Release`. They are not part of this package.
 
 Run `qrshard --help` for the complete command and option reference.
 
