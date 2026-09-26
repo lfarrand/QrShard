@@ -43,10 +43,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.10" />
     <ProjectReference Include="..\QrShard.Core\QrShard.Core.csproj" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11"
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.12"
                       GeneratePathProperty="true" />
     <PackageReference Include="SixLabors.ImageSharp" Version="4.0.0" />
   </ItemGroup>
