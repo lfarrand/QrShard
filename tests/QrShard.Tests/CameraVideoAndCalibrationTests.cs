@@ -140,4 +140,20 @@ public class CameraVideoAndCalibrationTests
         Assert.Equal(0, code);
         Assert.Contains("-c 1 -b 10", analyzeOut.ToString());
     }
+
+    [Fact]
+    public void Calibrate_ResolutionOutsideTheEncodableRange_ReportsTheRange()
+    {
+        using var tmp = new TempDir();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        int code = new Cli().Run(["calibrate", "-o", tmp.File("cal"), "-r", "20000"], stdout, stderr,
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(1, code);
+        string error = stderr.ToString();
+        Assert.Contains("700", error);
+        Assert.Contains("16384", error);
+        Assert.DoesNotContain("too small", error);
+        Assert.DoesNotContain("too small", stdout.ToString());
+    }
 }

@@ -50,6 +50,12 @@ internal sealed class CalibrationRunner : ICalibration
     {
         var source = camera ? CameraProbes : ScreenProbes;
         int eccParity = camera ? CameraEccParity : ScreenEccParity;
+        // A resolution outside 700–16384 is a bad argument, not a probe the canvas cannot host.
+        // Create throws that range error before any per-probe catch can turn it into "too small".
+        if (width is < Layout.MinResolution or > Layout.MaxResolution ||
+            height is < Layout.MinResolution or > Layout.MaxResolution)
+            Layout.Create(width, height, source[0].CellPx, source[0].Bits, eccParity, camera);
+
         var fitted = new List<(int CellPx, int Bits)>(source.Length);
         foreach (var probe in source)
         {
@@ -60,7 +66,7 @@ internal sealed class CalibrationRunner : ICalibration
             }
             catch (ArgumentException)
             {
-                // Strip too narrow, or the cell stream would exceed the decoder cap.
+                // This probe's strip is too narrow, or its cell stream would exceed the decoder cap.
             }
         }
         return fitted;

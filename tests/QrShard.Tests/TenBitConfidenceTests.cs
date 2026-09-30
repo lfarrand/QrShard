@@ -95,4 +95,75 @@ public class TenBitConfidenceTests
         using var previous = Image.Load<Rgb24>(oldFloor);
         Assert.Equal(previous[0, 0], previous[6, 0]);
     }
+
+    [Fact]
+    public void InterpolatedMidpoint_FlagsANearTieTheEndpointFloorWouldSkip()
+    {
+        var top = new Palette().Build(10);
+        var bottom = (Rgb24[])top.Clone();
+        (bottom[0], bottom[64]) = (bottom[64], bottom[0]);
+        Assert.Equal(new Rgb24(17, 0, 0), bottom[0]);
+        // Each strip is still a full 10-bit palette, so the endpoint floor stays 49.
+        Assert.Equal(49, GridSampler.ConfidenceFloorSquared(Palette.ClosestSquared(top)));
+        Assert.Equal(49, GridSampler.ConfidenceFloorSquared(Palette.ClosestSquared(bottom)));
+
+        var layout = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 1,
+            GridW = 1,
+            GridH = 1,
+            MetaH = 1,
+            InnerW = 3,
+            InnerH = 7,
+            EccParity = 16,
+            FinderModule = 0,
+        };
+        var palettes = new PaletteSet(top, top, bottom, Interpolate: true);
+        Assert.Equal(0.5, GridSampler.InterpolatedRowT(layout, 0), precision: 6);
+        Assert.Equal(0, GridSampler.ConfidenceFloorFor(palettes, layout));
+
+        int w = layout.InnerW, h = layout.InnerH;
+        var px = new Rgb24[w * h];
+        px[3 * w + 1] = new Rgb24(10, 0, 0);
+        byte[] stream = new GridSampler().ReadDataGrid(
+            new Bitmap(px, w, h), new InnerRect(0, 0, w, h), layout, palettes,
+            new DecodeScratch(), out bool[]? suspects, out _);
+
+        Assert.Equal(0, new BitStream().ReadCell(stream, 0, 10));
+        Assert.NotNull(suspects);
+        Assert.True(suspects[0]);
+        Assert.True(suspects[1]);
+    }
+
+    [Fact]
+    public void QualityHeatmap_ClampsASparsePaletteFloorAtTheAbsoluteThreshold()
+    {
+        var blackAndWhite = new Palette().Build(1);
+        long floor = GridSampler.ConfidenceFloorFor(new PaletteSet(blackAndWhite, blackAndWhite, blackAndWhite, false));
+        Assert.True(floor > GridSampler.AbsoluteSuspectDist);
+
+        var layout = new Layout
+        {
+            BitsPerCell = 1,
+            CellPx = 1,
+            GridW = 2,
+            GridH = 1,
+            MetaH = 6,
+            InnerW = 14,
+            InnerH = 37,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        using var tmp = new TempDir();
+        string trusted = tmp.File("trusted.png");
+        new HeatmapRenderer().RenderQuality(layout, [0, 1000], trusted, floor);
+        using var image = Image.Load<Rgb24>(trusted);
+        Assert.Equal(image[0, 0], image[6, 0]);
+
+        string past = tmp.File("past.png");
+        new HeatmapRenderer().RenderQuality(layout, [0, 5000], past, GridSampler.AbsoluteSuspectDist);
+        using var far = Image.Load<Rgb24>(past);
+        Assert.NotEqual(far[0, 0], far[6, 0]);
+    }
 }

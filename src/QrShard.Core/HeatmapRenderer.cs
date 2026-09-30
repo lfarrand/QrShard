@@ -83,9 +83,12 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
     {
         int w = layout.GridW * CellPx, h = layout.GridH * CellPx;
         var px = new Rgb24[w * h];
-        // Same thresholds RecordConfidence uses: measured spacing → green, AbsoluteSuspectDist → red.
+        // A sparse palette's measured floor can sit above AbsoluteSuspectDist. RecordConfidence
+        // still trusts samples under that floor (and under the absolute cap), so the heatmap
+        // clamps there instead of treating the wide floor as "no green plateau".
         double ambiguous = GridSampler.AbsoluteSuspectDist;
-        double confident = confidentDist < 0 || confidentDist >= GridSampler.AbsoluteSuspectDist ? 0 : confidentDist;
+        double confident = Math.Clamp(confidentDist, 0, ambiguous);
+        double span = ambiguous - confident;
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {
@@ -94,7 +97,9 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
                 int margin = cellMargins[(int)cellIndex];
                 var color = margin > ambiguous * 4
                     ? new Rgb24(90, 0, 20) // far past any palette color — likely unreadable
-                    : Gradient(Math.Clamp((margin - confident) / (ambiguous - confident), 0, 1));
+                    : Gradient(span <= 0
+                        ? (margin > ambiguous ? 1 : 0)
+                        : Math.Clamp((margin - confident) / span, 0, 1));
                 Fill(px, w, gx * CellPx, gy * CellPx, color);
             }
         }

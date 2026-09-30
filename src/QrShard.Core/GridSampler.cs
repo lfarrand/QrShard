@@ -60,10 +60,11 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         bool[]? suspects = layout.EccParity > 0 ? scratch.ClearedSuspects(streamLength) : null;
         byte[]? second = layout.EccParity > 0 ? scratch.ClearedSecondChoice(streamLength) : null;
 
-        // Once per image, from measured spacing. Clean cells (distance 0) still skip the runner-up.
-        long confidenceFloor = ConfidenceFloorFor(palettes);
+        // Uniform palettes: once per image. Interpolated rows are measured inside ReadInterpolated,
+        // because a row between the strips can be tighter than either strip.
+        long confidenceFloor = palettes.Interpolate ? 0 : ConfidenceFloorFor(palettes);
         if (palettes.Interpolate)
-            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins, confidenceFloor);
+            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins);
         else
             ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits, cellMargins, confidenceFloor);
         suspectBytes = suspects;
@@ -130,16 +131,50 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     }
 
     /// <summary>
-    /// Floor for the palette the sampler will classify against. An interpolated row sits between
-    /// the top and bottom strips, so the tightest of the three measured spacings wins.
+    /// Floor for the palette the sampler will classify against. When the strips are interpolated,
+    /// <paramref name="layout"/> selects the rows actually classified: a midpoint can pull two
+    /// colours together even though each strip still has a wide closest pair.
     /// </summary>
-    internal static long ConfidenceFloorFor(PaletteSet palettes)
+    internal static long ConfidenceFloorFor(PaletteSet palettes, Layout? layout = null)
     {
-        long floor = ConfidenceFloorSquared(Palette.ClosestSquared(palettes.Best));
         if (!palettes.Interpolate)
-            return floor;
-        floor = Math.Min(floor, ConfidenceFloorSquared(Palette.ClosestSquared(palettes.Top)));
-        return Math.Min(floor, ConfidenceFloorSquared(Palette.ClosestSquared(palettes.Bottom)));
+            return ConfidenceFloorSquared(Palette.ClosestSquared(palettes.Best));
+        if (layout is null)
+            return ConfidenceFloorSquared(Palette.ClosestSquared(palettes.Best));
+        return MinimumInterpolatedFloor(palettes, layout);
+    }
+
+    /// <summary>Tightest confidence floor among the row palettes <see cref="ReadInterpolated"/> builds.</summary>
+    private static long MinimumInterpolatedFloor(PaletteSet palettes, Layout layout)
+    {
+        var row = new Rgb24[palettes.Top.Length];
+        long floor = long.MaxValue;
+        for (int gy = 0; gy < layout.GridH; gy++)
+            floor = Math.Min(floor, RowConfidenceFloor(palettes, layout, gy, row));
+        return floor == long.MaxValue ? 0 : floor;
+    }
+
+    private static void FillInterpolatedRow(PaletteSet palettes, Layout layout, int gy, Rgb24[] rowPalette)
+    {
+        double t = InterpolatedRowT(layout, gy);
+        for (int c = 0; c < rowPalette.Length; c++)
+            rowPalette[c] = Lerp(palettes.Top[c], palettes.Bottom[c], t);
+    }
+
+    private static long RowConfidenceFloor(PaletteSet palettes, Layout layout, int gy, Rgb24[] rowPalette)
+    {
+        FillInterpolatedRow(palettes, layout, gy, rowPalette);
+        return ConfidenceFloorSquared(Palette.ClosestSquared(rowPalette));
+    }
+
+    /// <summary>Blend factor for grid row <paramref name="gy"/>, matching the strip positions the renderer uses.</summary>
+    internal static double InterpolatedRowT(Layout layout, int gy)
+    {
+        double yTopStrip = layout.Gutter + layout.MetaH * 1.5;
+        double yBottomStrip = layout.InnerH - layout.Gutter - layout.MetaH * 1.5;
+        double yEnc = layout.DataTop + (gy + 0.5) * layout.CellPx;
+        double span = yBottomStrip - yTopStrip;
+        return span == 0 ? 0 : Math.Clamp((yEnc - yTopStrip) / span, 0, 1);
     }
 
     /// <summary>
@@ -280,11 +315,9 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits,
-        int[]? cellMargins, long confidenceFloor)
+        int[]? cellMargins)
     {
-        double yTopStrip = layout.Gutter + layout.MetaH * 1.5;
-        double yBottomStrip = layout.InnerH - layout.Gutter - layout.MetaH * 1.5;
-        var rowPalette = new Rgb24[palettes.Best.Length];
+        var rowPalette = new Rgb24[palettes.Top.Length];
         var rowIndex = new SeparablePalette();
         int width = bmp.Width, height = bmp.Height;
         var px = bmp.Px;
@@ -293,10 +326,19 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {
-            double yEnc = layout.DataTop + (gy + 0.5) * layout.CellPx;
-            double t = Math.Clamp((yEnc - yTopStrip) / (yBottomStrip - yTopStrip), 0, 1);
-            for (int c = 0; c < rowPalette.Length; c++)
-                rowPalette[c] = Lerp(palettes.Top[c], palettes.Bottom[c], t);
+            // Spacing is per row. Swapping two colours between the strips leaves both endpoints
+            // a full step apart while the midpoint entries coincide. Without ECC there is nothing
+            // to flag, so the closest-pair measurement is skipped.
+            long rowFloor;
+            if (suspects is null)
+            {
+                FillInterpolatedRow(palettes, layout, gy, rowPalette);
+                rowFloor = 0;
+            }
+            else
+            {
+                rowFloor = RowConfidenceFloor(palettes, layout, gy, rowPalette);
+            }
             bool separable = rowIndex.TryRebuild(rowPalette);
 
             int rowY = RowPixel(inner, layout, sy, height, gy);
@@ -326,7 +368,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
-                RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits, confidenceFloor);
+                RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits, rowFloor);
                 if (cellMargins is not null)
                     cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }
