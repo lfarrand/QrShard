@@ -249,6 +249,57 @@ public class TenBitConfidenceTests
         Assert.True(between > floors[1] && between <= floors[0]);
     }
 
+    [Fact]
+    public void Diagnose_UniformCameraRetry_DropsTheInterpolatedRowFloors()
+    {
+        var layout = new Layout
+        {
+            BitsPerCell = 8,
+            CellPx = 1,
+            GridW = 1,
+            GridH = 1,
+            MetaH = 1,
+            InnerW = 3,
+            InnerH = 7,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        var sampler = new RetrySampler();
+        var decoder = new ShardDecoder(
+            AppSettings.BuiltIn, new SameBitmapRectifier(), new FixedFrameLocator(layout),
+            new SwitchingStripReader(), sampler, new ShardAssembler(), new Fec(), new Crc(),
+            new FastPngReader(), new PhotoFusion(), new Interleaver2());
+        using var tmp = new TempDir();
+        string path = tmp.File("capture.png");
+        using (var image = new Image<Rgb24>(1, 1))
+            image.SaveAsPng(path);
+
+        DecodeDiagnostics diag = decoder.Diagnose(path);
+
+        Assert.Equal(2, sampler.Calls);
+        Assert.Null(diag.RowConfidentDist);
+        Assert.Equal(RetrySampler.UniformFloor, diag.QualityConfidentDist);
+        Assert.NotNull(diag.Error);
+        Assert.NotNull(diag.Layout);
+        Assert.NotNull(diag.CellMargins);
+
+        string fromDiag = tmp.File("from-diag.png");
+        string uniform = tmp.File("uniform.png");
+        string stale = tmp.File("stale.png");
+        var heatmap = new HeatmapRenderer();
+        heatmap.RenderQuality(diag.Layout, diag.CellMargins, fromDiag,
+            diag.QualityConfidentDist, diag.RowConfidentDist);
+        heatmap.RenderQuality(diag.Layout, diag.CellMargins, uniform,
+            diag.QualityConfidentDist, rowFloors: null);
+        heatmap.RenderQuality(diag.Layout, diag.CellMargins, stale,
+            diag.QualityConfidentDist, rowFloors: [RetrySampler.InterpolatedFloor]);
+        using var painted = Image.Load<Rgb24>(fromDiag);
+        using var expected = Image.Load<Rgb24>(uniform);
+        using var leaked = Image.Load<Rgb24>(stale);
+        Assert.Equal(expected[0, 0], painted[0, 0]);
+        Assert.NotEqual(leaked[0, 0], painted[0, 0]);
+    }
+
     private static void AssertUniformSymbol(Rgb24[] palette, Rgb24 sample, int expected)
     {
         int bits = palette.Length == 1 << 10 ? 10 : 8;
@@ -273,5 +324,58 @@ public class TenBitConfidenceTests
             new DecodeScratch(), out _, out _);
         Assert.Equal(expected, new BitStream().ReadCell(stream, 0, bits));
         Assert.Equal(expected, new Palette().Nearest(palette, sample.R, sample.G, sample.B));
+    }
+
+    /// <summary>First sample interpolates and fails the header; the camera retry is uniform.</summary>
+    private sealed class SwitchingStripReader : IStripReader
+    {
+        private int calls;
+
+        public Layout? ReadMetadata(Bitmap bmp, InnerRect inner) => null;
+
+        public PaletteSet ReadPalette(Bitmap bmp, InnerRect inner, Layout layout)
+        {
+            calls++;
+            Rgb24[] colors = [new Rgb24(0, 0, 0)];
+            return new PaletteSet(colors, colors, colors, Interpolate: calls == 1);
+        }
+    }
+
+    private sealed class RetrySampler : IGridSampler
+    {
+        internal const long InterpolatedFloor = 111;
+        internal const long UniformFloor = 49;
+        internal const int Margin = 80;
+        internal int Calls { get; private set; }
+
+        public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
+            DecodeScratch scratch, out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null)
+        {
+            Calls++;
+            suspectBytes = null;
+            secondChoiceBytes = null;
+            if (cellMargins is { Length: > 0 })
+                cellMargins[0] = Margin;
+            if (Calls == 1)
+                scratch.RowFloors(layout.GridH)[0] = InterpolatedFloor;
+            else
+                scratch.UniformConfidenceFloor = UniformFloor;
+            return [0xFF];
+        }
+    }
+
+    private sealed class FixedFrameLocator(Layout layout) : IFrameLocator
+    {
+        public (Layout Layout, InnerRect Inner) Locate(Bitmap bmp, DecodeScratch scratch) =>
+            (layout, new InnerRect(0, 0, layout.InnerW, layout.InnerH));
+    }
+
+    private sealed class SameBitmapRectifier : ICameraRectifier
+    {
+        public Bitmap? TryRectify(Bitmap photo) => photo;
+
+        public CameraPose? DetectPose(Bitmap photo) => null;
+
+        public Bitmap RectifyWithPose(Bitmap photo, CameraPose pose) => photo;
     }
 }

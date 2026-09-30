@@ -684,17 +684,29 @@ internal sealed class ShardDecoder(
         {
             diagnostics.Layout = layout;
             diagnostics.CellMargins = cellMargins;
+            // Diagnose retries a failed decode on this same object. Clear both floors before this
+            // pass samples, so a uniform retry cannot keep the interpolated pass's row floors.
+            // RenderQuality prefers RowConfidentDist over QualityConfidentDist.
+            diagnostics.RowConfidentDist = null;
+            diagnostics.QualityConfidentDist = 0;
         }
         var palette = stripReader.ReadPalette(bmp, inner, layout);
         byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch,
             out bool[]? suspectBytes, out byte[]? secondChoiceBytes, cellMargins);
-        // Floors were measured while sampling. Copy them out before this scratch is reused.
+        // Floors were measured while sampling. Copy them out before this scratch is reused,
+        // and leave the floor this palette did not measure unset.
         if (diagnostics is { WantDetail: true })
         {
             if (palette.Interpolate)
+            {
                 diagnostics.RowConfidentDist = scratch.CopyRowFloors();
+                diagnostics.QualityConfidentDist = 0;
+            }
             else
+            {
                 diagnostics.QualityConfidentDist = scratch.UniformConfidenceFloor;
+                diagnostics.RowConfidentDist = null;
+            }
         }
 
         // v2 interleave: gather the permuted cell stream back into classic order so the whole
