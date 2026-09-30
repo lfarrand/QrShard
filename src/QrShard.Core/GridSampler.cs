@@ -25,7 +25,8 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     internal const long AbsoluteSuspectDist = 4000;
 
     public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
-        out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null)
+        out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null,
+        bool[]? ambiguousCells = null)
     {
         double sx = inner.W / layout.InnerW;
         double sy = inner.H / layout.InnerH;
@@ -66,9 +67,9 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         if (!palettes.Interpolate)
             scratch.UniformConfidenceFloor = confidenceFloor;
         if (palettes.Interpolate)
-            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins, scratch);
+            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins, scratch, ambiguousCells);
         else
-            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits, cellMargins, confidenceFloor);
+            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits, cellMargins, confidenceFloor, ambiguousCells);
         suspectBytes = suspects;
         secondChoiceBytes = second;
         return stream;
@@ -90,17 +91,21 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// different palette colour also has distance 0, so distance alone cannot mark it.
     /// </summary>
     private void RecordConfidence(bool[]? suspects, byte[]? second, Rgb24[] palette, int best, long bestDist,
-        byte r, byte g, byte b, long cellIndex, int bits, long confidenceFloor)
+        byte r, byte g, byte b, long cellIndex, int bits, long confidenceFloor, bool[]? ambiguousCells)
     {
         int alternative = best;
         bool far = bestDist > AbsoluteSuspectDist;
         // Floor 0 is the only floor at which an exact hit can be two indices of one colour.
         bool maybeExactTie = bestDist == 0 && confidenceFloor == 0;
-        if (suspects is not null && (bestDist > confidenceFloor || far || maybeExactTie))
+        // The tie marker is recorded even when ECC is off, because erasure flags are not allocated
+        // then and the quality heatmap would otherwise paint margin 0 as a confident hit.
+        if ((suspects is not null || ambiguousCells is not null) && (bestDist > confidenceFloor || far || maybeExactTie))
         {
             int secondIndex = paletteMath.SecondNearest(palette, r, g, b, best, out long secondDist);
             bool exactTie = bestDist == 0 && secondDist == 0;
-            if (far || secondDist < bestDist * 2 || exactTie)
+            if (exactTie && ambiguousCells is not null)
+                ambiguousCells[(int)cellIndex] = true;
+            if (suspects is not null && (far || secondDist < bestDist * 2 || exactTie))
             {
                 alternative = secondIndex;
                 long firstBit = cellIndex * bits;
@@ -255,7 +260,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
 
     private void ReadUniform(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, DecodeScratch scratch,
-        double sx, double sy, int bits, int[]? cellMargins, long confidenceFloor)
+        double sx, double sy, int bits, int[]? cellMargins, long confidenceFloor, bool[]? ambiguousCells)
     {
         // A measured product palette has an exact per-channel index (same tie order as the scan).
         // Anything knocked off that grid keeps the 5-bit cache and the full scan.
@@ -320,7 +325,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
-                RecordConfidence(suspects, second, palette, best, bestDist, bR, bG, bB, cellIndex, bits, confidenceFloor);
+                RecordConfidence(suspects, second, palette, best, bestDist, bR, bG, bB, cellIndex, bits, confidenceFloor, ambiguousCells);
                 if (cellMargins is not null)
                     cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }
@@ -337,7 +342,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits,
-        int[]? cellMargins, DecodeScratch scratch)
+        int[]? cellMargins, DecodeScratch scratch, bool[]? ambiguousCells)
     {
         var rowPalette = new Rgb24[palettes.Top.Length];
         var rowIndex = new SeparablePalette();
@@ -346,7 +351,9 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         int[] cols = ColumnPixels(inner, layout, sx, width);
         // Heatmap rows need the floors even when this image has no ECC to flag.
         long[]? rowFloors = cellMargins is not null ? scratch.RowFloors(layout.GridH) : null;
-        bool needFloor = suspects is not null || rowFloors is not null;
+        // The tie marker is meaningful on a no-ECC diagnose, which still passes cell margins.
+        // Keep the measured row floor in that case so a unique exact hit is not treated as a tie.
+        bool needFloor = suspects is not null || rowFloors is not null || ambiguousCells is not null;
         ClosestPairScratch? pairs = needFloor ? scratch.ClosestPairs : null;
 
         long cellIndex = 0;
@@ -394,7 +401,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
-                RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits, rowFloor);
+                RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits, rowFloor, ambiguousCells);
                 if (cellMargins is not null)
                     cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }

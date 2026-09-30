@@ -290,11 +290,12 @@ public class AuditFixTests
         private int _calls;
 
         public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
-            DecodeScratch scratch, out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null)
+            DecodeScratch scratch, out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null,
+            bool[]? ambiguousCells = null)
         {
             if (Interlocked.Increment(ref _calls) == 1)
                 throw new InvalidOperationException("simulated unanticipated decode fault");
-            return _real.ReadDataGrid(bmp, inner, layout, palettes, scratch, out suspectBytes, out secondChoiceBytes, cellMargins);
+            return _real.ReadDataGrid(bmp, inner, layout, palettes, scratch, out suspectBytes, out secondChoiceBytes, cellMargins, ambiguousCells);
         }
     }
 

@@ -98,6 +98,15 @@ internal sealed class DecodeDiagnostics
     public int[]? CellMargins { get; set; }
 
     /// <summary>
+    /// Parallel to <see cref="CellMargins"/>. True when the winning sample is an exact tie between
+    /// two palette indices, so the margin is 0 but the cell is not confident. The quality heatmap
+    /// reads this because a margin of 0 otherwise paints the same green as a unique exact hit.
+    /// Recorded for diagnose even when the image has no ECC, since erasure flags are not allocated
+    /// then. Null when detail was not requested.
+    /// </summary>
+    public bool[]? AmbiguousCells { get; set; }
+
+    /// <summary>
     /// Squared-distance floor paired with <see cref="CellMargins"/> for a uniform palette.
     /// Measured while sampling when <see cref="WantDetail"/> is set. Zero when detail was not
     /// requested. Interpolated captures use <see cref="RowConfidentDist"/> instead.

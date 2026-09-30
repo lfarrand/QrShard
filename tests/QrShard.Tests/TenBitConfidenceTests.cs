@@ -160,6 +160,58 @@ public class TenBitConfidenceTests
         Assert.False(uniqueSuspects[0]);
         Assert.False(uniqueSuspects[1]);
         Assert.Equal(1, new BitStream().ReadCell(uniqueSecond!, 0, 10));
+
+        // No ECC: erasure flags are not allocated, and both cells store margin 0. The tie marker
+        // is what keeps the quality heatmap from painting the coincident colour as confident.
+        var noEcc = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 1,
+            GridW = 1,
+            GridH = 1,
+            MetaH = 1,
+            InnerW = 3,
+            InnerH = 7,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        var tieMargins = new int[1];
+        var tieAmbiguous = new bool[1];
+        px[3 * w + 1] = coincident;
+        new GridSampler().ReadDataGrid(
+            new Bitmap(px, w, h), new InnerRect(0, 0, w, h), noEcc, palettes,
+            new DecodeScratch(), out bool[]? tieNoEcc, out _, tieMargins, tieAmbiguous);
+        Assert.Null(tieNoEcc);
+        Assert.Equal(0, tieMargins[0]);
+        Assert.True(tieAmbiguous[0]);
+
+        var uniqueMargins = new int[1];
+        var uniqueAmbiguous = new bool[1];
+        px[3 * w + 1] = top[1];
+        new GridSampler().ReadDataGrid(
+            new Bitmap(px, w, h), new InnerRect(0, 0, w, h), noEcc, palettes,
+            new DecodeScratch(), out bool[]? uniqueNoEcc, out _, uniqueMargins, uniqueAmbiguous);
+        Assert.Null(uniqueNoEcc);
+        Assert.Equal(0, uniqueMargins[0]);
+        Assert.False(uniqueAmbiguous[0]);
+
+        var diag = new DecodeDiagnostics { WantDetail = true, Layout = noEcc };
+        diag.CellMargins = tieMargins;
+        diag.AmbiguousCells = tieAmbiguous;
+        diag.RowConfidentDist = [0];
+        using var tmp = new TempDir();
+        string tiedHeat = tmp.File("tied.png");
+        string uniqueHeat = tmp.File("unique.png");
+        string unmarkedHeat = tmp.File("unmarked.png");
+        var heatmap = new HeatmapRenderer();
+        heatmap.RenderQuality(diag.Layout, diag.CellMargins, tiedHeat, diag.QualityConfidentDist, diag.RowConfidentDist, diag.AmbiguousCells);
+        heatmap.RenderQuality(noEcc, uniqueMargins, uniqueHeat, rowFloors: [0], ambiguousCells: uniqueAmbiguous);
+        heatmap.RenderQuality(noEcc, tieMargins, unmarkedHeat, rowFloors: [0]);
+        using var tiedImage = Image.Load<Rgb24>(tiedHeat);
+        using var uniqueImage = Image.Load<Rgb24>(uniqueHeat);
+        using var unmarkedImage = Image.Load<Rgb24>(unmarkedHeat);
+        Assert.Equal(uniqueImage[0, 0], unmarkedImage[0, 0]);
+        Assert.NotEqual(uniqueImage[0, 0], tiedImage[0, 0]);
     }
 
     private static Rgb24 LerpChannel(Rgb24 a, Rgb24 b) => new(
@@ -380,7 +432,8 @@ public class TenBitConfidenceTests
         internal int Calls { get; private set; }
 
         public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
-            DecodeScratch scratch, out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null)
+            DecodeScratch scratch, out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null,
+            bool[]? ambiguousCells = null)
         {
             Calls++;
             suspectBytes = null;

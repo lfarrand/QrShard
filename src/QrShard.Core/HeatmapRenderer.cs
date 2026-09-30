@@ -82,8 +82,13 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
     /// Per-grid-row floors from interpolated sampling. When present, row <c>gy</c> is painted
     /// with <c>rowFloors[gy]</c> rather than the single <paramref name="confidentDist"/>.
     /// </param>
+    /// <param name="ambiguousCells">
+    /// Per-cell exact-tie marks from sampling, parallel to <paramref name="cellMargins"/>. A true
+    /// entry paints red even though its margin is 0.
+    /// </param>
     public void RenderQuality(Layout layout, int[] cellMargins, string outPath,
-        long confidentDist = GridSampler.DefaultConfidentDist, long[]? rowFloors = null)
+        long confidentDist = GridSampler.DefaultConfidentDist, long[]? rowFloors = null,
+        bool[]? ambiguousCells = null)
     {
         int w = layout.GridW * CellPx, h = layout.GridH * CellPx;
         var px = new Rgb24[w * h];
@@ -100,11 +105,15 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
             {
                 int margin = cellMargins[(int)cellIndex];
-                var color = margin > ambiguous * 4
-                    ? new Rgb24(90, 0, 20) // far past any palette color — likely unreadable
-                    : Gradient(span <= 0
-                        ? (margin > ambiguous ? 1 : 0)
-                        : Math.Clamp((margin - confident) / span, 0, 1));
+                bool tied = ambiguousCells is not null && cellIndex < ambiguousCells.Length && ambiguousCells[cellIndex];
+                // An exact tie stores margin 0, the same as a unique hit. The marker paints it red.
+                Rgb24 color = tied
+                    ? Gradient(1)
+                    : margin > ambiguous * 4
+                        ? new Rgb24(90, 0, 20) // far past any palette color — likely unreadable
+                        : Gradient(span <= 0
+                            ? (margin > ambiguous ? 1 : 0)
+                            : Math.Clamp((margin - confident) / span, 0, 1));
                 Fill(px, w, gx * CellPx, gy * CellPx, color);
             }
         }

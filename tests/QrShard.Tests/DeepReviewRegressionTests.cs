@@ -142,7 +142,7 @@ public class DeepReviewRegressionTests
 
         public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
             DecodeScratch scratch, out bool[]? suspectBytes, out byte[]? secondChoiceBytes,
-            int[]? cellMargins = null)
+            int[]? cellMargins = null, bool[]? ambiguousCells = null)
         {
             WasCalled = true;
             suspectBytes = null;
