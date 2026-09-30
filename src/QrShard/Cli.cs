@@ -1828,7 +1828,7 @@ internal sealed class Cli(AppSettings? settings = null)
                                          the adjacent shard/sidecar files forever. Keep the page
                                          beside those files; record at least one full cycle
                 -i, --interval <ms>      Per-image slideshow hold in milliseconds (default 500,
-                                         range 100-65535). Above 1000 ms is slower than 1 fps,
+                                         range 100-65536). Above 1000 ms is slower than 1 fps,
                                          so a receiver can capture every frame in one pass
                 --slideshow <kind>       With --video: "html" (default) or "apng" (a single
                                          animated PNG cycling the shards). APNG refuses more than

@@ -386,7 +386,7 @@ public class VideoDecodeTests
         Assert.Throws<ArgumentException>(() => new SlideshowWriter().Write(Path.GetTempPath(), [], 20));
 
     [Theory]
-    [InlineData(65_536)]
+    [InlineData(65_537)]
     [InlineData(99)]
     public void Slideshow_RejectsIntervalOutsideExactApngRange(int intervalMs)
     {
@@ -401,7 +401,7 @@ public class VideoDecodeTests
     [InlineData(1000, 1)]
     [InlineData(1001, 1.001)]
     [InlineData(5000, 5)]
-    [InlineData(65_535, 65.535)]
+    [InlineData(65_536, 65.536)]
     public void Slideshow_Interval_RoundTripsInHtmlAndApng(int intervalMs, double seconds)
     {
         using var tmp = new TempDir();

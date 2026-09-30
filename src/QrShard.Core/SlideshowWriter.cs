@@ -28,12 +28,12 @@ internal sealed class SlideshowWriter : ISlideshowWriter
     /// APNG stores each frame delay as a <c>uint16</c> numerator and denominator
     /// (<c>intervalMs/1000</c> seconds). Every millisecond value from
     /// <see cref="MinIntervalMs"/> through this limit reduces into those fields.
-    /// The next millisecond, 65536, still fits, but 65537 does not, and ImageSharp
-    /// casts an unreduced numerator to 16 bits — so a requested hold past this
-    /// contiguous range can collapse to a fraction of a second. 65535 ms is about
-    /// one frame every 65.5 s, which is well below one frame per second.
+    /// 65536/1000 reduces to 8192/125, so both parts fit. The next millisecond,
+    /// 65537, is coprime to 1000 and does not reduce; ImageSharp then casts that
+    /// numerator to 16 bits and the hold collapses to 1/1000 s. 65536 ms is one
+    /// frame every 65.536 s, well below one frame per second.
     /// </summary>
-    public const int MaxIntervalMs = 65_535;
+    public const int MaxIntervalMs = 65_536;
 
     internal const long MaxApngDecodedBytes = 256L * 1024 * 1024;
 
@@ -101,8 +101,9 @@ internal sealed class SlideshowWriter : ISlideshowWriter
     /// alpha-composite) with background disposal — so every recorded frame is an exact copy.</summary>
     private static void SetFrameTiming(PngFrameMetadata meta, int intervalMs)
     {
-        // Reduce first. ImageSharp writes both parts of FrameDelay as ushort; passing
-        // an unreduced numerator above 65535 truncates the hold (65537 ms becomes 1/1000 s).
+        // Reduce first. ImageSharp writes both parts of FrameDelay as ushort; an
+        // unreduced numerator above 65535 truncates (65537 ms becomes 1/1000 s).
+        // 65536/1000 reduces to 8192/125 and stays exact.
         uint numerator = (uint)intervalMs;
         uint denominator = 1000;
         uint gcd = GreatestCommonDivisor(numerator, denominator);
