@@ -107,6 +107,15 @@ internal sealed class DecodeDiagnostics
     public bool[]? AmbiguousCells { get; set; }
 
     /// <summary>
+    /// Parallel to <see cref="CellMargins"/>. True when the sample was flagged as a near-tie
+    /// (above the spacing floor, closer to a runner-up than a confident hit). The quality heatmap
+    /// paints these as a warning, because the raw margin — 64 at 10 bits — is almost the same
+    /// green as a unique exact hit. Distinct from <see cref="AmbiguousCells"/>, which is an exact
+    /// 0-vs-0 tie. Null when detail was not requested.
+    /// </summary>
+    public bool[]? NearTieCells { get; set; }
+
+    /// <summary>
     /// Squared-distance floor paired with <see cref="CellMargins"/> for a uniform palette.
     /// Measured while sampling when <see cref="WantDetail"/> is set. Zero when detail was not
     /// requested. Interpolated captures use <see cref="RowConfidentDist"/> instead.

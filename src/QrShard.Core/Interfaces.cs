@@ -60,7 +60,7 @@ internal interface IGridSampler
 {
     byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
         out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null,
-        bool[]? ambiguousCells = null);
+        bool[]? ambiguousCells = null, bool[]? nearTieCells = null);
 }
 
 /// <summary>Reassembles decoded shards into output files.</summary>

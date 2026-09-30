@@ -26,7 +26,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
 
     public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
         out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null,
-        bool[]? ambiguousCells = null)
+        bool[]? ambiguousCells = null, bool[]? nearTieCells = null)
     {
         double sx = inner.W / layout.InnerW;
         double sy = inner.H / layout.InnerH;
@@ -67,9 +67,9 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         if (!palettes.Interpolate)
             scratch.UniformConfidenceFloor = confidenceFloor;
         if (palettes.Interpolate)
-            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins, scratch, ambiguousCells);
+            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins, scratch, ambiguousCells, nearTieCells);
         else
-            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits, cellMargins, confidenceFloor, ambiguousCells);
+            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits, cellMargins, confidenceFloor, ambiguousCells, nearTieCells);
         suspectBytes = suspects;
         secondChoiceBytes = second;
         return stream;
@@ -91,21 +91,26 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// different palette colour also has distance 0, so distance alone cannot mark it.
     /// </summary>
     private void RecordConfidence(bool[]? suspects, byte[]? second, Rgb24[] palette, int best, long bestDist,
-        byte r, byte g, byte b, long cellIndex, int bits, long confidenceFloor, bool[]? ambiguousCells)
+        byte r, byte g, byte b, long cellIndex, int bits, long confidenceFloor, bool[]? ambiguousCells,
+        bool[]? nearTieCells, SeparablePalette? product, MeasuredColorIndex? measured)
     {
         int alternative = best;
         bool far = bestDist > AbsoluteSuspectDist;
         // Floor 0 is the only floor at which an exact hit can be two indices of one colour.
         bool maybeExactTie = bestDist == 0 && confidenceFloor == 0;
-        // The tie marker is recorded even when ECC is off, because erasure flags are not allocated
-        // then and the quality heatmap would otherwise paint margin 0 as a confident hit.
-        if ((suspects is not null || ambiguousCells is not null) && (bestDist > confidenceFloor || far || maybeExactTie))
+        // Markers are recorded even when ECC is off, because erasure flags are not allocated then.
+        bool wantRunnerUp = suspects is not null || ambiguousCells is not null || nearTieCells is not null;
+        if (wantRunnerUp && (bestDist > confidenceFloor || far || maybeExactTie))
         {
-            int secondIndex = paletteMath.SecondNearest(palette, r, g, b, best, out long secondDist);
+            int secondIndex = RunnerUp(product, measured, palette, r, g, b, best, out long secondDist);
             bool exactTie = bestDist == 0 && secondDist == 0;
+            bool nearTie = !exactTie && !far && secondDist < bestDist * 2;
             if (exactTie && ambiguousCells is not null)
                 ambiguousCells[(int)cellIndex] = true;
-            if (suspects is not null && (far || secondDist < bestDist * 2 || exactTie))
+            // Distance 64 on a 10-bit row is above the floor and would otherwise paint almost green.
+            if (nearTie && nearTieCells is not null)
+                nearTieCells[(int)cellIndex] = true;
+            if (suspects is not null && (far || nearTie || exactTie))
             {
                 alternative = secondIndex;
                 long firstBit = cellIndex * bits;
@@ -116,6 +121,16 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         }
         if (second is not null)
             bitStream.WriteCell(second, cellIndex * bits, bits, alternative);
+    }
+
+    private int RunnerUp(SeparablePalette? product, MeasuredColorIndex? measured, Rgb24[] palette,
+        int r, int g, int b, int best, out long distance)
+    {
+        if (product is not null)
+            return product.SecondNearest(palette, r, g, b, best, out distance);
+        if (measured is not null)
+            return measured.SecondNearest(r, g, b, best, out distance);
+        return paletteMath.SecondNearest(palette, r, g, b, best, out distance);
     }
 
     /// <summary>
@@ -216,24 +231,12 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     }
 
     /// <summary>
-    /// Exact nearest-palette index and its squared RGB distance. A 5-bit quantized LUT is too
-    /// coarse for confidence: illumination gain 0.2 packs adjacent 8-bit levels into one 8-unit
-    /// cube, and distance to that cube's first winner can sit under <see cref="DefaultConfidentDist"/>.
-    /// </summary>
-    private int ClassifyExact(Rgb24[] palette, byte r, byte g, byte b, out long dist)
-    {
-        int v = paletteMath.Nearest(palette, r, g, b);
-        long dr = r - palette[v].R, dg = g - palette[v].G, db = b - palette[v].B;
-        dist = dr * dr + dg * dg + db * db;
-        return v;
-    }
-
-    /// <summary>
     /// Uniform-path classify. A product palette uses <paramref name="index"/>, which matches the
     /// scan's lowest-index tie. Otherwise reuse the 5-bit LUT for an exact hit and refine a
-    /// nonzero distance with <see cref="ClassifyExact"/> so a gain-0.2 cube collision is not trusted.
+    /// nonzero distance with <paramref name="measured"/> so a gain-0.2 cube collision is not trusted.
     /// </summary>
-    private int ClassifyUniform(int[]? lut, Rgb24[] palette, SeparablePalette? index, byte r, byte g, byte b, out long dist)
+    private int ClassifyUniform(int[]? lut, Rgb24[] palette, SeparablePalette? index, MeasuredColorIndex measured,
+        byte r, byte g, byte b, out long dist)
     {
         if (index is not null)
         {
@@ -243,29 +246,33 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
             return indexed;
         }
 
+        // The 5-bit cache still catches a repeated exact hit. Anything else goes through the
+        // spatial index, which agrees with the scan including a lowest-index tie.
         int key = (r >> 3 << 10) | (g >> 3 << 5) | (b >> 3);
         int v = lut![key];
         if (v < 0)
         {
-            lut[key] = v = paletteMath.Nearest(palette, r, g, b);
-            long dr0 = r - palette[v].R, dg0 = g - palette[v].G, db0 = b - palette[v].B;
-            dist = dr0 * dr0 + dg0 * dg0 + db0 * db0;
+            lut[key] = v = measured.Nearest(r, g, b, out dist);
             return v;
         }
 
         long dr = r - palette[v].R, dg = g - palette[v].G, db = b - palette[v].B;
         dist = dr * dr + dg * dg + db * db;
-        return dist == 0 ? v : ClassifyExact(palette, r, g, b, out dist);
+        return dist == 0 ? v : measured.Nearest(r, g, b, out dist);
     }
 
     private void ReadUniform(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, DecodeScratch scratch,
-        double sx, double sy, int bits, int[]? cellMargins, long confidenceFloor, bool[]? ambiguousCells)
+        double sx, double sy, int bits, int[]? cellMargins, long confidenceFloor, bool[]? ambiguousCells,
+        bool[]? nearTieCells)
     {
         // A measured product palette has an exact per-channel index (same tie order as the scan).
-        // Anything knocked off that grid keeps the 5-bit cache and the full scan.
+        // A strip knocked off that grid uses the spatial lookup, which keeps the same tie.
         var separable = new SeparablePalette();
         SeparablePalette? index = separable.TryRebuild(palette) ? separable : null;
+        var measured = new MeasuredColorIndex();
+        if (index is null)
+            measured.Rebuild(palette);
         int[]? lut = index is null ? scratch.ResetNearestColorLut() : null;
         int width = bmp.Width, height = bmp.Height;
         var px = bmp.Px;
@@ -295,7 +302,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     foreach (int delta in deltas)
                     {
                         var c = px[baseIndex + delta];
-                        int v = ClassifyUniform(lut, palette, index, c.R, c.G, c.B, out long dist);
+                        int v = ClassifyUniform(lut, palette, index, measured, c.R, c.G, c.B, out long dist);
                         if (dist < bestDist)
                         {
                             bestDist = dist;
@@ -313,7 +320,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                         int xi = Math.Clamp(colX + dx, 0, width - 1);
                         int yi = Math.Clamp(rowY + dy, 0, height - 1);
                         var c = px[yi * width + xi];
-                        int v = ClassifyUniform(lut, palette, index, c.R, c.G, c.B, out long dist);
+                        int v = ClassifyUniform(lut, palette, index, measured, c.R, c.G, c.B, out long dist);
                         if (dist < bestDist)
                         {
                             bestDist = dist;
@@ -325,7 +332,8 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
-                RecordConfidence(suspects, second, palette, best, bestDist, bR, bG, bB, cellIndex, bits, confidenceFloor, ambiguousCells);
+                RecordConfidence(suspects, second, palette, best, bestDist, bR, bG, bB, cellIndex, bits, confidenceFloor,
+                    ambiguousCells, nearTieCells, index, index is null ? measured : null);
                 if (cellMargins is not null)
                     cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }
@@ -342,10 +350,11 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits,
-        int[]? cellMargins, DecodeScratch scratch, bool[]? ambiguousCells)
+        int[]? cellMargins, DecodeScratch scratch, bool[]? ambiguousCells, bool[]? nearTieCells)
     {
         var rowPalette = new Rgb24[palettes.Top.Length];
         var rowIndex = new SeparablePalette();
+        var measured = new MeasuredColorIndex();
         int width = bmp.Width, height = bmp.Height;
         var px = bmp.Px;
         int[] cols = ColumnPixels(inner, layout, sx, width);
@@ -363,6 +372,8 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
             // a full step apart while the midpoint entries coincide.
             FillInterpolatedRow(palettes, layout, gy, rowPalette);
             bool separable = rowIndex.TryRebuild(rowPalette);
+            if (!separable)
+                measured.Rebuild(rowPalette);
             long rowFloor = 0;
             if (needFloor)
             {
@@ -386,11 +397,16 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     int xi = Math.Clamp(colX + dx, 0, width - 1);
                     int yi = Math.Clamp(rowY + dy, 0, height - 1);
                     var c = px[yi * width + xi];
-                    int v = separable
-                        ? rowIndex.Nearest(c.R, c.G, c.B)
-                        : paletteMath.Nearest(rowPalette, c.R, c.G, c.B);
-                    long dr = c.R - rowPalette[v].R, dg = c.G - rowPalette[v].G, db = c.B - rowPalette[v].B;
-                    long dist = dr * dr + dg * dg + db * db;
+                    int v;
+                    long dist;
+                    if (separable)
+                    {
+                        v = rowIndex.Nearest(c.R, c.G, c.B);
+                        long dr = c.R - rowPalette[v].R, dg = c.G - rowPalette[v].G, db = c.B - rowPalette[v].B;
+                        dist = dr * dr + dg * dg + db * db;
+                    }
+                    else
+                        v = measured.Nearest(c.R, c.G, c.B, out dist);
                     if (dist < bestDist)
                     {
                         bestDist = dist;
@@ -401,7 +417,8 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
-                RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits, rowFloor, ambiguousCells);
+                RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits, rowFloor,
+                    ambiguousCells, nearTieCells, separable ? rowIndex : null, separable ? null : measured);
                 if (cellMargins is not null)
                     cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }

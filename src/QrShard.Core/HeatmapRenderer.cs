@@ -12,6 +12,9 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
 {
     private const int CellPx = 6;
 
+    /// <summary>Flagged near-tie. Distinct from a confident green and from the exact-tie red.</summary>
+    internal static readonly Rgb24 NearTieWarning = new(230, 140, 20);
+
     public HeatmapRenderer() : this(new FastPng(), new Interleaver2())
     {
     }
@@ -86,9 +89,13 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
     /// Per-cell exact-tie marks from sampling, parallel to <paramref name="cellMargins"/>. A true
     /// entry paints red even though its margin is 0.
     /// </param>
+    /// <param name="nearTieCells">
+    /// Per-cell near-tie marks. A true entry paints <see cref="NearTieWarning"/> instead of the
+    /// distance gradient. Cells that are not flagged keep that gradient.
+    /// </param>
     public void RenderQuality(Layout layout, int[] cellMargins, string outPath,
         long confidentDist = GridSampler.DefaultConfidentDist, long[]? rowFloors = null,
-        bool[]? ambiguousCells = null)
+        bool[]? ambiguousCells = null, bool[]? nearTieCells = null)
     {
         int w = layout.GridW * CellPx, h = layout.GridH * CellPx;
         var px = new Rgb24[w * h];
@@ -106,14 +113,18 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
             {
                 int margin = cellMargins[(int)cellIndex];
                 bool tied = ambiguousCells is not null && cellIndex < ambiguousCells.Length && ambiguousCells[cellIndex];
-                // An exact tie stores margin 0, the same as a unique hit. The marker paints it red.
+                bool nearTie = nearTieCells is not null && cellIndex < nearTieCells.Length && nearTieCells[cellIndex];
+                // An exact tie stores margin 0 and paints red. A flagged near-tie (distance 64 at
+                // 10 bits) would otherwise sit almost on the confident green, so it gets a warning.
                 Rgb24 color = tied
                     ? Gradient(1)
-                    : margin > ambiguous * 4
-                        ? new Rgb24(90, 0, 20) // far past any palette color — likely unreadable
-                        : Gradient(span <= 0
-                            ? (margin > ambiguous ? 1 : 0)
-                            : Math.Clamp((margin - confident) / span, 0, 1));
+                    : nearTie
+                        ? NearTieWarning
+                        : margin > ambiguous * 4
+                            ? new Rgb24(90, 0, 20) // far past any palette color — likely unreadable
+                            : Gradient(span <= 0
+                                ? (margin > ambiguous ? 1 : 0)
+                                : Math.Clamp((margin - confident) / span, 0, 1));
                 Fill(px, w, gx * CellPx, gy * CellPx, color);
             }
         }

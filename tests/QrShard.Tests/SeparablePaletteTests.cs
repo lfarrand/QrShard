@@ -239,6 +239,89 @@ public class SeparablePaletteTests
         });
     }
 
+    [Fact]
+    public void ProductRunnerUp_MatchesTheScan_IncludingATenBitNearTie()
+    {
+        var palette = new Palette().Build(10);
+        var index = new SeparablePalette();
+        Assert.True(index.TryRebuild(palette));
+        CheckRunnerUp(index, palette, 9, 0, 0);
+        CheckRunnerUp(index, palette, 0, 18, 0);
+        CheckRunnerUp(index, palette, 0, 0, 0);
+        CheckRunnerUp(index, palette, 17, 0, 0);
+        var gained = Gain(palette, 0.8, 0.8, 0.8);
+        Assert.True(index.TryRebuild(gained));
+        for (int r = 0; r < 256; r += 32)
+            for (int g = 0; g < 256; g += 32)
+                for (int b = 0; b < 256; b += 32)
+                    CheckRunnerUp(index, gained, r, g, b);
+    }
+
+    [Fact]
+    public void MeasuredIndex_MatchesTheScan_OnASlightlyNoisyStrip()
+    {
+        var palette = (Rgb24[])new Palette().Build(10).Clone();
+        palette[3] = new Rgb24((byte)(palette[3].R + 1), palette[3].G, palette[3].B);
+        palette[5] = palette[4];
+        Assert.False(new SeparablePalette().TryRebuild(palette));
+
+        var measured = new MeasuredColorIndex();
+        measured.Rebuild(palette);
+        var scan = new Palette();
+        void Check(int r, int g, int b)
+        {
+            int slow = scan.Nearest(palette, r, g, b);
+            int fast = measured.Nearest(r, g, b, out long fastDist);
+            Assert.Equal(slow, fast);
+            long dr = r - palette[slow].R, dg = g - palette[slow].G, db = b - palette[slow].B;
+            Assert.Equal(dr * dr + dg * dg + db * db, fastDist);
+            int slowSecond = scan.SecondNearest(palette, r, g, b, slow, out long slowSecondDist);
+            int fastSecond = measured.SecondNearest(r, g, b, slow, out long fastSecondDist);
+            Assert.Equal(slowSecond, fastSecond);
+            Assert.Equal(slowSecondDist, fastSecondDist);
+        }
+
+        Check(palette[4].R, palette[4].G, palette[4].B);
+        Check(9, 0, 0);
+        Check(palette[3].R, palette[3].G, palette[3].B);
+        foreach (Rgb24 colour in palette)
+            Check(colour.R, colour.G, colour.B);
+        for (int r = 0; r < 256; r += 32)
+            for (int g = 0; g < 256; g += 32)
+                for (int b = 0; b < 256; b += 32)
+                    Check(r, g, b);
+
+        var layout = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 1,
+            GridW = 1,
+            GridH = 1,
+            MetaH = 1,
+            InnerW = 3,
+            InnerH = 7,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        var px = new Rgb24[layout.InnerW * layout.InnerH];
+        px[3 * layout.InnerW + 1] = new Rgb24(9, 0, 0);
+        byte[] stream = new GridSampler().ReadDataGrid(
+            new Bitmap(px, layout.InnerW, layout.InnerH), new InnerRect(0, 0, layout.InnerW, layout.InnerH),
+            layout, new PaletteSet(palette, palette, palette, Interpolate: true),
+            new DecodeScratch(), out _, out _);
+        Assert.Equal(scan.Nearest(palette, 9, 0, 0), new BitStream().ReadCell(stream, 0, 10));
+    }
+
+    private static void CheckRunnerUp(SeparablePalette index, Rgb24[] palette, int r, int g, int b)
+    {
+        var scan = new Palette();
+        int slow = scan.Nearest(palette, r, g, b);
+        int fastSecond = index.SecondNearest(palette, r, g, b, slow, out long fastDist);
+        int slowSecond = scan.SecondNearest(palette, r, g, b, slow, out long slowDist);
+        Assert.Equal(slowSecond, fastSecond);
+        Assert.Equal(slowDist, fastDist);
+    }
+
     private static Rgb24[] Gain(Rgb24[] palette, double gr, double gg, double gb)
     {
         var scaled = new Rgb24[palette.Length];

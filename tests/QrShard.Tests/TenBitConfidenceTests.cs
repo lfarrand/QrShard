@@ -49,9 +49,10 @@ public class TenBitConfidenceTests
         px[row * w + 7] = new Rgb24(17, 0, 0); // exact hit on the other colour
         var palettes = new PaletteSet(palette, palette, palette, Interpolate: false);
 
+        var nearTies = new bool[layout.GridW];
         byte[] stream = new GridSampler().ReadDataGrid(
             new Bitmap(px, w, h), new InnerRect(0, 0, w, h), layout, palettes,
-            new DecodeScratch(), out bool[]? suspects, out _);
+            new DecodeScratch(), out bool[]? suspects, out _, nearTieCells: nearTies);
 
         var bits = new BitStream();
         Assert.Equal(0, bits.ReadCell(stream, 0, 10));
@@ -64,6 +65,9 @@ public class TenBitConfidenceTests
         Assert.True(suspects[4]);
         Assert.False(suspects[7]);
         Assert.False(suspects[8]);
+        Assert.False(nearTies[0]);
+        Assert.True(nearTies[3]);
+        Assert.False(nearTies[6]);
     }
 
     [Fact]
@@ -94,6 +98,27 @@ public class TenBitConfidenceTests
         new HeatmapRenderer().RenderQuality(layout, [0, 64], oldFloor, confidentDist: 200);
         using var previous = Image.Load<Rgb24>(oldFloor);
         Assert.Equal(previous[0, 0], previous[6, 0]);
+
+        // The unflagged gradient leaves distance 64 almost green. A flagged near-tie is a warning,
+        // and an exact tie is a different red. An unflagged weak cell stays on the gradient.
+        string warned = tmp.File("warned.png");
+        new HeatmapRenderer().RenderQuality(layout, [0, 64], warned, confidentDist: 49, nearTieCells: [false, true]);
+        using var warning = Image.Load<Rgb24>(warned);
+        Assert.Equal(exact, warning[0, 0]);
+        Assert.Equal(HeatmapRenderer.NearTieWarning, warning[6, 0]);
+        Assert.NotEqual(nearTie, warning[6, 0]);
+
+        string tied = tmp.File("exact-tie.png");
+        new HeatmapRenderer().RenderQuality(layout, [0, 0], tied, confidentDist: 49, ambiguousCells: [false, true]);
+        using var tie = Image.Load<Rgb24>(tied);
+        Assert.NotEqual(warning[6, 0], tie[6, 0]);
+        Assert.NotEqual(exact, tie[6, 0]);
+
+        string weak = tmp.File("weak.png");
+        new HeatmapRenderer().RenderQuality(layout, [0, 2000], weak, confidentDist: 49);
+        using var weakImage = Image.Load<Rgb24>(weak);
+        Assert.NotEqual(HeatmapRenderer.NearTieWarning, weakImage[6, 0]);
+        Assert.NotEqual(exact, weakImage[6, 0]);
     }
 
     [Fact]
@@ -433,7 +458,7 @@ public class TenBitConfidenceTests
 
         public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
             DecodeScratch scratch, out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null,
-            bool[]? ambiguousCells = null)
+            bool[]? ambiguousCells = null, bool[]? nearTieCells = null)
         {
             Calls++;
             suspectBytes = null;
