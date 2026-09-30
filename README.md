@@ -296,7 +296,7 @@ There is no `qrshard display` or `qrshard record`. Those are separate Windows ex
 | `-o, --out <dir>` | any path | `<input>.shards` beside the input; `bundle.shards` beside the first input for multiple inputs | Output folder for the shard images |
 | `-r, --resolution <px>` | `auto`; one number (square); `WxH` — 700–16384 per side | `auto` | Image size. `auto` detects the primary monitor's native resolution so shards fill the screen they'll be captured from |
 | `-c, --cell <px>` | 1–64 | 3 | Data cell size in pixels. 3 survives fractional display rescaling; 1 doubles-to-quadruples density but needs pixel-perfect captures |
-| `-b, --bits <n>` | 1–8 | 4 | Bits per cell (color density): 2ⁿ palette colors |
+| `-b, --bits <n>` | 1–10 | 4 | Bits per cell (color density): 2ⁿ palette colors |
 | `-e, --ecc <n>` | even, 0–64 | 16 | Reed-Solomon parity bytes per 255-byte block. 16 ≈ 6% overhead; fixes 8 unknown-position bytes/block, up to ~14 when the classifier can flag them (erasures) |
 | `-R, --recovery <pct>` | 0–100 | 0 (off) | Extra **parity images** (Cauchy erasure code), calculated as a percentage of data images and distributed per stripe. Loss tolerance is per stripe: `-R 15` adds about 15 parity images per 100 data images (~13% of the resulting set) |
 | `-F, --fountain <pct>` | 0–1000 | 0 (off) | **Fountain-coded frames** (random linear code) for video mode: a full-rank set of roughly `stripeData` captured frames per stripe reconstructs the data; dependent/duplicate frames do not count. Mutually exclusive with `-R` |
@@ -507,7 +507,7 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 |---|---|---|---|
 | `EncodeDefaults.Resolution` | `auto`, number, `WxH` | `auto` | Default for `-r` |
 | `EncodeDefaults.CellPx` | 1–64 | 3 | Default for `-c` |
-| `EncodeDefaults.BitsPerCell` | 1–8 | 4 | Default for `-b` |
+| `EncodeDefaults.BitsPerCell` | 1–10 | 4 | Default for `-b` |
 | `EncodeDefaults.EccParity` | even, 0–64 | 16 | Default for `-e` |
 | `EncodeDefaults.RecoveryPercent` | 0–100 | 0 | Default for `-R` |
 | `EncodeDefaults.ImageFormat` | `png` `bmp` `tga` `qoi` `webp` `tiff` | `png` | Default for `-f` |

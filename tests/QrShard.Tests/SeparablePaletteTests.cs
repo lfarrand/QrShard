@@ -20,6 +20,8 @@ public class SeparablePaletteTests
     [InlineData(6)]
     [InlineData(7)]
     [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(10)]
     public void MatchesScan_ExhaustivelyOverEveryRgbInput(int bits)
     {
         var palette = new Palette().Build(bits);
@@ -87,7 +89,7 @@ public class SeparablePaletteTests
     [Fact]
     public void NonProductPalette_IsDeclined()
     {
-        for (int bits = 2; bits <= 8; bits++)
+        for (int bits = 2; bits <= Palette.MaxBits; bits++)
         {
             var palette = new Palette().Build(bits);
             for (int i = 0; i < palette.Length; i++)

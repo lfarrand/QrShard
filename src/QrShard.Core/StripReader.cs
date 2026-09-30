@@ -134,8 +134,9 @@ internal sealed class StripReader(Palette palette) : IStripReader
 
     /// <summary>
     /// Closest pair must be at least 1/this of the widest. A 4-bit theoretical palette sits at
-    /// about 1/26 and an 8-bit one at about 1/260 by squared distance, so 4000 clears every real
-    /// palette by a wide margin while still catching a pair collapsed to near-zero separation.
+    /// about 1/26 and an 8-bit one at about 1/260 by squared distance; a 10-bit palette (minimum
+    /// channel step 17) sits at about 1/675. 4000 clears every real palette by a wide margin
+    /// while still catching a pair collapsed to near-zero separation.
     /// </summary>
     private const long SeparabilityDivisor = 4000;
 

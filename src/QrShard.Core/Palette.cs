@@ -9,7 +9,7 @@ namespace QrShard;
 internal sealed class Palette
 {
     public const int MinBits = 1;
-    public const int MaxBits = 8;
+    public const int MaxBits = 10;
 
     public Rgb24[] Build(int bitsPerCell)
     {

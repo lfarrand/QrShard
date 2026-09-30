@@ -92,7 +92,7 @@ Three versions exist. **Encoders SHOULD emit version 4**; decoders MUST read all
 |---|---|---|
 | magic | 8 | `0xC5` |
 | version | 4 | `2` = classic interleave; `3` = same fields, v2 permuted interleave (§5.2) |
-| bitsPerCell | 4 | 1–8 |
+| bitsPerCell | 4 | 1–10 |
 | gridW | 16 | data grid width in cells |
 | gridH | 16 | data grid height in cells |
 | cellPx | 8 | encoded cell size |
@@ -119,7 +119,7 @@ Same 128 modules, reallocated so the strip survives damage:
 |---|---|---|
 | magic | 8 | `0xC5` |
 | version | 4 | `4` |
-| bitsPerCell | 4 | 1–8 |
+| bitsPerCell | 4 | 1–10 |
 | gridW | 14 | data grid width in cells (≤ 16383) |
 | gridH | 14 | data grid height in cells (≤ 16383) |
 | cellPx | 6 | encoded cell size **minus 1** (stores 1–64) |
@@ -161,6 +161,11 @@ per channel: `bitsR = ceil(b/3)` (i.e. `(b+2)/3` integer), `bitsG = (b+1)/3`, `b
 channel level `i` of `count` levels is `round-free (i · 255) / (count − 1)` (integer division),
 or 0 when `count = 1`. Color index `v` decomposes as `iR = v / (nG·nB)`, `iG = (v / nB) mod nG`,
 `iB = v mod nB`.
+
+Values 9 and 10 use this same 4-bit field (the nibble represents 0–15; 16 does not fit) and do
+not change the metadata version. A decoder that only accepts 1–8 rejects those shards. Images
+stay 8 bits per channel. At 10 bits the split is 16×8×8 levels, so the minimum channel step
+inside 8-bit RGB is 17. Densities 1–8 keep a minimum step of at least 32.
 
 The palette strips draw the `n` colors as equal-width blocks in index order. Decoders normally
 classify data cells against the **measured** strip colors (nearest squared-RGB distance), so the

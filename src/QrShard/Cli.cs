@@ -1794,7 +1794,7 @@ internal sealed class Cli(AppSettings? settings = null)
                                          WxH, 700-16384, to override (e.g. a smaller size shows
                                          the code surrounded by padding)
                 -c, --cell <px>          Data cell size in pixels, 1-64 (default: 3)
-                -b, --bits <n>           Bits per cell / color density, 1-8 (default: 4)
+                -b, --bits <n>           Bits per cell / color density, 1-10 (default: 4)
                 -e, --ecc <n>            Reed-Solomon parity per 255-byte block, even, 0-64
                                          (default: 16 ≈ 6% overhead, fixes 8 bad bytes per block)
                 -R, --recovery <pct>     Add parity IMAGES so whole missing/damaged images can be
@@ -1933,7 +1933,7 @@ internal sealed class Cli(AppSettings? settings = null)
 
             Density guide (per image, after default ECC): bytes ≈ cells x bits/cell / 8 x 0.94.
               Robust default (2160px, cell 3, 4 bits) ≈ 212 KB/image.
-              Pixel-perfect captures can push cell 1-2 and 6-8 bits for multi-MB images.
+              Pixel-perfect captures can push cell 1-2 and 6-10 bits for multi-MB images.
             Capture tips: screenshot the image displayed at 100% zoom; include the full black
             frame with some white margin; avoid fractional display scaling for cell sizes < 3.
             ECC absorbs localized damage (cursor, notification toast, mild JPEG artifacts).

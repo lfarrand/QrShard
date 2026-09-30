@@ -49,12 +49,33 @@ public class LayoutTests
     [InlineData(2160, 2160, 0, 4, 0)]   // cell too small
     [InlineData(2160, 2160, 65, 4, 0)]  // cell too large
     [InlineData(2160, 2160, 3, 0, 0)]   // bits too small
-    [InlineData(2160, 2160, 3, 9, 0)]   // bits too large
+    [InlineData(2160, 2160, 3, 11, 0)]  // bits too large
+    [InlineData(2160, 2160, 3, 16, 0)]  // 16 does not fit the 4-bit field
     [InlineData(2160, 2160, 3, 4, -2)]  // negative parity
     [InlineData(2160, 2160, 3, 4, 66)]  // parity above max
     [InlineData(2160, 2160, 3, 4, 15)]  // odd parity
     public void Create_RejectsInvalidOptions(int width, int height, int cell, int bits, int parity) =>
         Assert.Throws<ArgumentException>(() => Layout.Create(width, height, cell, bits, parity));
+
+    [Theory]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void Create_AcceptsNineAndTenBits_AndStripRoundTrips(int bits)
+    {
+        var layout = Layout.Create(2160, 2160, 3, bits, 16);
+        Assert.Equal(bits, layout.BitsPerCell);
+        var restored = Layout.UnpackMetadata(ToModules(layout.PackMetadata()));
+        Assert.NotNull(restored);
+        Assert.Equal(bits, restored!.BitsPerCell);
+    }
+
+    [Fact]
+    public void TenBit_CalibrationBlocks_AreAboutTwoPixelsOn2160()
+    {
+        var layout = Layout.Create(2160, 2160, 3, 10, 0);
+        double blockW = (layout.InnerW - 2.0 * layout.Gutter) / (1 << 10);
+        Assert.InRange(blockW, 1.5, 2.5);
+    }
 
     [Fact]
     public void Create_TooSmallForEcc_IsRejected()
@@ -70,6 +91,8 @@ public class LayoutTests
     [InlineData(3840, 2160, 1, 6, 32)]
     [InlineData(4096, 4096, 1, 8, 64)]
     [InlineData(16384, 16384, 64, 8, 2)]
+    [InlineData(2160, 2160, 3, 9, 16)]
+    [InlineData(2160, 2160, 3, 10, 16)]
     public void Metadata_PackUnpack_RoundTrips(int width, int height, int cell, int bits, int parity)
     {
         var layout = Layout.Create(width, height, cell, bits, parity);

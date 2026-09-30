@@ -49,6 +49,8 @@ public class BitIoTests
     [InlineData(6)]
     [InlineData(7)]
     [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(10)]
     public void BitStream_ReadWriteCell_RoundTripsAllValues(int bits)
     {
         int cells = 200;
