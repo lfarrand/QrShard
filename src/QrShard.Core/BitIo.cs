@@ -45,16 +45,19 @@ internal sealed class BitStream
     /// <summary>Reads <paramref name="bits"/> bits MSB-first starting at an absolute bit offset; missing bytes read as 0.</summary>
     public int ReadCell(byte[] data, long bitOffset, int bits)
     {
-        if (bits <= 8)
+        if ((uint)bits <= 10)
         {
-            // A run of <= 8 bits spans at most two bytes: one 16-bit window, one shift, one mask.
-            // This is the per-cell hot path of both rendering and grid reading.
+            // A run of <= 10 bits spans at most three bytes. One 24-bit window covers a 10-bit
+            // cell that starts on the last bit of a byte, and a missing byte still reads as 0.
             long byteIdx = bitOffset >> 3;
             if (byteIdx >= data.Length)
                 return 0;
             int bitInByte = (int)(bitOffset & 7);
-            int window = data[byteIdx] << 8 | (byteIdx + 1 < data.Length ? data[byteIdx + 1] : 0);
-            return (window >> (16 - bitInByte - bits)) & ((1 << bits) - 1);
+            int b0 = data[byteIdx];
+            int b1 = byteIdx + 1 < data.Length ? data[byteIdx + 1] : 0;
+            int b2 = byteIdx + 2 < data.Length ? data[byteIdx + 2] : 0;
+            int window = (b0 << 16) | (b1 << 8) | b2;
+            return (window >> (24 - bitInByte - bits)) & ((1 << bits) - 1);
         }
 
         int v = 0;
@@ -71,16 +74,18 @@ internal sealed class BitStream
     /// <summary>Writes <paramref name="bits"/> bits MSB-first at an absolute bit offset; bits past the buffer are dropped.</summary>
     public void WriteCell(byte[] data, long bitOffset, int bits, int value)
     {
-        if (bits <= 8)
+        if ((uint)bits <= 10)
         {
             long byteIdx = bitOffset >> 3;
             if (byteIdx >= data.Length)
                 return;
             int bitInByte = (int)(bitOffset & 7);
-            int shifted = (value & ((1 << bits) - 1)) << (16 - bitInByte - bits);
-            data[byteIdx] |= (byte)(shifted >> 8);
+            int shifted = (value & ((1 << bits) - 1)) << (24 - bitInByte - bits);
+            data[byteIdx] |= (byte)(shifted >> 16);
             if (byteIdx + 1 < data.Length)
-                data[byteIdx + 1] |= (byte)shifted;
+                data[byteIdx + 1] |= (byte)(shifted >> 8);
+            if (byteIdx + 2 < data.Length)
+                data[byteIdx + 2] |= (byte)shifted;
             return;
         }
 
