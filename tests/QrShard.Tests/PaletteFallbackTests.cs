@@ -158,6 +158,25 @@ public class PaletteFallbackTests
             Assert.Equal(BruteSeparable(measured), StripReader.IsSeparableForTests(measured));
     }
 
+    [Fact]
+    public void ClosestSquared_ReusedScratch_MatchesAFreshSearch()
+    {
+        var scratch = new ClosestPairScratch();
+        var palette = new Palette().Build(10);
+        Assert.Equal(Palette.ClosestSquared(palette), scratch.Closest(palette));
+
+        var duplicated = (Rgb24[])palette.Clone();
+        duplicated[1] = duplicated[0];
+        Assert.Equal(0, scratch.Closest(duplicated));
+        Assert.Equal(Palette.ClosestSquared(palette), scratch.Closest(palette));
+
+        var random = new Random(1);
+        var cloud = new Rgb24[80];
+        for (int i = 0; i < cloud.Length; i++)
+            cloud[i] = new Rgb24((byte)random.Next(256), (byte)random.Next(256), (byte)random.Next(256));
+        Assert.Equal(Palette.ClosestSquared(cloud), scratch.Closest(cloud));
+    }
+
     private static bool BruteSeparable(Rgb24[] measured)
     {
         if (measured.Length < 2)

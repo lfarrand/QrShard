@@ -98,11 +98,18 @@ internal sealed class DecodeDiagnostics
     public int[]? CellMargins { get; set; }
 
     /// <summary>
-    /// Squared-distance floor paired with <see cref="CellMargins"/>. Measured from palette spacing
-    /// when <see cref="WantDetail"/> is set, so the quality heatmap uses the same green threshold
-    /// as erasure flagging. Zero when detail was not requested.
+    /// Squared-distance floor paired with <see cref="CellMargins"/> for a uniform palette.
+    /// Measured while sampling when <see cref="WantDetail"/> is set. Zero when detail was not
+    /// requested. Interpolated captures use <see cref="RowConfidentDist"/> instead.
     /// </summary>
     public long QualityConfidentDist { get; set; }
+
+    /// <summary>
+    /// Per-grid-row confidence floor for an interpolated capture, length <c>GridH</c>, in the same
+    /// row order as <see cref="CellMargins"/>. The quality heatmap paints each row with its own
+    /// floor. Null for a uniform palette.
+    /// </summary>
+    public long[]? RowConfidentDist { get; set; }
 
     /// <summary>
     /// Whether the caller actually wants <see cref="CellMargins"/> and

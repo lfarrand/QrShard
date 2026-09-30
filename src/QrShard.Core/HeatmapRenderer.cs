@@ -78,8 +78,12 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
     /// Squared-distance floor from <see cref="GridSampler.ConfidenceFloorFor"/>. Margins at or
     /// below it paint the same green as an exact hit. The default matches the unmeasured fallback.
     /// </param>
+    /// <param name="rowFloors">
+    /// Per-grid-row floors from interpolated sampling. When present, row <c>gy</c> is painted
+    /// with <c>rowFloors[gy]</c> rather than the single <paramref name="confidentDist"/>.
+    /// </param>
     public void RenderQuality(Layout layout, int[] cellMargins, string outPath,
-        long confidentDist = GridSampler.DefaultConfidentDist)
+        long confidentDist = GridSampler.DefaultConfidentDist, long[]? rowFloors = null)
     {
         int w = layout.GridW * CellPx, h = layout.GridH * CellPx;
         var px = new Rgb24[w * h];
@@ -87,11 +91,12 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
         // still trusts samples under that floor (and under the absolute cap), so the heatmap
         // clamps there instead of treating the wide floor as "no green plateau".
         double ambiguous = GridSampler.AbsoluteSuspectDist;
-        double confident = Math.Clamp(confidentDist, 0, ambiguous);
-        double span = ambiguous - confident;
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {
+            long rowFloor = rowFloors is not null && gy < rowFloors.Length ? rowFloors[gy] : confidentDist;
+            double confident = Math.Clamp(rowFloor, 0, ambiguous);
+            double span = ambiguous - confident;
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
             {
                 int margin = cellMargins[(int)cellIndex];

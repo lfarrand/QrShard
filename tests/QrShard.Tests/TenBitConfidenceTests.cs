@@ -166,4 +166,112 @@ public class TenBitConfidenceTests
         using var far = Image.Load<Rgb24>(past);
         Assert.NotEqual(far[0, 0], far[6, 0]);
     }
+
+    [Fact]
+    public void UniformLookup_MatchesTheScan_IncludingTiesAndABrokenPalette()
+    {
+        var palette = new Palette().Build(10);
+        // Red 9 is nearer red 17. Green 18 is an exact tie between 0 and 36; the lowest index wins.
+        AssertUniformSymbol(palette, new Rgb24(9, 0, 0), 64);
+        AssertUniformSymbol(palette, new Rgb24(0, 18, 0), 0);
+        AssertUniformSymbol(palette, new Rgb24(17, 0, 0), 64);
+
+        var broken = (Rgb24[])new Palette().Build(8).Clone();
+        broken[10] = broken[2];
+        int tied = new Palette().Nearest(broken, broken[2].R, broken[2].G, broken[2].B);
+        Assert.Equal(2, tied);
+        AssertUniformSymbol(broken, broken[2], tied);
+    }
+
+    [Fact]
+    public void QualityHeatmap_UsesEachInterpolatedRowsFloor()
+    {
+        var layout = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 1,
+            GridW = 1,
+            GridH = 2,
+            MetaH = 6,
+            InnerW = 14,
+            InnerH = 38,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        long[] floors = [49, 9];
+        using var tmp = new TempDir();
+        string path = tmp.File("rows.png");
+        new HeatmapRenderer().RenderQuality(layout, [36, 36], path, confidentDist: 9, rowFloors: floors);
+        using var image = Image.Load<Rgb24>(path);
+        string greenPath = tmp.File("green.png");
+        new HeatmapRenderer().RenderQuality(layout, [0, 0], greenPath, confidentDist: 49);
+        using var green = Image.Load<Rgb24>(greenPath);
+        Assert.Equal(green[0, 0], image[0, 0]);
+        Assert.NotEqual(green[0, 0], image[0, 6]);
+
+        string collapsed = tmp.File("min.png");
+        new HeatmapRenderer().RenderQuality(layout, [36, 36], collapsed, confidentDist: 9);
+        using var min = Image.Load<Rgb24>(collapsed);
+        Assert.Equal(min[0, 0], min[0, 6]);
+    }
+
+    [Fact]
+    public void InterpolatedSampling_RecordsAFloorPerRow()
+    {
+        var top = new Palette().Build(10);
+        var bottom = top.Select(p => new Rgb24(
+            (byte)(p.R * 0.5 + 0.5),
+            (byte)(p.G * 0.5 + 0.5),
+            (byte)(p.B * 0.5 + 0.5))).ToArray();
+        var layout = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 1,
+            GridW = 1,
+            GridH = 2,
+            MetaH = 1,
+            InnerW = 3,
+            InnerH = 8,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        var scratch = new DecodeScratch();
+        new GridSampler().ReadDataGrid(
+            new Bitmap(new Rgb24[layout.InnerW * layout.InnerH], layout.InnerW, layout.InnerH),
+            new InnerRect(0, 0, layout.InnerW, layout.InnerH), layout,
+            new PaletteSet(top, top, bottom, Interpolate: true), scratch,
+            out _, out _, new int[2]);
+
+        long[] floors = scratch.CopyRowFloors();
+        Assert.Equal(2, floors.Length);
+        Assert.True(floors[0] > floors[1]);
+        long between = (floors[0] + floors[1]) / 2;
+        Assert.True(between > floors[1] && between <= floors[0]);
+    }
+
+    private static void AssertUniformSymbol(Rgb24[] palette, Rgb24 sample, int expected)
+    {
+        int bits = palette.Length == 1 << 10 ? 10 : 8;
+        var layout = new Layout
+        {
+            BitsPerCell = bits,
+            CellPx = 1,
+            GridW = 1,
+            GridH = 1,
+            MetaH = 1,
+            InnerW = 3,
+            InnerH = 7,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        int w = layout.InnerW, h = layout.InnerH;
+        var px = new Rgb24[w * h];
+        px[3 * w + 1] = sample;
+        byte[] stream = new GridSampler().ReadDataGrid(
+            new Bitmap(px, w, h), new InnerRect(0, 0, w, h), layout,
+            new PaletteSet(palette, palette, palette, Interpolate: false),
+            new DecodeScratch(), out _, out _);
+        Assert.Equal(expected, new BitStream().ReadCell(stream, 0, bits));
+        Assert.Equal(expected, new Palette().Nearest(palette, sample.R, sample.G, sample.B));
+    }
 }

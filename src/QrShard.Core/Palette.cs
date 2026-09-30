@@ -93,72 +93,11 @@ internal sealed class Palette
     /// <summary>
     /// Minimum pairwise squared distance. Zero when any two entries share a colour. The grid is
     /// sized from an upper bound, so every pair that could be the minimum falls in a neighbouring
-    /// cell and the result matches a full scan.
+    /// cell and the result matches a full scan. <paramref name="reuse"/> keeps the sort buffer and
+    /// the spatial hash across calls.
     /// </summary>
-    internal static long ClosestSquared(Rgb24[] colors)
-    {
-        int n = colors.Length;
-        if (n < 2)
-            return long.MaxValue;
-
-        var order = new int[n];
-        for (int i = 0; i < n; i++)
-            order[i] = i;
-        Array.Sort(order, (a, b) =>
-        {
-            int cmp = colors[a].R.CompareTo(colors[b].R);
-            if (cmp != 0)
-                return cmp;
-            cmp = colors[a].G.CompareTo(colors[b].G);
-            return cmp != 0 ? cmp : colors[a].B.CompareTo(colors[b].B);
-        });
-
-        long upper = long.MaxValue;
-        for (int i = 1; i < n; i++)
-        {
-            int limit = Math.Min(n - 1, i + 7);
-            for (int j = i; j <= limit; j++)
-            {
-                long d = DistanceSquared(colors[order[i - 1]], colors[order[j]]);
-                if (d == 0)
-                    return 0;
-                if (d < upper)
-                    upper = d;
-            }
-        }
-
-        int side = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(upper)));
-        var grid = new Dictionary<long, List<int>>();
-        long best = upper;
-        for (int i = 0; i < n; i++)
-        {
-            Rgb24 p = colors[i];
-            int cr = p.R / side, cg = p.G / side, cb = p.B / side;
-            for (int dr = -1; dr <= 1; dr++)
-            {
-                for (int dg = -1; dg <= 1; dg++)
-                {
-                    for (int db = -1; db <= 1; db++)
-                    {
-                        if (!grid.TryGetValue(CellKey(cr + dr, cg + dg, cb + db), out List<int>? bucket))
-                            continue;
-                        foreach (int j in bucket)
-                        {
-                            long d = DistanceSquared(p, colors[j]);
-                            if (d < best)
-                                best = d;
-                        }
-                    }
-                }
-            }
-
-            long own = CellKey(cr, cg, cb);
-            if (!grid.TryGetValue(own, out List<int>? mine))
-                grid[own] = mine = new List<int>();
-            mine.Add(i);
-        }
-        return best;
-    }
+    internal static long ClosestSquared(Rgb24[] colors, ClosestPairScratch? reuse = null) =>
+        (reuse ?? new ClosestPairScratch()).Closest(colors);
 
     /// <summary>Squared length of the axis-aligned bounding-box diagonal — an upper bound on the widest pair.</summary>
     internal static long AabbDiagonalSquared(Rgb24[] colors)
@@ -209,7 +148,114 @@ internal sealed class Palette
         }
         return widest;
     }
+}
+
+/// <summary>
+/// Reusable buffers for <see cref="Palette.ClosestSquared"/>. One instance serves every row of a
+/// capture so the sort buffer and spatial hash are not allocated per row.
+/// </summary>
+internal sealed class ClosestPairScratch
+{
+    private int[] _order = [];
+    private readonly OrderComparer _comparer = new();
+    private readonly Dictionary<long, List<int>> _grid = new();
+    private readonly List<List<int>> _pool = new();
+
+    public long Closest(Rgb24[] colors)
+    {
+        ReleaseGrid();
+        int n = colors.Length;
+        if (n < 2)
+            return long.MaxValue;
+
+        if (_order.Length < n)
+            _order = new int[n];
+        for (int i = 0; i < n; i++)
+            _order[i] = i;
+        _comparer.Colors = colors;
+        Array.Sort(_order, 0, n, _comparer);
+
+        long upper = long.MaxValue;
+        for (int i = 1; i < n; i++)
+        {
+            int limit = Math.Min(n - 1, i + 7);
+            for (int j = i; j <= limit; j++)
+            {
+                long d = Palette.DistanceSquared(colors[_order[i - 1]], colors[_order[j]]);
+                if (d == 0)
+                    return 0;
+                if (d < upper)
+                    upper = d;
+            }
+        }
+
+        int side = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(upper)));
+        long best = upper;
+        for (int i = 0; i < n; i++)
+        {
+            Rgb24 p = colors[i];
+            int cr = p.R / side, cg = p.G / side, cb = p.B / side;
+            for (int dr = -1; dr <= 1; dr++)
+            {
+                for (int dg = -1; dg <= 1; dg++)
+                {
+                    for (int db = -1; db <= 1; db++)
+                    {
+                        if (!_grid.TryGetValue(CellKey(cr + dr, cg + dg, cb + db), out List<int>? bucket))
+                            continue;
+                        foreach (int j in bucket)
+                        {
+                            long d = Palette.DistanceSquared(p, colors[j]);
+                            if (d < best)
+                                best = d;
+                        }
+                    }
+                }
+            }
+
+            long own = CellKey(cr, cg, cb);
+            if (!_grid.TryGetValue(own, out List<int>? mine))
+                _grid[own] = mine = Rent();
+            mine.Add(i);
+        }
+        return best;
+    }
+
+    private void ReleaseGrid()
+    {
+        foreach (List<int> list in _grid.Values)
+        {
+            list.Clear();
+            _pool.Add(list);
+        }
+        _grid.Clear();
+    }
+
+    private List<int> Rent()
+    {
+        int n = _pool.Count;
+        if (n == 0)
+            return new List<int>();
+        List<int> list = _pool[n - 1];
+        _pool.RemoveAt(n - 1);
+        return list;
+    }
 
     private static long CellKey(int r, int g, int b) =>
         ((long)(r + 4) << 42) | ((long)(g + 4) << 21) | (long)(b + 4);
+
+    private sealed class OrderComparer : IComparer<int>
+    {
+        public Rgb24[] Colors = [];
+
+        public int Compare(int a, int b)
+        {
+            Rgb24[] colors = Colors;
+            int cmp = colors[a].R.CompareTo(colors[b].R);
+            if (cmp != 0)
+                return cmp;
+            cmp = colors[a].G.CompareTo(colors[b].G);
+            return cmp != 0 ? cmp : colors[a].B.CompareTo(colors[b].B);
+        }
+    }
 }

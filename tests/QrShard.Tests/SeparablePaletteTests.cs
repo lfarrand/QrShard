@@ -95,6 +95,24 @@ public class SeparablePaletteTests
                     Check(r, g, b);
     }
 
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(8)]
+    [InlineData(10)]
+    public void ClosestSquared_MatchesThePairSearch(int bits)
+    {
+        var palette = new Palette().Build(bits);
+        var index = new SeparablePalette();
+        Assert.True(index.TryRebuild(palette));
+        Assert.Equal(Palette.ClosestSquared(palette), index.ClosestSquared);
+
+        var gained = Gain(palette, 0.5, 0.5, 0.5);
+        var gainedIndex = new SeparablePalette();
+        Assert.True(gainedIndex.TryRebuild(gained));
+        Assert.Equal(Palette.ClosestSquared(gained), gainedIndex.ClosestSquared);
+    }
+
     /// <summary>
     /// The 1-bit palette is black/white, not a product of the generic channel split, so the fast
     /// path must decline it and leave the caller scanning.

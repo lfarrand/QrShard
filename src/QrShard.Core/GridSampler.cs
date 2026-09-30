@@ -63,8 +63,10 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         // Uniform palettes: once per image. Interpolated rows are measured inside ReadInterpolated,
         // because a row between the strips can be tighter than either strip.
         long confidenceFloor = palettes.Interpolate ? 0 : ConfidenceFloorFor(palettes);
+        if (!palettes.Interpolate)
+            scratch.UniformConfidenceFloor = confidenceFloor;
         if (palettes.Interpolate)
-            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins);
+            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins, scratch);
         else
             ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits, cellMargins, confidenceFloor);
         suspectBytes = suspects;
@@ -164,7 +166,11 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     private static long RowConfidenceFloor(PaletteSet palettes, Layout layout, int gy, Rgb24[] rowPalette)
     {
         FillInterpolatedRow(palettes, layout, gy, rowPalette);
-        return ConfidenceFloorSquared(Palette.ClosestSquared(rowPalette));
+        var index = new SeparablePalette();
+        long closest = index.TryRebuild(rowPalette)
+            ? index.ClosestSquared
+            : Palette.ClosestSquared(rowPalette);
+        return ConfidenceFloorSquared(closest);
     }
 
     /// <summary>Blend factor for grid row <paramref name="gy"/>, matching the strip positions the renderer uses.</summary>
@@ -212,15 +218,22 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     }
 
     /// <summary>
-    /// Uniform-path classify: reuse the 5-bit LUT when the sample is an exact palette hit
-    /// (clean PNG / screen captures). A nonzero distance to the cube's first winner means
-    /// the LUT may be the wrong nearest — refine with <see cref="ClassifyExact"/> so
-    /// <see cref="RecordConfidence"/> does not trust a gain-0.2 cube collision.
+    /// Uniform-path classify. A product palette uses <paramref name="index"/>, which matches the
+    /// scan's lowest-index tie. Otherwise reuse the 5-bit LUT for an exact hit and refine a
+    /// nonzero distance with <see cref="ClassifyExact"/> so a gain-0.2 cube collision is not trusted.
     /// </summary>
-    private int ClassifyUniform(int[] lut, Rgb24[] palette, byte r, byte g, byte b, out long dist)
+    private int ClassifyUniform(int[]? lut, Rgb24[] palette, SeparablePalette? index, byte r, byte g, byte b, out long dist)
     {
+        if (index is not null)
+        {
+            int indexed = index.Nearest(r, g, b);
+            long idr = r - palette[indexed].R, idg = g - palette[indexed].G, idb = b - palette[indexed].B;
+            dist = idr * idr + idg * idg + idb * idb;
+            return indexed;
+        }
+
         int key = (r >> 3 << 10) | (g >> 3 << 5) | (b >> 3);
-        int v = lut[key];
+        int v = lut![key];
         if (v < 0)
         {
             lut[key] = v = paletteMath.Nearest(palette, r, g, b);
@@ -238,8 +251,11 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, DecodeScratch scratch,
         double sx, double sy, int bits, int[]? cellMargins, long confidenceFloor)
     {
-        // Lazy nearest-color lookup keyed on 5-bit-per-channel quantized RGB.
-        int[] lut = scratch.ResetNearestColorLut();
+        // A measured product palette has an exact per-channel index (same tie order as the scan).
+        // Anything knocked off that grid keeps the 5-bit cache and the full scan.
+        var separable = new SeparablePalette();
+        SeparablePalette? index = separable.TryRebuild(palette) ? separable : null;
+        int[]? lut = index is null ? scratch.ResetNearestColorLut() : null;
         int width = bmp.Width, height = bmp.Height;
         var px = bmp.Px;
         int[] cols = ColumnPixels(inner, layout, sx, width);
@@ -268,7 +284,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     foreach (int delta in deltas)
                     {
                         var c = px[baseIndex + delta];
-                        int v = ClassifyUniform(lut, palette, c.R, c.G, c.B, out long dist);
+                        int v = ClassifyUniform(lut, palette, index, c.R, c.G, c.B, out long dist);
                         if (dist < bestDist)
                         {
                             bestDist = dist;
@@ -286,7 +302,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                         int xi = Math.Clamp(colX + dx, 0, width - 1);
                         int yi = Math.Clamp(rowY + dy, 0, height - 1);
                         var c = px[yi * width + xi];
-                        int v = ClassifyUniform(lut, palette, c.R, c.G, c.B, out long dist);
+                        int v = ClassifyUniform(lut, palette, index, c.R, c.G, c.B, out long dist);
                         if (dist < bestDist)
                         {
                             bestDist = dist;
@@ -315,31 +331,35 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits,
-        int[]? cellMargins)
+        int[]? cellMargins, DecodeScratch scratch)
     {
         var rowPalette = new Rgb24[palettes.Top.Length];
         var rowIndex = new SeparablePalette();
         int width = bmp.Width, height = bmp.Height;
         var px = bmp.Px;
         int[] cols = ColumnPixels(inner, layout, sx, width);
+        // Heatmap rows need the floors even when this image has no ECC to flag.
+        long[]? rowFloors = cellMargins is not null ? scratch.RowFloors(layout.GridH) : null;
+        bool needFloor = suspects is not null || rowFloors is not null;
+        ClosestPairScratch? pairs = needFloor ? scratch.ClosestPairs : null;
 
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {
             // Spacing is per row. Swapping two colours between the strips leaves both endpoints
-            // a full step apart while the midpoint entries coincide. Without ECC there is nothing
-            // to flag, so the closest-pair measurement is skipped.
-            long rowFloor;
-            if (suspects is null)
-            {
-                FillInterpolatedRow(palettes, layout, gy, rowPalette);
-                rowFloor = 0;
-            }
-            else
-            {
-                rowFloor = RowConfidenceFloor(palettes, layout, gy, rowPalette);
-            }
+            // a full step apart while the midpoint entries coincide.
+            FillInterpolatedRow(palettes, layout, gy, rowPalette);
             bool separable = rowIndex.TryRebuild(rowPalette);
+            long rowFloor = 0;
+            if (needFloor)
+            {
+                long closest = separable
+                    ? rowIndex.ClosestSquared
+                    : Palette.ClosestSquared(rowPalette, pairs);
+                rowFloor = ConfidenceFloorSquared(closest);
+                if (rowFloors is not null)
+                    rowFloors[gy] = rowFloor;
+            }
 
             int rowY = RowPixel(inner, layout, sy, height, gy);
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)

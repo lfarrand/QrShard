@@ -27,6 +27,7 @@ internal sealed class SeparablePalette
     // Winning per-channel level index for every possible channel value.
     private readonly byte[] _r = new byte[256], _g = new byte[256], _b = new byte[256];
     private int _strideR, _strideG;
+    private long _closestSquared;
 
     /// <summary>
     /// Re-derives the tables from <paramref name="palette"/>, reusing the buffers. Returns false —
@@ -54,14 +55,52 @@ internal sealed class SeparablePalette
 
         _strideR = strideR;
         _strideG = nB;
+        // A product's closest pair sits on one channel with the other two held equal, so the
+        // minimum level gap is the exact minimum squared distance. No spatial hash.
+        _closestSquared = ChannelClosest(palette, nR, strideR, 0);
+        _closestSquared = Math.Min(_closestSquared, ChannelClosest(palette, nG, nB, 1));
+        _closestSquared = Math.Min(_closestSquared, ChannelClosest(palette, nB, 1, 2));
         FillR(_r, palette, nR, strideR);
         FillG(_g, palette, nG, nB);
         FillB(_b, palette, nB);
         return true;
     }
 
+    /// <summary>
+    /// Minimum pairwise squared distance. Valid only after <see cref="TryRebuild"/> returned true.
+    /// </summary>
+    public long ClosestSquared => _closestSquared;
+
     /// <summary>Index of the palette color nearest the sample — identical to the scan's answer.</summary>
     public int Nearest(int r, int g, int b) => _r[r] * _strideR + _g[g] * _strideG + _b[b];
+
+    private static int ChannelLevel(Rgb24 color, int channel) => channel switch
+    {
+        0 => color.R,
+        1 => color.G,
+        _ => color.B,
+    };
+
+    private static long ChannelClosest(Rgb24[] palette, int count, int stride, int channel)
+    {
+        if (count < 2)
+            return long.MaxValue;
+        long best = long.MaxValue;
+        for (int i = 0; i < count; i++)
+        {
+            int a = ChannelLevel(palette[i * stride], channel);
+            for (int j = i + 1; j < count; j++)
+            {
+                long d = a - ChannelLevel(palette[j * stride], channel);
+                long sq = d * d;
+                if (sq < best)
+                    best = sq;
+                if (best == 0)
+                    return 0;
+            }
+        }
+        return best;
+    }
 
     // The three fills differ only in which channel they read; kept separate so the inner loop
     // stays a straight-line comparison rather than a per-level channel switch.

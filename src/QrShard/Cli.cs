@@ -451,7 +451,7 @@ internal sealed class Cli(AppSettings? settings = null)
                         }
                         else if (diag.CellMargins is not null)
                         {
-                            services.Heatmap.RenderQuality(diag.Layout, diag.CellMargins, heatmapPath, diag.QualityConfidentDist);
+                            services.Heatmap.RenderQuality(diag.Layout, diag.CellMargins, heatmapPath, diag.QualityConfidentDist, diag.RowConfidentDist);
                             if (!json)
                             {
                                 string why = diag.Layout.EccParity == 0 ? "no ECC in this image" : "the decode did not complete";
@@ -466,7 +466,7 @@ internal sealed class Cli(AppSettings? settings = null)
                     }
                     if (qualityPath is not null && diag.CellMargins is not null)
                     {
-                        services.Heatmap.RenderQuality(diag.Layout, diag.CellMargins, qualityPath, diag.QualityConfidentDist);
+                        services.Heatmap.RenderQuality(diag.Layout, diag.CellMargins, qualityPath, diag.QualityConfidentDist, diag.RowConfidentDist);
                         renderedHeatmap ??= qualityPath;
                         if (!json)
                             @out.WriteLine($"quality   : {ShardHeader.Display(qualityPath)} (green = confident classification, red = ambiguous/likely wrong)");

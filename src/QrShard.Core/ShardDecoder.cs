@@ -686,10 +686,16 @@ internal sealed class ShardDecoder(
             diagnostics.CellMargins = cellMargins;
         }
         var palette = stripReader.ReadPalette(bmp, inner, layout);
-        if (diagnostics is { WantDetail: true })
-            diagnostics.QualityConfidentDist = GridSampler.ConfidenceFloorFor(palette, layout);
         byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch,
             out bool[]? suspectBytes, out byte[]? secondChoiceBytes, cellMargins);
+        // Floors were measured while sampling. Copy them out before this scratch is reused.
+        if (diagnostics is { WantDetail: true })
+        {
+            if (palette.Interpolate)
+                diagnostics.RowConfidentDist = scratch.CopyRowFloors();
+            else
+                diagnostics.QualityConfidentDist = scratch.UniformConfidenceFloor;
+        }
 
         // v2 interleave: gather the permuted cell stream back into classic order so the whole
         // SIMD/erasure/Chase machinery — and multi-capture fusion — run unchanged.
