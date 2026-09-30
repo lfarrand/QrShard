@@ -200,7 +200,7 @@ internal sealed class Cli(AppSettings? settings = null)
                           $"can recover up to {result.StripeParity} lost image(s) per {result.StripeData + result.StripeParity}.");
                 if (slideshowPath is not null)
                 {
-                    double cycleSeconds = result.ImageCount * (long)intervalMs / 1000.0;
+                    double cycleSeconds = SlideshowCycleSeconds(result.ImageCount, intervalMs);
                     @out.WriteLine($"Slideshow: {ShardHeader.Display(slideshowPath)} ({intervalMs} ms/image, ~{cycleSeconds:0.#} s per cycle).");
                     @out.WriteLine(slideshowPath.EndsWith(".apng", StringComparison.OrdinalIgnoreCase)
                         ? "  Open it and record the screen for at least one full cycle."
@@ -1453,6 +1453,14 @@ internal sealed class Cli(AppSettings? settings = null)
         string? v = Get(named, shortKey, longKey);
         return v is null ? fallback : int.Parse(v);
     }
+
+    /// <summary>
+    /// Seconds for one full pass. <paramref name="imageCount"/> is an <see cref="int"/>
+    /// whose ceiling is 5,000,000, and the hold is up to 65536 ms, so the product
+    /// (327,680,000,000) is computed in 64 bits before the conversion to seconds.
+    /// </summary>
+    internal static double SlideshowCycleSeconds(int imageCount, int intervalMs)
+        => imageCount * (long)intervalMs / 1000.0;
 
     private static int GetValidatedSlideshowIntervalMs(Dictionary<string, string> named)
     {

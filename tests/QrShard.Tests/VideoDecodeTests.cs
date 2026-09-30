@@ -390,8 +390,19 @@ public class VideoDecodeTests
     [InlineData(99)]
     public void Slideshow_RejectsIntervalOutsideExactApngRange(int intervalMs)
     {
-        Assert.Throws<ArgumentException>(() => new SlideshowWriter().Write(Path.GetTempPath(), [], intervalMs));
-        Assert.Throws<ArgumentException>(() => new SlideshowWriter().WriteApng(Path.GetTempPath(), [], intervalMs));
+        using var tmp = new TempDir();
+        string frame = tmp.File("a.png");
+        using (var image = new Image<Rgb24>(8, 8, new Rgb24(10, 20, 30)))
+            image.SaveAsPng(frame);
+
+        // A real frame, so the empty-list guard cannot satisfy this test. The range
+        // message is the only accepted failure; removing the upper bound lets 65537 through.
+        string range =
+            $"Slideshow interval must be an integer from {SlideshowWriter.MinIntervalMs} to {SlideshowWriter.MaxIntervalMs} ms.";
+        var html = Assert.Throws<ArgumentException>(() => new SlideshowWriter().Write(tmp.Path, [frame], intervalMs));
+        var apng = Assert.Throws<ArgumentException>(() => new SlideshowWriter().WriteApng(tmp.Sub("apng"), [frame], intervalMs));
+        Assert.Equal(range, html.Message);
+        Assert.Equal(range, apng.Message);
     }
 
     [Theory]
@@ -412,8 +423,9 @@ public class VideoDecodeTests
         using (var image = new Image<Rgb24>(8, 8, new Rgb24(30, 20, 10)))
             image.SaveAsPng(second);
 
-        string html = new SlideshowWriter().Write(tmp.Path, [first, second], intervalMs);
-        Assert.Contains($"const interval = {intervalMs}", File.ReadAllText(html));
+        string page = File.ReadAllText(new SlideshowWriter().Write(tmp.Path, [first, second], intervalMs));
+        AssertExactIntervalAssignment(page, intervalMs);
+        AssertPlaybackWaitsOnInterval(page);
 
         string apng = new SlideshowWriter().WriteApng(tmp.Sub("apng"), [first, second], intervalMs);
         using var loaded = Image.Load<Rgb24>(apng);
@@ -432,8 +444,53 @@ public class VideoDecodeTests
         int code = new Cli().Run(["encode", input, "-o", outDir, "-r", "900", "--video", "--interval", "5000"],
             stdout, new StringWriter(), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
-        Assert.Contains("5000 ms/image", stdout.ToString());
-        Assert.Contains("const interval = 5000", File.ReadAllText(Path.Combine(outDir, "slideshow.html")));
+        string text = stdout.ToString();
+        Assert.Contains("Done: 1 image(s)", text);
+        Assert.Contains($"5000 ms/image, ~{Cli.SlideshowCycleSeconds(1, 5000):0.#} s per cycle", text);
+        AssertExactIntervalAssignment(File.ReadAllText(Path.Combine(outDir, "slideshow.html")), 5000);
+    }
+
+    [Fact]
+    public void SlideshowCycleSeconds_DoesNotOverflowAtTheImageCeiling()
+    {
+        Assert.Equal(5_000_000, ShardHeader.MaxImages);
+        Assert.Equal(65_536, SlideshowWriter.MaxIntervalMs);
+        double seconds = Cli.SlideshowCycleSeconds(ShardHeader.MaxImages, SlideshowWriter.MaxIntervalMs);
+        // 5_000_000 * 65_536 ms = 327_680_000_000 ms = 327_680_000 s.
+        Assert.Equal(327_680_000d, seconds);
+        double wrapped = unchecked(ShardHeader.MaxImages * SlideshowWriter.MaxIntervalMs) / 1000.0;
+        Assert.NotEqual(wrapped, seconds);
+    }
+
+    private static void AssertExactIntervalAssignment(string html, int intervalMs)
+    {
+        string number = intervalMs.ToString();
+        string statement = $"const interval = {number};";
+        int at = html.IndexOf(statement, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"missing exact timer assignment '{statement}'");
+        int afterNumber = at + "const interval = ".Length + number.Length;
+        Assert.False(char.IsDigit(html[afterNumber]));
+        Assert.Equal(';', html[afterNumber]);
+    }
+
+    private static void AssertPlaybackWaitsOnInterval(string html)
+    {
+        // begin() and the next-frame hold both use this call. One leftover occurrence
+        // would hide a hardcoded 1000 ms wait at the other site.
+        Assert.Equal(2, CountOccurrences(html, "window.setTimeout(queueNext, interval)"));
+        Assert.Contains("window.setTimeout(() => queueNext(0), interval)", html);
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        int count = 0;
+        int index = 0;
+        while ((index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += value.Length;
+        }
+        return count;
     }
 
     [Fact]
