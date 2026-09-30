@@ -83,18 +83,24 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     ///
     /// <paramref name="confidenceFloor"/> is the largest squared distance at which a runner-up
     /// one measured palette step away cannot satisfy the near-tie test. Exact hits (distance 0)
-    /// skip the scan. A sample that lands on a different palette colour also has distance 0, so
-    /// distance alone cannot mark it.
+    /// skip the scan, except on a row whose floor is 0: two indices can then share a colour, and
+    /// a sample of that colour is a 0-vs-0 tie. <c>secondDist &lt; bestDist * 2</c> is false when
+    /// both distances are 0, so the tie has to be flagged on its own. A unique exact colour on
+    /// the same row still has a positive runner-up and stays confident. A sample that lands on a
+    /// different palette colour also has distance 0, so distance alone cannot mark it.
     /// </summary>
     private void RecordConfidence(bool[]? suspects, byte[]? second, Rgb24[] palette, int best, long bestDist,
         byte r, byte g, byte b, long cellIndex, int bits, long confidenceFloor)
     {
         int alternative = best;
         bool far = bestDist > AbsoluteSuspectDist;
-        if (suspects is not null && (bestDist > confidenceFloor || far))
+        // Floor 0 is the only floor at which an exact hit can be two indices of one colour.
+        bool maybeExactTie = bestDist == 0 && confidenceFloor == 0;
+        if (suspects is not null && (bestDist > confidenceFloor || far || maybeExactTie))
         {
             int secondIndex = paletteMath.SecondNearest(palette, r, g, b, best, out long secondDist);
-            if (far || secondDist < bestDist * 2)
+            bool exactTie = bestDist == 0 && secondDist == 0;
+            if (far || secondDist < bestDist * 2 || exactTie)
             {
                 alternative = secondIndex;
                 long firstBit = cellIndex * bits;

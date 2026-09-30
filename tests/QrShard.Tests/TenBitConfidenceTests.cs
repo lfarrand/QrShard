@@ -134,7 +134,38 @@ public class TenBitConfidenceTests
         Assert.NotNull(suspects);
         Assert.True(suspects[0]);
         Assert.True(suspects[1]);
+
+        // The two swapped reds meet at one colour. A sample of that colour is distance 0 from
+        // both indices, so the winner is unknowable and the other index is the Chase alternative.
+        Rgb24 coincident = LerpChannel(top[0], bottom[0]);
+        Assert.Equal(coincident, LerpChannel(top[64], bottom[64]));
+        px[3 * w + 1] = coincident;
+        byte[] tied = new GridSampler().ReadDataGrid(
+            new Bitmap(px, w, h), new InnerRect(0, 0, w, h), layout, palettes,
+            new DecodeScratch(), out bool[]? tieSuspects, out byte[]? second);
+        Assert.Equal(0, new BitStream().ReadCell(tied, 0, 10));
+        Assert.NotNull(tieSuspects);
+        Assert.True(tieSuspects[0]);
+        Assert.True(tieSuspects[1]);
+        Assert.Equal(64, new BitStream().ReadCell(second!, 0, 10));
+
+        // The same row still has unique colours. An exact hit on one of those stays confident.
+        Assert.Equal(top[1], bottom[1]);
+        px[3 * w + 1] = top[1];
+        byte[] unique = new GridSampler().ReadDataGrid(
+            new Bitmap(px, w, h), new InnerRect(0, 0, w, h), layout, palettes,
+            new DecodeScratch(), out bool[]? uniqueSuspects, out byte[]? uniqueSecond);
+        Assert.Equal(1, new BitStream().ReadCell(unique, 0, 10));
+        Assert.NotNull(uniqueSuspects);
+        Assert.False(uniqueSuspects[0]);
+        Assert.False(uniqueSuspects[1]);
+        Assert.Equal(1, new BitStream().ReadCell(uniqueSecond!, 0, 10));
     }
+
+    private static Rgb24 LerpChannel(Rgb24 a, Rgb24 b) => new(
+        (byte)(a.R + (b.R - a.R) * 0.5 + 0.5),
+        (byte)(a.G + (b.G - a.G) * 0.5 + 0.5),
+        (byte)(a.B + (b.B - a.B) * 0.5 + 0.5));
 
     [Fact]
     public void QualityHeatmap_ClampsASparsePaletteFloorAtTheAbsoluteThreshold()
