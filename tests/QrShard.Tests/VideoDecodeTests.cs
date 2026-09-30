@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using QrShard;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Png;
 using SixLabors.ImageSharp.PixelFormats;
 
 namespace QrShard.Tests;
@@ -383,6 +384,57 @@ public class VideoDecodeTests
     [Fact]
     public void Slideshow_RejectsSillyIntervals() =>
         Assert.Throws<ArgumentException>(() => new SlideshowWriter().Write(Path.GetTempPath(), [], 20));
+
+    [Theory]
+    [InlineData(65_536)]
+    [InlineData(99)]
+    public void Slideshow_RejectsIntervalOutsideExactApngRange(int intervalMs)
+    {
+        Assert.Throws<ArgumentException>(() => new SlideshowWriter().Write(Path.GetTempPath(), [], intervalMs));
+        Assert.Throws<ArgumentException>(() => new SlideshowWriter().WriteApng(Path.GetTempPath(), [], intervalMs));
+    }
+
+    [Theory]
+    [InlineData(100, 0.1)]
+    [InlineData(250, 0.25)]
+    [InlineData(500, 0.5)]
+    [InlineData(1000, 1)]
+    [InlineData(1001, 1.001)]
+    [InlineData(5000, 5)]
+    [InlineData(65_535, 65.535)]
+    public void Slideshow_Interval_RoundTripsInHtmlAndApng(int intervalMs, double seconds)
+    {
+        using var tmp = new TempDir();
+        string first = tmp.File("a.png");
+        string second = tmp.File("b.png");
+        using (var image = new Image<Rgb24>(8, 8, new Rgb24(10, 20, 30)))
+            image.SaveAsPng(first);
+        using (var image = new Image<Rgb24>(8, 8, new Rgb24(30, 20, 10)))
+            image.SaveAsPng(second);
+
+        string html = new SlideshowWriter().Write(tmp.Path, [first, second], intervalMs);
+        Assert.Contains($"const interval = {intervalMs}", File.ReadAllText(html));
+
+        string apng = new SlideshowWriter().WriteApng(tmp.Sub("apng"), [first, second], intervalMs);
+        using var loaded = Image.Load<Rgb24>(apng);
+        Assert.Equal(2, loaded.Frames.Count);
+        for (int i = 0; i < loaded.Frames.Count; i++)
+            Assert.Equal(seconds, loaded.Frames[i].Metadata.GetPngMetadata().FrameDelay.ToDouble(), precision: 6);
+    }
+
+    [Fact]
+    public void Cli_EncodeVideo_SlowInterval_HoldsLongerThanOneSecond()
+    {
+        using var tmp = new TempDir();
+        string input = tmp.WriteFile("f.bin", TestData.Random(4_000));
+        string outDir = tmp.File("shards");
+        var stdout = new StringWriter();
+        int code = new Cli().Run(["encode", input, "-o", outDir, "-r", "900", "--video", "--interval", "5000"],
+            stdout, new StringWriter(), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(0, code);
+        Assert.Contains("5000 ms/image", stdout.ToString());
+        Assert.Contains("const interval = 5000", File.ReadAllText(Path.Combine(outDir, "slideshow.html")));
+    }
 
     [Fact]
     public void Cli_EncodeVideo_WritesSlideshow()

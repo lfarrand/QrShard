@@ -200,7 +200,8 @@ internal sealed class Cli(AppSettings? settings = null)
                           $"can recover up to {result.StripeParity} lost image(s) per {result.StripeData + result.StripeParity}.");
                 if (slideshowPath is not null)
                 {
-                    @out.WriteLine($"Slideshow: {ShardHeader.Display(slideshowPath)} ({intervalMs} ms/image, ~{result.ImageCount * intervalMs / 1000.0:0.#} s per cycle).");
+                    double cycleSeconds = result.ImageCount * (long)intervalMs / 1000.0;
+                    @out.WriteLine($"Slideshow: {ShardHeader.Display(slideshowPath)} ({intervalMs} ms/image, ~{cycleSeconds:0.#} s per cycle).");
                     @out.WriteLine(slideshowPath.EndsWith(".apng", StringComparison.OrdinalIgnoreCase)
                         ? "  Open it and record the screen for at least one full cycle."
                         : "  Open it in a browser, click “Start fullscreen playback”, and record at least one full cycle.");
@@ -1458,9 +1459,11 @@ internal sealed class Cli(AppSettings? settings = null)
         string? raw = Get(named, "-i", "--interval");
         if (raw is null)
             return SlideshowWriter.DefaultIntervalMs;
-        if (!int.TryParse(raw, out int intervalMs) || intervalMs < SlideshowWriter.MinIntervalMs)
+        if (!int.TryParse(raw, out int intervalMs)
+            || intervalMs < SlideshowWriter.MinIntervalMs
+            || intervalMs > SlideshowWriter.MaxIntervalMs)
             throw new ArgumentException(
-                $"-i/--interval must be an integer of at least {SlideshowWriter.MinIntervalMs}.");
+                $"-i/--interval must be an integer from {SlideshowWriter.MinIntervalMs} to {SlideshowWriter.MaxIntervalMs} ms.");
         return intervalMs;
     }
 
@@ -1824,7 +1827,9 @@ internal sealed class Cli(AppSettings? settings = null)
                 --video                  Also write slideshow.html: a relative manifest cycling
                                          the adjacent shard/sidecar files forever. Keep the page
                                          beside those files; record at least one full cycle
-                -i, --interval <ms>      Slideshow interval per image (default: 500, min 100)
+                -i, --interval <ms>      Per-image slideshow hold in milliseconds (default 500,
+                                         range 100-65535). Above 1000 ms is slower than 1 fps,
+                                         so a receiver can capture every frame in one pass
                 --slideshow <kind>       With --video: "html" (default) or "apng" (a single
                                          animated PNG cycling the shards). APNG refuses more than
                                          256 MiB of decoded RGB frames; HTML scales further

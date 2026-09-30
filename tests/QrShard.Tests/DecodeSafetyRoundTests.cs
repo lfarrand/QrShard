@@ -92,6 +92,7 @@ public class DecodeSafetyRoundTests
 
     [Theory]
     [InlineData("50")]
+    [InlineData("65536")]
     [InlineData("abc")]
     public void VideoInterval_Invalid_Exits1_WritesNothing(string interval)
     {

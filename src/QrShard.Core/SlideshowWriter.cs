@@ -22,6 +22,19 @@ internal sealed class SlideshowWriter : ISlideshowWriter
 {
     public const int DefaultIntervalMs = 500;
     public const int MinIntervalMs = 100;
+
+    /// <summary>
+    /// Largest per-frame hold that both slideshow kinds can represent exactly.
+    /// APNG stores each frame delay as a <c>uint16</c> numerator and denominator
+    /// (<c>intervalMs/1000</c> seconds). Every millisecond value from
+    /// <see cref="MinIntervalMs"/> through this limit reduces into those fields.
+    /// The next millisecond, 65536, still fits, but 65537 does not, and ImageSharp
+    /// casts an unreduced numerator to 16 bits — so a requested hold past this
+    /// contiguous range can collapse to a fraction of a second. 65535 ms is about
+    /// one frame every 65.5 s, which is well below one frame per second.
+    /// </summary>
+    public const int MaxIntervalMs = 65_535;
+
     internal const long MaxApngDecodedBytes = 256L * 1024 * 1024;
 
     /// <summary>
@@ -32,8 +45,7 @@ internal sealed class SlideshowWriter : ISlideshowWriter
     /// </summary>
     public string WriteApng(string outDir, IReadOnlyList<string> imageFiles, int intervalMs)
     {
-        if (intervalMs < MinIntervalMs)
-            throw new ArgumentException($"Slideshow interval must be at least {MinIntervalMs} ms.");
+        RequireInterval(intervalMs);
         if (imageFiles.Count == 0)
             throw new ArgumentException("No shard images to build a slideshow from.");
 
@@ -70,6 +82,11 @@ internal sealed class SlideshowWriter : ISlideshowWriter
 
             var pngMeta = animation.Metadata.GetPngMetadata();
             pngMeta.RepeatCount = 0; // 0 = loop forever
+            // Still shards are loaded with SkipMetadata, which leaves the root frame out of the
+            // animation. The encoder then writes it as an untimed fallback (no fcTL) and the
+            // requested hold never applies to the first image of each cycle, so a receiver skips
+            // it. Every frame, including the first, has to be part of the timed sequence.
+            pngMeta.AnimateRootFrame = true;
             animation.Save(staging, new PngEncoder { ColorType = PngColorType.Rgb, BitDepth = PngBitDepth.Bit8 });
             File.Move(staging, path, overwrite: true);
         }
@@ -84,16 +101,40 @@ internal sealed class SlideshowWriter : ISlideshowWriter
     /// alpha-composite) with background disposal — so every recorded frame is an exact copy.</summary>
     private static void SetFrameTiming(PngFrameMetadata meta, int intervalMs)
     {
-        meta.FrameDelay = new SixLabors.ImageSharp.Rational((uint)intervalMs, 1000);
+        // Reduce first. ImageSharp writes both parts of FrameDelay as ushort; passing
+        // an unreduced numerator above 65535 truncates the hold (65537 ms becomes 1/1000 s).
+        uint numerator = (uint)intervalMs;
+        uint denominator = 1000;
+        uint gcd = GreatestCommonDivisor(numerator, denominator);
+        numerator /= gcd;
+        denominator /= gcd;
+        meta.FrameDelay = new Rational(numerator, denominator, simplify: false);
         meta.BlendMode = FrameBlendMode.Source;
         meta.DisposalMode = FrameDisposalMode.RestoreToBackground;
+    }
+
+    private static void RequireInterval(int intervalMs)
+    {
+        if (intervalMs < MinIntervalMs || intervalMs > MaxIntervalMs)
+            throw new ArgumentException(
+                $"Slideshow interval must be an integer from {MinIntervalMs} to {MaxIntervalMs} ms.");
+    }
+
+    private static uint GreatestCommonDivisor(uint a, uint b)
+    {
+        while (b != 0)
+        {
+            uint remainder = a % b;
+            a = b;
+            b = remainder;
+        }
+        return a;
     }
 
     /// <summary>Writes slideshow.html next to the shard images; returns its path.</summary>
     public string Write(string outDir, IReadOnlyList<string> imageFiles, int intervalMs)
     {
-        if (intervalMs < MinIntervalMs)
-            throw new ArgumentException($"Slideshow interval must be at least {MinIntervalMs} ms.");
+        RequireInterval(intervalMs);
         if (imageFiles.Count == 0)
             throw new ArgumentException("No shard images to build a slideshow from.");
 

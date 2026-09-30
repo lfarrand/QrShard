@@ -191,7 +191,10 @@ bit-identical.
 **Video mode — no manual capturing at all.** Add `--video` when encoding and `slideshow.html` is
 written next to the shards: open it in any browser, press **Start fullscreen** (the required user
 gesture), and it cycles every image forever. Missing/unreadable frames are skipped as erasures
-(default 500 ms each; `--interval` to tune). The HTML page is a small **relative manifest**, not a
+(default 500 ms each; `--interval` to tune, **100–65535 ms**). Holds longer than 1000 ms are
+slower than one frame per second: each image stays up for several seconds, so a receiver that
+was skipping frames can collect every shard in a single pass instead of waiting through
+repeated cycles. The HTML page is a small **relative manifest**, not a
 self-contained copy: keep it beside the shard images and any generated `.slideshow-…-frame-….png`
 sidecars. Moving only the HTML file breaks its references. `--slideshow apng` instead writes one
 animated PNG, but APNG creation is capped at **256 MiB of decoded RGB frame pixels**; use HTML for
@@ -308,7 +311,7 @@ There is no `qrshard display` or `qrshard record`. Those are separate Windows ex
 | `--video` | flag | off | Also write a slideshow (see `--slideshow`) for recording-based capture |
 | `--slideshow <kind>` | `html`, `apng` | `html` | With `--video`: a relative-manifest `slideshow.html` that must stay beside the shard/sidecar files, or a single `slideshow.apng`. APNG creation refuses sets exceeding 256 MiB of decoded RGB frames; HTML scales without retaining every frame |
 | `--open` | flag | off | With `--video`: open the slideshow in the default browser once encoding finishes. `qrshard send` is exactly `encode --video --open` |
-| `-i, --interval <ms>` | ≥ 100 | 500 | Slideshow interval per image (both slideshow kinds) |
+| `-i, --interval <ms>` | 100–65535 | 500 | Per-image hold for both slideshow kinds. Above 1000 ms is slower than 1 fps, so one long hold can replace several cycles in which the receiver skipped frames |
 | `--interleave2` | flag | off | v2 permuted interleave: spreads **vertical** damage (a horizontal banner/overlay) across codewords as well as horizontal. Needs ECC. Signalled by a metadata field from version 4 onward (it rode the version nibble in v3), so a decoder that cannot read it rejects the strip rather than misreading it |
 | `--profile <name>` | a name in `appsettings.json` `EncodeProfiles` | — | Apply a named encode preset (see [Configuration](#configuration-appsettingsjson)); explicit flags still override it |
 | `--json` | flag | off | Emit the encode result (image/parity counts, geometry, file list, slideshow path) as JSON on stdout instead of the human summary |
