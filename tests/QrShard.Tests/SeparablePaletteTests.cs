@@ -107,7 +107,11 @@ public class SeparablePaletteTests
     {
         Assert.False(new SeparablePalette().TryRebuild([]));
         Assert.False(new SeparablePalette().TryRebuild([new Rgb24(1, 2, 3), new Rgb24(4, 5, 6), new Rgb24(7, 8, 9)]));
-        Assert.False(new SeparablePalette().TryRebuild(new Rgb24[512]));
+        // 9 and 10 bits are in range. An all-zero palette is still a Cartesian product, so it is accepted.
+        Assert.True(new SeparablePalette().TryRebuild(new Rgb24[1 << 9]));
+        Assert.True(new SeparablePalette().TryRebuild(new Rgb24[1 << 10]));
+        Assert.False(new SeparablePalette().TryRebuild(new Rgb24[1 << 11]));
+        Assert.False(new SeparablePalette().TryRebuild(new Rgb24[1 << 16]));
     }
 
     /// <summary>
