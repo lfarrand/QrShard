@@ -98,6 +98,13 @@ internal sealed class DecodeDiagnostics
     public int[]? CellMargins { get; set; }
 
     /// <summary>
+    /// Squared-distance floor paired with <see cref="CellMargins"/>. Measured from palette spacing
+    /// when <see cref="WantDetail"/> is set, so the quality heatmap uses the same green threshold
+    /// as erasure flagging. Zero when detail was not requested.
+    /// </summary>
+    public long QualityConfidentDist { get; set; }
+
+    /// <summary>
     /// Whether the caller actually wants <see cref="CellMargins"/> and
     /// <see cref="CodewordErrors"/>. Only the `diagnose` command reads them.
     ///

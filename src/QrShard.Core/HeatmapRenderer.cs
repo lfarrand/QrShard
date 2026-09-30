@@ -74,12 +74,18 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
     /// It is a quality/ambiguity map, NOT a correctness map: a glare-saturated cell can map
     /// confidently to the wrong color and still read green.
     /// </summary>
-    public void RenderQuality(Layout layout, int[] cellMargins, string outPath)
+    /// <param name="confidentDist">
+    /// Squared-distance floor from <see cref="GridSampler.ConfidenceFloorFor"/>. Margins at or
+    /// below it paint the same green as an exact hit. The default matches the unmeasured fallback.
+    /// </param>
+    public void RenderQuality(Layout layout, int[] cellMargins, string outPath,
+        long confidentDist = GridSampler.DefaultConfidentDist)
     {
         int w = layout.GridW * CellPx, h = layout.GridH * CellPx;
         var px = new Rgb24[w * h];
-        // Mirrors GridSampler's ConfidentDist (200) → green and AbsoluteSuspectDist (4000) → red.
-        const double confident = 200, ambiguous = 4000;
+        // Same thresholds RecordConfidence uses: measured spacing → green, AbsoluteSuspectDist → red.
+        double ambiguous = GridSampler.AbsoluteSuspectDist;
+        double confident = confidentDist < 0 || confidentDist >= GridSampler.AbsoluteSuspectDist ? 0 : confidentDist;
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {

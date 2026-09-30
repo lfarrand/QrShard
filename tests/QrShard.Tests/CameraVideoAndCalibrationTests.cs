@@ -90,7 +90,9 @@ public class CameraVideoAndCalibrationTests
         var analyzeOut = new StringWriter();
         int code = new Cli().Run(["calibrate", calDir], analyzeOut, analyzeOut, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(0, code);
-        Assert.Contains("-c 1 -b 8", analyzeOut.ToString());
+        // 900 px can paint a 9-bit strip (512 colours) and cannot paint a 10-bit one.
+        Assert.Contains("-c 1 -b 9", analyzeOut.ToString());
+        Assert.DoesNotContain("10 bits", stdout.ToString());
     }
 
     [Fact]
@@ -115,6 +117,27 @@ public class CameraVideoAndCalibrationTests
         string report = analyzeOut.ToString();
         Assert.Equal(0, code);
         Assert.Contains("Recommended encode settings", report);
-        Assert.DoesNotContain("-c 1 -b 8", report); // max density can't survive 0.6x resampling
+        Assert.DoesNotContain("-c 1 -b 8", report); // 1 px cells can't survive 0.6x resampling
+        Assert.DoesNotContain("-c 1 -b 9", report);
+    }
+
+    [Fact]
+    public void Calibrate_WideCanvas_RecommendsTenBits()
+    {
+        Assert.Contains((1, 10), CalibrationRunner.ProbesFor(1280, 1280, camera: false));
+        Assert.DoesNotContain((1, 10), CalibrationRunner.ProbesFor(900, 900, camera: false));
+        Assert.Contains((1, 9), CalibrationRunner.ProbesFor(900, 900, camera: false));
+
+        using var tmp = new TempDir();
+        string calDir = tmp.File("cal");
+        var stdout = new StringWriter();
+        int genCode = new Cli().Run(["calibrate", "-o", calDir, "-r", "1280"], stdout, stdout, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(0, genCode);
+        Assert.Contains("10 bits", stdout.ToString());
+
+        var analyzeOut = new StringWriter();
+        int code = new Cli().Run(["calibrate", calDir], analyzeOut, analyzeOut, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(0, code);
+        Assert.Contains("-c 1 -b 10", analyzeOut.ToString());
     }
 }

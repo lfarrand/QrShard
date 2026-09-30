@@ -14,11 +14,15 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     private static readonly (int dx, int dy)[] NineOffsets =
         [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)];
 
-    /// <summary>Squared-distance floor below which a classification is trusted outright.</summary>
-    private const long ConfidentDist = 200;
+    /// <summary>
+    /// Fallback squared-distance floor when a palette has no measurable spacing. Real palettes
+    /// use <see cref="ConfidenceFloorSquared"/> instead: 8-bit neighbours (step 36) land at 196,
+    /// and 10-bit red neighbours (step 17) land at 49.
+    /// </summary>
+    internal const long DefaultConfidentDist = 200;
 
     /// <summary>Squared distance beyond which a sample is suspect regardless of margin.</summary>
-    private const long AbsoluteSuspectDist = 4000;
+    internal const long AbsoluteSuspectDist = 4000;
 
     public byte[] ReadDataGrid(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes, DecodeScratch scratch,
         out bool[]? suspectBytes, out byte[]? secondChoiceBytes, int[]? cellMargins = null)
@@ -35,7 +39,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         int bits = layout.BitsPerCell;
         // Defense in depth: Layout.UnpackMetadata already bounds the geometry, but guard the
         // allocation site directly so no path can size a negative or absurd buffer from TotalBits.
-        if (layout.TotalBytes is < 0 or > (long)Layout.MaxResolution * Layout.MaxResolution)
+        if (layout.TotalBytes is < 0 or > Layout.MaxCellStreamBytes)
             throw new ShardDecodeException("Shard metadata declares an implausible data-grid size.");
         // Tie the DECLARED geometry to the image actually in hand. Every previous bound compares
         // the strip's fields against the encoder's maxima, and nothing compared them against the
@@ -56,10 +60,12 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         bool[]? suspects = layout.EccParity > 0 ? scratch.ClearedSuspects(streamLength) : null;
         byte[]? second = layout.EccParity > 0 ? scratch.ClearedSecondChoice(streamLength) : null;
 
+        // Once per image, from measured spacing. Clean cells (distance 0) still skip the runner-up.
+        long confidenceFloor = ConfidenceFloorFor(palettes);
         if (palettes.Interpolate)
-            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins);
+            ReadInterpolated(bmp, inner, layout, palettes, offsets, stream, suspects, second, sx, sy, bits, cellMargins, confidenceFloor);
         else
-            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits, cellMargins);
+            ReadUniform(bmp, inner, layout, palettes.Best, offsets, stream, suspects, second, scratch, sx, sy, bits, cellMargins, confidenceFloor);
         suspectBytes = suspects;
         secondChoiceBytes = second;
         return stream;
@@ -71,15 +77,21 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// runner-up value written to the second-choice stream — the raw material for Chase
     /// decoding. Confident cells write their winning value to both streams, so a byte-level
     /// splice of the two streams flips exactly the ambiguous cells.
+    ///
+    /// <paramref name="confidenceFloor"/> is the largest squared distance at which a runner-up
+    /// one measured palette step away cannot satisfy the near-tie test. Exact hits (distance 0)
+    /// skip the scan. A sample that lands on a different palette colour also has distance 0, so
+    /// distance alone cannot mark it.
     /// </summary>
     private void RecordConfidence(bool[]? suspects, byte[]? second, Rgb24[] palette, int best, long bestDist,
-        byte r, byte g, byte b, long cellIndex, int bits)
+        byte r, byte g, byte b, long cellIndex, int bits, long confidenceFloor)
     {
         int alternative = best;
-        if (suspects is not null && bestDist > ConfidentDist)
+        bool far = bestDist > AbsoluteSuspectDist;
+        if (suspects is not null && (bestDist > confidenceFloor || far))
         {
             int secondIndex = paletteMath.SecondNearest(palette, r, g, b, best, out long secondDist);
-            if (bestDist > AbsoluteSuspectDist || secondDist < bestDist * 2)
+            if (far || secondDist < bestDist * 2)
             {
                 alternative = secondIndex;
                 long firstBit = cellIndex * bits;
@@ -90,6 +102,44 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         }
         if (second is not null)
             bitStream.WriteCell(second, cellIndex * bits, bits, alternative);
+    }
+
+    /// <summary>
+    /// Largest squared sample distance at which even a colinear runner-up one palette step away
+    /// fails <c>secondDist &lt; 2 * bestDist</c>. Derived from <c>(S² − d²)² &gt;= 4 d² S²</c>.
+    /// </summary>
+    internal static long ConfidenceFloorSquared(long minSepSq)
+    {
+        if (minSepSq <= 0)
+            return 0;
+        // ClosestSquared's empty-palette sentinel. A real RGB pair cannot exceed the cube diagonal.
+        if (minSepSq > 3L * 255 * 255)
+            return DefaultConfidentDist;
+        long floor = 0;
+        for (int d = 0; d <= 255; d++)
+        {
+            long dd = (long)d * d;
+            if (dd > minSepSq)
+                break;
+            long left = minSepSq - dd;
+            if (left * left < 4 * dd * minSepSq)
+                break;
+            floor = dd;
+        }
+        return floor;
+    }
+
+    /// <summary>
+    /// Floor for the palette the sampler will classify against. An interpolated row sits between
+    /// the top and bottom strips, so the tightest of the three measured spacings wins.
+    /// </summary>
+    internal static long ConfidenceFloorFor(PaletteSet palettes)
+    {
+        long floor = ConfidenceFloorSquared(Palette.ClosestSquared(palettes.Best));
+        if (!palettes.Interpolate)
+            return floor;
+        floor = Math.Min(floor, ConfidenceFloorSquared(Palette.ClosestSquared(palettes.Top)));
+        return Math.Min(floor, ConfidenceFloorSquared(Palette.ClosestSquared(palettes.Bottom)));
     }
 
     /// <summary>
@@ -116,7 +166,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// <summary>
     /// Exact nearest-palette index and its squared RGB distance. A 5-bit quantized LUT is too
     /// coarse for confidence: illumination gain 0.2 packs adjacent 8-bit levels into one 8-unit
-    /// cube, and distance to that cube's first winner can sit under <see cref="ConfidentDist"/>.
+    /// cube, and distance to that cube's first winner can sit under <see cref="DefaultConfidentDist"/>.
     /// </summary>
     private int ClassifyExact(Rgb24[] palette, byte r, byte g, byte b, out long dist)
     {
@@ -151,7 +201,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
 
     private void ReadUniform(Bitmap bmp, InnerRect inner, Layout layout, Rgb24[] palette,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, DecodeScratch scratch,
-        double sx, double sy, int bits, int[]? cellMargins)
+        double sx, double sy, int bits, int[]? cellMargins, long confidenceFloor)
     {
         // Lazy nearest-color lookup keyed on 5-bit-per-channel quantized RGB.
         int[] lut = scratch.ResetNearestColorLut();
@@ -213,7 +263,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
-                RecordConfidence(suspects, second, palette, best, bestDist, bR, bG, bB, cellIndex, bits);
+                RecordConfidence(suspects, second, palette, best, bestDist, bR, bG, bB, cellIndex, bits, confidenceFloor);
                 if (cellMargins is not null)
                     cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }
@@ -230,7 +280,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// </summary>
     private void ReadInterpolated(Bitmap bmp, InnerRect inner, Layout layout, PaletteSet palettes,
         (int dx, int dy)[] offsets, byte[] stream, bool[]? suspects, byte[]? second, double sx, double sy, int bits,
-        int[]? cellMargins)
+        int[]? cellMargins, long confidenceFloor)
     {
         double yTopStrip = layout.Gutter + layout.MetaH * 1.5;
         double yBottomStrip = layout.InnerH - layout.Gutter - layout.MetaH * 1.5;
@@ -276,7 +326,7 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     }
                 }
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
-                RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits);
+                RecordConfidence(suspects, second, rowPalette, best, bestDist, bR, bG, bB, cellIndex, bits, confidenceFloor);
                 if (cellMargins is not null)
                     cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }

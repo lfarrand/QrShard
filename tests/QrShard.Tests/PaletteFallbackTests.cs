@@ -121,4 +121,62 @@ public class PaletteFallbackTests
         Assert.Same(healthy, StripReader.SelectBestMeasured(collapsed, healthy, theoretical));
         Assert.Same(healthy, StripReader.SelectBestMeasured(healthy, collapsed, theoretical));
     }
+
+    [Fact]
+    public void IsSeparable_MatchesBruteForceClosestAndWidest()
+    {
+        var cases = new List<Rgb24[]>();
+        for (int bits = 1; bits <= Palette.MaxBits; bits++)
+            cases.Add(new Palette().Build(bits));
+
+        Rgb24[] ten = new Palette().Build(10);
+        cases.Add(ten.Select(p => new Rgb24(
+            (byte)(p.R * 0.2 + 0.5),
+            (byte)(p.G * 0.2 + 0.5),
+            (byte)(p.B * 0.2 + 0.5))).ToArray());
+
+        var duplicated = (Rgb24[])ten.Clone();
+        duplicated[1] = duplicated[0];
+        cases.Add(duplicated);
+        cases.Add(Enumerable.Repeat(new Rgb24(10, 20, 30), 8).ToArray());
+
+        // Bounding-box diagonal is empty, so the fast path must fall through to the exact widest pair.
+        cases.Add([
+            new Rgb24(255, 0, 0),
+            new Rgb24(255, 0, 6),
+            new Rgb24(0, 255, 0),
+            new Rgb24(0, 0, 255),
+        ]);
+
+        var random = new Random(1);
+        var cloud = new Rgb24[80];
+        for (int i = 0; i < cloud.Length; i++)
+            cloud[i] = new Rgb24((byte)random.Next(256), (byte)random.Next(256), (byte)random.Next(256));
+        cases.Add(cloud);
+
+        foreach (Rgb24[] measured in cases)
+            Assert.Equal(BruteSeparable(measured), StripReader.IsSeparableForTests(measured));
+    }
+
+    private static bool BruteSeparable(Rgb24[] measured)
+    {
+        if (measured.Length < 2)
+            return true;
+        long closest = long.MaxValue, widest = 0;
+        for (int i = 0; i < measured.Length; i++)
+        {
+            for (int j = i + 1; j < measured.Length; j++)
+            {
+                long dr = measured[i].R - measured[j].R;
+                long dg = measured[i].G - measured[j].G;
+                long db = measured[i].B - measured[j].B;
+                long dist = dr * dr + dg * dg + db * db;
+                if (dist < closest)
+                    closest = dist;
+                if (dist > widest)
+                    widest = dist;
+            }
+        }
+        return widest > 0 && closest * 4000 >= widest;
+    }
 }

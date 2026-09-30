@@ -28,9 +28,12 @@ internal sealed class CalibrationRunner : ICalibration
     {
     }
 
-    /// <summary>Densest first, so the analysis report reads top-down from ambitious to safe.</summary>
+    /// <summary>
+    /// Densest first, so the analysis report reads top-down from ambitious to safe.
+    /// 9 and 10 bits are included; <see cref="ProbesFor"/> drops a probe the resolution cannot host.
+    /// </summary>
     private static readonly (int CellPx, int Bits)[] ScreenProbes =
-        [(1, 8), (1, 6), (2, 6), (2, 4), (3, 4), (4, 4), (8, 2)];
+        [(1, 10), (1, 9), (1, 8), (1, 6), (2, 6), (2, 4), (3, 4), (4, 4), (8, 2)];
 
     /// <summary>Camera-profile ladder: photo capture needs several camera pixels per cell.</summary>
     private static readonly (int CellPx, int Bits)[] CameraProbes =
@@ -39,16 +42,45 @@ internal sealed class CalibrationRunner : ICalibration
     private const int ScreenEccParity = 16;
     private const int CameraEccParity = 32;
 
+    /// <summary>
+    /// Probes whose calibration strip can represent every palette colour at this resolution.
+    /// Analysis still walks the full ladder, so a 10-bit capture is recommended when one decoded.
+    /// </summary>
+    internal static IReadOnlyList<(int CellPx, int Bits)> ProbesFor(int width, int height, bool camera)
+    {
+        var source = camera ? CameraProbes : ScreenProbes;
+        int eccParity = camera ? CameraEccParity : ScreenEccParity;
+        var fitted = new List<(int CellPx, int Bits)>(source.Length);
+        foreach (var probe in source)
+        {
+            try
+            {
+                Layout.Create(width, height, probe.CellPx, probe.Bits, eccParity, camera);
+                fitted.Add(probe);
+            }
+            catch (ArgumentException)
+            {
+                // Strip too narrow, or the cell stream would exceed the decoder cap.
+            }
+        }
+        return fitted;
+    }
+
     public int Generate(string outDir, int width, int height, bool camera, TextWriter output)
     {
-        var probes = camera ? CameraProbes : ScreenProbes;
+        var probes = ProbesFor(width, height, camera);
+        if (probes.Count == 0)
+        {
+            output.WriteLine("Resolution is too small for every calibration probe.");
+            return 1;
+        }
         int eccParity = camera ? CameraEccParity : ScreenEccParity;
         // A calibration is one generation too: build every probe under one private sibling and
         // publish the directory only after all encodes succeed. Individual ShardEncoder calls
         // deliberately refuse non-empty destinations, so each probe gets a private sub-generation
         // which is then composed into this outer transaction.
         using var calibrationOutput = new ShardEncoder.OutputTransaction(outDir);
-        output.WriteLine($"Writing {probes.Length} {(camera ? "camera-profile " : "")}calibration probes ({width}x{height}) → {ShardHeader.Display(outDir)}");
+        output.WriteLine($"Writing {probes.Count} {(camera ? "camera-profile " : "")}calibration probes ({width}x{height}) → {ShardHeader.Display(outDir)}");
         foreach (var (cellPx, bits) in probes)
         {
             var layout = Layout.Create(width, height, cellPx, bits, eccParity, camera);

@@ -165,7 +165,10 @@ or 0 when `count = 1`. Color index `v` decomposes as `iR = v / (nG·nB)`, `iG = 
 Values 9 and 10 use this same 4-bit field (the nibble represents 0–15; 16 does not fit) and do
 not change the metadata version. A decoder that only accepts 1–8 rejects those shards. Images
 stay 8 bits per channel. At 10 bits the split is 16×8×8 levels, so the minimum channel step
-inside 8-bit RGB is 17. Densities 1–8 keep a minimum step of at least 32.
+inside 8-bit RGB is 17. Densities 1–8 keep a minimum step of at least 32. A geometry whose
+calibration strip cannot give every colour at least one pixel is rejected, as is a cell stream
+larger than 16384² bytes. At the maximum canvas with 1 px cells, 9- and 10-bit depths exceed
+that cap; densities 1–8 do not.
 
 The palette strips draw the `n` colors as equal-width blocks in index order. Decoders normally
 classify data cells against the **measured** strip colors (nearest squared-RGB distance), so the

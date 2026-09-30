@@ -686,6 +686,8 @@ internal sealed class ShardDecoder(
             diagnostics.CellMargins = cellMargins;
         }
         var palette = stripReader.ReadPalette(bmp, inner, layout);
+        if (diagnostics is { WantDetail: true })
+            diagnostics.QualityConfidentDist = GridSampler.ConfidenceFloorFor(palette);
         byte[] cells = gridSampler.ReadDataGrid(bmp, inner, layout, palette, scratch,
             out bool[]? suspectBytes, out byte[]? secondChoiceBytes, cellMargins);
 

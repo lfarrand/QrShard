@@ -27,6 +27,13 @@ internal sealed class Layout
     public const int MaxResolution = 16384;
     public const int MaxCellPx = 64;
 
+    /// <summary>
+    /// Largest cell stream the decoder will allocate: one byte per pixel of the maximum canvas.
+    /// An 8-bit, 1 px grid fits; the same grid at 9 or 10 bits does not. Encode and decode share
+    /// this cap so a shard that can be written can be read.
+    /// </summary>
+    public const long MaxCellStreamBytes = (long)MaxResolution * MaxResolution;
+
     /// <summary>Largest value a 14-bit version-4 metadata field can carry.</summary>
     public const int MaxMetaField = (1 << 14) - 1;
 
@@ -128,9 +135,38 @@ internal sealed class Layout
             FinderModule = finderModule,
             Interleave2 = interleave2,
         };
+        if (layout.TotalBytes > MaxCellStreamBytes)
+            throw new ArgumentException(
+                "Colour depth at this resolution exceeds the decodable maximum; use fewer bits, a larger cell, or a smaller image.");
+        if (!CalibrationStripCoversPalette(layout.GridW * layout.CellPx, bitsPerCell))
+            throw new ArgumentException(
+                "Resolution is too small for every calibration colour at this colour depth.");
         if (eccParity > 0 && layout.CodewordCount < 1)
             throw new ArgumentException("Image capacity is too small for error correction; increase resolution or use --ecc 0.");
         return layout;
+    }
+
+    /// <summary>
+    /// True when <see cref="ShardRenderer"/>'s calibration strip gives every palette colour at
+    /// least one pixel. Block edges are rounded the same way the strip is drawn, so a width of
+    /// at least one pixel per colour is necessary but a midpoint can still collapse a block.
+    /// </summary>
+    internal static bool CalibrationStripCoversPalette(int stripPx, int bitsPerCell)
+    {
+        if (bitsPerCell is < Palette.MinBits or > Palette.MaxBits || stripPx < 1)
+            return false;
+        int count = 1 << bitsPerCell;
+        if (stripPx < count)
+            return false;
+        double blockW = stripPx / (double)count;
+        for (int c = 0; c < count; c++)
+        {
+            int x0 = (int)Math.Round(c * blockW);
+            int x1 = (int)Math.Round((c + 1) * blockW);
+            if (x1 <= x0)
+                return false;
+        }
+        return true;
     }
 
     /// <summary>Shared encoder/decoder approximation for the metadata strip height and gutter.</summary>
@@ -369,6 +405,10 @@ internal sealed class Layout
             FinderModule = 0,
             Interleave2 = interleave2,
         };
+        if (layout.TotalBytes > MaxCellStreamBytes)
+            return null;
+        if (!CalibrationStripCoversPalette(gridW * cellPx, bitsPerCell))
+            return null;
         // With CodewordCount 0 the FEC pass writes nothing and reports success, so the recovered
         // buffer — pooled per worker and never cleared — is handed on still holding the PREVIOUS
         // image's fully valid stream, and a shard is accepted from an image that contributed no

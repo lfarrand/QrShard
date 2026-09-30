@@ -460,7 +460,9 @@ folder must be decoded without it or split up.
   worst-case ECC headroom it consumed — the "will my file at these settings make it?" check the
   fixed-fixture self-test can't answer. (`test` alone still runs the built-in self-test.)
 - **`calibrate`**: writes a ladder of self-describing density probes (`-r` sizes them; `--camera`
-  for the photo ladder); capture them exactly like a real transfer and
+  for the photo ladder). Screen probes include 9 and 10 bits per cell only when that resolution
+  can give every calibration colour its own strip pixel; a narrower canvas such as 900 px stops
+  before 10 bits. Capture them exactly like a real transfer and
   `qrshard calibrate <capturedFolder>` measures what survived, recommending the densest `-c/-b`
   that decoded with comfortable ECC headroom on *your* screen/capture pair.
 

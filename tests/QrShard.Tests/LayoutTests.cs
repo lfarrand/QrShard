@@ -70,6 +70,63 @@ public class LayoutTests
     }
 
     [Fact]
+    public void Create_MaxCanvas_RejectsNineAndTenBitStreams()
+    {
+        var eight = Layout.Create(Layout.MaxResolution, Layout.MaxResolution, 1, 8, 0);
+        Assert.True(eight.TotalBytes <= Layout.MaxCellStreamBytes);
+        Assert.NotNull(Layout.UnpackMetadata(ToModules(eight.PackMetadata())));
+
+        var nine = Assert.Throws<ArgumentException>(() => Layout.Create(Layout.MaxResolution, Layout.MaxResolution, 1, 9, 0));
+        Assert.Contains("decodable", nine.Message, StringComparison.OrdinalIgnoreCase);
+        var ten = Assert.Throws<ArgumentException>(() => Layout.Create(Layout.MaxResolution, Layout.MaxResolution, 1, 10, 0));
+        Assert.Contains("decodable", ten.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Unpack_RejectsOverCapTenBitGrid_WithoutAllocatingAnImage()
+    {
+        // The 1 px grid Create would build at 16384². Packing the fields allocates no bitmap.
+        var layout = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 1,
+            GridW = 16002,
+            GridH = 15350,
+            MetaH = 163,
+            InnerW = 2 * 163 + 16002,
+            InnerH = 6 * 163 + 15350,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        Assert.True(layout.TotalBytes > Layout.MaxCellStreamBytes);
+        Assert.Null(Layout.UnpackMetadata(ToModules(layout.PackMetadata())));
+    }
+
+    [Fact]
+    public void Create_RejectsTenBitStripThatCannotPaintEveryColour()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => Layout.Create(700, 700, 3, 10, 0));
+        Assert.Contains("calibration", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(Layout.Create(700, 700, 3, 8, 0));
+        Assert.False(Layout.CalibrationStripCoversPalette(630, 10));
+        Assert.True(Layout.CalibrationStripCoversPalette(630, 8));
+
+        var narrow = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 3,
+            GridW = 210,
+            GridH = 202,
+            MetaH = 6,
+            InnerW = 2 * 6 + 210 * 3,
+            InnerH = 6 * 6 + 202 * 3,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        Assert.Null(Layout.UnpackMetadata(ToModules(narrow.PackMetadata())));
+    }
+
+    [Fact]
     public void TenBit_CalibrationBlocks_AreAboutTwoPixelsOn2160()
     {
         var layout = Layout.Create(2160, 2160, 3, 10, 0);

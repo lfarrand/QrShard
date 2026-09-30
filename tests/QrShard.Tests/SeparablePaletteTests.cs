@@ -6,12 +6,13 @@ namespace QrShard.Tests;
 /// <summary>
 /// The gradient sampling path classifies through <see cref="SeparablePalette"/> instead of
 /// <see cref="Palette.Nearest"/>. Its output feeds erasure flagging and Chase trials, so anything
-/// less than bit-identical agreement with the scan is silent corruption — these tests compare the
-/// two exhaustively over the whole RGB cube, not on samples.
+/// less than bit-identical agreement with the scan is silent corruption. Densities 2–8 are compared
+/// exhaustively over the whole RGB cube. 9 and 10 stay on channel boundaries, ties, and a lattice
+/// so the check does not scan every RGB value against a 512- or 1024-colour palette.
 /// </summary>
 public class SeparablePaletteTests
 {
-    /// <summary>Every one of the 2^24 RGB inputs, for every supported density.</summary>
+    /// <summary>Every one of the 2^24 RGB inputs, for densities whose palettes stay small enough to scan.</summary>
     [Theory]
     [InlineData(2)]
     [InlineData(3)]
@@ -20,12 +21,78 @@ public class SeparablePaletteTests
     [InlineData(6)]
     [InlineData(7)]
     [InlineData(8)]
-    [InlineData(9)]
-    [InlineData(10)]
     public void MatchesScan_ExhaustivelyOverEveryRgbInput(int bits)
     {
         var palette = new Palette().Build(bits);
         AssertMatchesScanOverWholeCube(palette, $"theoretical bits={bits}");
+    }
+
+    /// <summary>
+    /// 9 and 10 bits keep the same product structure. Samples cover every palette colour, the
+    /// integer midpoint of each channel gap (an exact tie when the gap is even), the samples on
+    /// either side of that midpoint, and a step-16 lattice.
+    /// </summary>
+    [Theory]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void MatchesScan_OnChannelBoundariesTiesAndALattice(int bits)
+    {
+        var palette = new Palette().Build(bits);
+        var index = new SeparablePalette();
+        Assert.True(index.TryRebuild(palette), $"bits={bits}");
+        var scan = new Palette();
+        var seen = new HashSet<int>();
+
+        void Check(int r, int g, int b)
+        {
+            r = Math.Clamp(r, 0, 255);
+            g = Math.Clamp(g, 0, 255);
+            b = Math.Clamp(b, 0, 255);
+            if (!seen.Add((r << 16) | (g << 8) | b))
+                return;
+            int fast = index.Nearest(r, g, b);
+            int slow = scan.Nearest(palette, r, g, b);
+            Assert.Equal(slow, fast);
+        }
+
+        foreach (Rgb24 colour in palette)
+            Check(colour.R, colour.G, colour.B);
+
+        byte[] levelsR = palette.Select(c => c.R).Distinct().OrderBy(v => v).ToArray();
+        byte[] levelsG = palette.Select(c => c.G).Distinct().OrderBy(v => v).ToArray();
+        byte[] levelsB = palette.Select(c => c.B).Distinct().OrderBy(v => v).ToArray();
+        void Boundaries(byte[] moving, byte[] otherA, byte[] otherB, int channel)
+        {
+            for (int i = 0; i < moving.Length - 1; i++)
+            {
+                int mid = (moving[i] + moving[i + 1]) / 2;
+                foreach (byte a in otherA)
+                {
+                    foreach (byte b in otherB)
+                    {
+                        for (int d = -1; d <= 1; d++)
+                        {
+                            int v = mid + d;
+                            if (channel == 0)
+                                Check(v, a, b);
+                            else if (channel == 1)
+                                Check(a, v, b);
+                            else
+                                Check(a, b, v);
+                        }
+                    }
+                }
+            }
+        }
+
+        Boundaries(levelsR, levelsG, levelsB, 0);
+        Boundaries(levelsG, levelsR, levelsB, 1);
+        Boundaries(levelsB, levelsR, levelsG, 2);
+
+        for (int r = 0; r < 256; r += 16)
+            for (int g = 0; g < 256; g += 16)
+                for (int b = 0; b < 256; b += 16)
+                    Check(r, g, b);
     }
 
     /// <summary>
