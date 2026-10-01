@@ -58,6 +58,54 @@ public class LayoutTests
         Assert.Throws<ArgumentException>(() => Layout.Create(width, height, cell, bits, parity));
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(8)]
+    public void Metadata_OneThroughEight_PacksVersion4_AndDecodes(int bits)
+    {
+        var layout = Layout.Create(2160, 2160, 3, bits, 16);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionFec, packed[1] >> 4);
+        var restored = Layout.UnpackMetadata(ToModules(packed));
+        Assert.NotNull(restored);
+        Assert.Equal(bits, restored!.BitsPerCell);
+        Assert.Equal(layout.GridW, restored.GridW);
+    }
+
+    [Theory]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void Metadata_NineAndTen_PackVersion5_AndRoundTrip(int bits)
+    {
+        var layout = Layout.Create(2160, 2160, 3, bits, 16);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionWideCell, packed[1] >> 4);
+        Assert.Equal(bits, packed[1] & 0x0F);
+        var restored = Layout.UnpackMetadata(ToModules(packed));
+        Assert.NotNull(restored);
+        Assert.Equal(bits, restored!.BitsPerCell);
+        Assert.Equal(layout.GridW, restored.GridW);
+        Assert.Equal(layout.EccParity, restored.EccParity);
+    }
+
+    [Theory]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void Metadata_Version4WithNineOrTenBits_IsRejected(int bits)
+    {
+        var layout = Layout.Create(2160, 2160, 3, bits, 16);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionWideCell, packed[1] >> 4);
+        packed[1] = (byte)((packed[1] & 0x0F) | (Layout.MetaVersionFec << 4));
+        ushort crc = new Crc().Crc16Ccitt(packed.AsSpan(0, 9));
+        packed[9] = (byte)(crc >> 8);
+        packed[10] = (byte)crc;
+        new ReedSolomon().Encode(packed.AsSpan(0, 11), packed.AsSpan(11, 5));
+        Assert.Equal(Layout.MetaVersionFec, packed[1] >> 4);
+        Assert.Null(Layout.UnpackMetadata(ToModules(packed)));
+    }
+
+    [Theory]
     [InlineData(9)]
     [InlineData(10)]
     public void Create_AcceptsNineAndTenBits_AndStripRoundTrips(int bits)

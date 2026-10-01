@@ -68,6 +68,8 @@ public class EncodeDecodeTests
         using var tmp = new TempDir();
         byte[] content = TestData.Random(20_000, seed: cellPx * 10 + bits);
         var opt = new EncodeOptions { Width = 900, Height = 900, CellPx = cellPx, BitsPerCell = bits };
+        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, bits, opt.EccParity);
+        Assert.Equal(Layout.MetaVersionFec, layout.PackMetadata()[1] >> 4);
         Assert.Equal(content, RoundTrip(tmp, content, opt));
     }
 
@@ -88,6 +90,10 @@ public class EncodeDecodeTests
             BitsPerCell = bits,
             Compress = false,
         };
+        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, bits, opt.EccParity);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionWideCell, packed[1] >> 4);
+        Assert.Equal(bits, packed[1] & 0x0F);
         Assert.Equal(content, RoundTrip(tmp, content, opt));
     }
 

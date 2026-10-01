@@ -1,14 +1,17 @@
 # QrShard wire-format specification
 
-Version: format v2 (header version 2, metadata versions 2–4). Metadata version 4 adds error
-correction to the strip (§2.2) and is what current encoders emit; versions 2 and 3 remain readable
-and the golden fixtures in `tests/QrShard.Tests/golden/` pin every released minor line against the
-current decoder.
+Version: format v2 (header version 2, metadata versions 2–5). Metadata version 4 adds error
+correction to the strip (§2.2). Metadata version 5 is that same strip with 9 or 10 bits per cell
+(§2.3). Encoders emit version 4 for 1–8 bits and version 5 for 9 and 10. Versions 2 and 3 remain
+readable, and the golden fixtures in `tests/QrShard.Tests/golden/` pin every released minor line
+against the current decoder.
 
-**Version 4 is not readable by decoders older than it.** The version nibble is the capability
-field and unknown values are rejected rather than guessed at, so a shard written by a current
-encoder will not decode on an older build. That is the intended direction — old shards keep
-working forever, new ones need a current reader.
+**Versions 4 and 5 are not readable by decoders older than them.** The version nibble is the
+capability field and unknown values are rejected rather than guessed at, so a shard written by a
+current encoder will not decode on an older build when it uses a version that build does not
+know. A 1–8 bit shard still declares version 4. A 9- or 10-bit shard declares version 5, which a
+version-4 reader rejects. That is the intended direction — old shards keep working forever, new
+ones need a current reader.
 
 Header *flags* (§4.1) provide separate feature signalling, but the one-byte field is now exhausted:
 all eight bits have assigned meanings. A future capability that cannot be expressed by their valid
@@ -84,7 +87,8 @@ top band.
 
 128 one-module-wide black/white cells, dark = 1, MSB-first.
 
-Three versions exist. **Encoders SHOULD emit version 4**; decoders MUST read all three.
+Four versions exist. **Encoders emit version 4 for 1–8 bits per cell and version 5 for 9 and 10.**
+Decoders MUST read all four. The stream header stays version 2; this bump is only the metadata nibble.
 
 ### 2.1 Versions 2 and 3 (legacy, no error correction)
 
@@ -92,7 +96,7 @@ Three versions exist. **Encoders SHOULD emit version 4**; decoders MUST read all
 |---|---|---|
 | magic | 8 | `0xC5` |
 | version | 4 | `2` = classic interleave; `3` = same fields, v2 permuted interleave (§5.2) |
-| bitsPerCell | 4 | 1–10 |
+| bitsPerCell | 4 | 1–8 |
 | gridW | 16 | data grid width in cells |
 | gridH | 16 | data grid height in cells |
 | cellPx | 8 | encoded cell size |
@@ -119,7 +123,7 @@ Same 128 modules, reallocated so the strip survives damage:
 |---|---|---|
 | magic | 8 | `0xC5` |
 | version | 4 | `4` |
-| bitsPerCell | 4 | 1–10 |
+| bitsPerCell | 4 | 1–8 |
 | gridW | 14 | data grid width in cells (≤ 16383) |
 | gridH | 14 | data grid height in cells (≤ 16383) |
 | cellPx | 6 | encoded cell size **minus 1** (stores 1–64) |
@@ -154,6 +158,21 @@ repair them.
 
 Unknown versions MUST be rejected (the version nibble is the format's capability field).
 
+### 2.3 Version 5 (9 and 10 bits per cell)
+
+Same 128 modules and the same field widths as version 4, including the 4-bit `bitsPerCell`
+field. The only difference on the wire is the version nibble:
+
+| Field | Bits | Meaning |
+|---|---|---|
+| version | 4 | `5` |
+| bitsPerCell | 4 | 1–10. Encoders emit this version only for 9 and 10 |
+
+A decoder MUST accept a version-5 strip whose `bitsPerCell` is 1–10, and MUST reject a version-4
+strip whose `bitsPerCell` is 9 or 10. A version-5 strip MUST NOT be accepted by the version-4
+check. Versions other than 2, 3, 4, and 5 MUST be rejected. Nothing else in the strip grows: the
+reserved bit stays zero, and `innerW` / `innerH` are still derived.
+
 ## 3. Palette
 
 `n = 2^bitsPerCell` colors. For `bitsPerCell = 1`: black then white. Otherwise bits split
@@ -162,8 +181,9 @@ channel level `i` of `count` levels is `round-free (i · 255) / (count − 1)` (
 or 0 when `count = 1`. Color index `v` decomposes as `iR = v / (nG·nB)`, `iG = (v / nB) mod nG`,
 `iB = v mod nB`.
 
-Values 9 and 10 use this same 4-bit field (the nibble represents 0–15; 16 does not fit) and do
-not change the metadata version. A decoder that only accepts 1–8 rejects those shards. Images
+Values 9 and 10 use this same 4-bit field (the nibble represents 0–15; 16 does not fit) and are
+carried by metadata version 5 (§2.3). A decoder that only accepts version 4 rejects those shards.
+Images
 stay 8 bits per channel. At 10 bits the split is 16×8×8 levels, so the minimum channel step
 inside 8-bit RGB is 17. Densities 1–8 keep a minimum step of at least 32. A geometry whose
 calibration strip cannot give every colour at least one pixel is rejected, as is a cell stream
@@ -242,12 +262,12 @@ With ECC: `cwCount = floor(TotalBytes / 255)` where `TotalBytes = GridW·GridH·
 codeword array index 0 is the HIGHEST-degree coefficient (syndromes `S_i = C(α^i)` by Horner
 over the array in order).
 
-### 5.1 Classic interleave (metadata version 2, or version 4 with `interleave2 = 0`)
+### 5.1 Classic interleave (metadata version 2, or version 4 or 5 with `interleave2 = 0`)
 
 Cell-buffer byte `i·cwCount + j` = symbol `i` of codeword `j`, for `i ∈ [0,255)`,
 `j ∈ [0,cwCount)`. Bytes `[cwCount·255, TotalBytes)` are zero padding.
 
-### 5.2 Permuted interleave (metadata version 3, or version 4 with `interleave2 = 1`)
+### 5.2 Permuted interleave (metadata version 3, or version 4 or 5 with `interleave2 = 1`)
 
 A bijection π over `[0, cwCount·255)` is applied AROUND the classic layout: cell-buffer byte
 `π(k)` = classic byte `k`. π is a Fisher-Yates shuffle of the identity array driven by a
@@ -265,8 +285,8 @@ for i = length-1 down to 1: swap(perm[i], perm[next() mod (i+1)])
 
 Every addition and multiplication in this block wraps modulo 2⁶⁴; right shifts are logical.
 
-Padding bytes stay in place. Metadata version 3, and version 4 with `interleave2 = 1`, require
-`eccParity > 0`.
+Padding bytes stay in place. Metadata version 3, and versions 4 and 5 with `interleave2 = 1`,
+require `eccParity > 0`.
 
 ## 6. Decoding requirements
 

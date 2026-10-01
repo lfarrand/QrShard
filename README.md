@@ -579,6 +579,10 @@ silently produces the wrong bytes. So:
 > **Upgrade the receiver first, or upgrade both ends together.** A sender on 1.6.0 **or newer**
 > talking to a receiver on 1.5.x produces images the receiver cannot read.
 
+9- and 10-bit cells declare metadata version 5. A reader that stops at version 4 rejects those
+images. Output at 1–8 bits per cell still declares version 4, so a reader that already accepts
+version 4 keeps reading that output. The stream-header version is unchanged.
+
 Header *flags* signal features independently of the version nibble, but the one-byte flag field
 is exhausted: all eight bits are assigned. A future capability that is not a valid combination of
 those bits requires a new metadata or header version. Unknown flag bits remain rejected (fail-safe).
@@ -761,8 +765,8 @@ Six independent layers, from within-cell to whole-transfer:
    falloff, room light), the decoder *interpolates the reference palette per grid row* between
    them instead of picking one. Both copies sit at the same x as each other, though, so one
    narrow vertical mark can reach the same place in both — which is why neither strip relies on
-   the duplication alone. The metadata strip carries Reed-Solomon parity of its own (metadata
-   version 4), correcting a burst across two of its sixteen symbols. The palette strips are
+   the duplication alone.    The metadata strip carries Reed-Solomon parity of its own (metadata
+   versions 4 and 5 share that strip), correcting a burst across two of its sixteen symbols. The palette strips are
    protected from both directions: selection excludes a copy whose colors have collapsed onto
    each other before comparing distance to the theoretical palette, so one damaged copy cannot
    displace a healthy but strongly gain-shifted one. A mark across **one** copy is also rejected
