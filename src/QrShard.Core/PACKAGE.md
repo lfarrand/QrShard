@@ -91,7 +91,7 @@ thread-safe; feed it from one consumer or provide external synchronisation.
 |---|---:|---|
 | `Width`, `Height` | 2160 | 700–16384 pixels per side |
 | `CellPx` | 3 | 1–64; smaller cells increase density and demand cleaner captures |
-| `BitsPerCell` | 4 | 1–8 bits; controls palette size and density |
+| `BitsPerCell` | 4 | 1–10 bits; controls palette size and density |
 | `EccParity` | 16 | Even, 0–64 Reed-Solomon parity bytes per 255-byte codeword |
 | `RecoveryPercent` | 0 | 0–100% extra Cauchy parity images for whole-image loss |
 | `FountainPercent` | 0 | 0–1000% random-linear coded frames; mutually exclusive with recovery parity |
@@ -173,6 +173,6 @@ Wire-format specification: <https://github.com/lfarrand/QrShard/blob/main/SPEC.m
 
 ## License
 
-QrShard.Core is MIT licensed and uses SixLabors.ImageSharp 4.0.0 under Apache-2.0 for this
+QrShard.Core is MIT licensed and uses SixLabors.ImageSharp 4.1.2 under Apache-2.0 for this
 open-source project. ImageSharp remains a normal NuGet dependency rather than a bundled assembly.
 The QrShard MIT license is included in the package.

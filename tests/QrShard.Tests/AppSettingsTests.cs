@@ -247,6 +247,16 @@ public class AppSettingsTests
         Assert.True(settings.EncodeDefaults.Compress);
     }
 
+    [Theory]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void BitsPerCell_NineAndTen_AreAccepted(int bits)
+    {
+        using var tmp = new TempDir();
+        var settings = LoadJson(tmp, $$"""{ "EncodeDefaults": { "BitsPerCell": {{bits}} } }""");
+        Assert.Equal(bits, settings.EncodeDefaults.BitsPerCell);
+    }
+
     [Fact]
     public void Resolution_Auto_IsValid()
     {
@@ -256,7 +266,8 @@ public class AppSettingsTests
 
     [Theory]
     [InlineData("""{ "EncodeDefaults": { "CellPx": 0 } }""", "CellPx")]
-    [InlineData("""{ "EncodeDefaults": { "BitsPerCell": 9 } }""", "BitsPerCell")]
+    [InlineData("""{ "EncodeDefaults": { "BitsPerCell": 11 } }""", "BitsPerCell")]
+    [InlineData("""{ "EncodeDefaults": { "BitsPerCell": 16 } }""", "BitsPerCell")]
     [InlineData("""{ "EncodeDefaults": { "EccParity": 15 } }""", "EccParity")]
     [InlineData("""{ "EncodeDefaults": { "RecoveryPercent": 150 } }""", "RecoveryPercent")]
     [InlineData("""{ "EncodeDefaults": { "Resolution": "banana" } }""", "Resolution")]

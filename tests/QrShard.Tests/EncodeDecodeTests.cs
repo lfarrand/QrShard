@@ -59,7 +59,7 @@ public class EncodeDecodeTests
     [Theory]
     [InlineData(1, 1)] // black & white, minimal density
     [InlineData(2, 2)]
-    [InlineData(1, 8)] // 1px cells, 256 colors — maximum density (regression: half-pixel rounding)
+    [InlineData(1, 8)] // 1px cells, 256 colors (regression: half-pixel rounding)
     [InlineData(2, 6)]
     [InlineData(5, 5)] // odd bit widths exercise non-byte-aligned cell packing
     [InlineData(4, 3)]
@@ -68,6 +68,32 @@ public class EncodeDecodeTests
         using var tmp = new TempDir();
         byte[] content = TestData.Random(20_000, seed: cellPx * 10 + bits);
         var opt = new EncodeOptions { Width = 900, Height = 900, CellPx = cellPx, BitsPerCell = bits };
+        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, bits, opt.EccParity);
+        Assert.Equal(Layout.MetaVersionFec, layout.PackMetadata()[1] >> 4);
+        Assert.Equal(content, RoundTrip(tmp, content, opt));
+    }
+
+    [Theory]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void NineAndTenBits_RoundTripByteIdentical(int bits)
+    {
+        using var tmp = new TempDir();
+        byte[] content = TestData.Random(8_000, seed: 100 + bits);
+        // 2160px keeps the 10-bit calibration strip at about 2 px per block, so the measured
+        // palette is actually sampled rather than collapsed onto shared pixels.
+        var opt = new EncodeOptions
+        {
+            Width = 2160,
+            Height = 2160,
+            CellPx = 3,
+            BitsPerCell = bits,
+            Compress = false,
+        };
+        var layout = Layout.Create(opt.Width, opt.Height, opt.CellPx, bits, opt.EccParity);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionWideCell, packed[1] >> 4);
+        Assert.Equal(bits, packed[1] & 0x0F);
         Assert.Equal(content, RoundTrip(tmp, content, opt));
     }
 

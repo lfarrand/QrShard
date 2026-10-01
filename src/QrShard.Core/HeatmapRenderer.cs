@@ -12,6 +12,9 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
 {
     private const int CellPx = 6;
 
+    /// <summary>Flagged near-tie. Distinct from a confident green and from the exact-tie red.</summary>
+    internal static readonly Rgb24 NearTieWarning = new(230, 140, 20);
+
     public HeatmapRenderer() : this(new FastPng(), new Interleaver2())
     {
     }
@@ -74,21 +77,54 @@ internal sealed class HeatmapRenderer(FastPng png, Interleaver2 interleaver)
     /// It is a quality/ambiguity map, NOT a correctness map: a glare-saturated cell can map
     /// confidently to the wrong color and still read green.
     /// </summary>
-    public void RenderQuality(Layout layout, int[] cellMargins, string outPath)
+    /// <param name="confidentDist">
+    /// Squared-distance floor from <see cref="GridSampler.ConfidenceFloorFor"/>. Margins at or
+    /// below it paint the same green as an exact hit. The default matches the unmeasured fallback.
+    /// </param>
+    /// <param name="rowFloors">
+    /// Per-grid-row floors from interpolated sampling. When present, row <c>gy</c> is painted
+    /// with <c>rowFloors[gy]</c> rather than the single <paramref name="confidentDist"/>.
+    /// </param>
+    /// <param name="ambiguousCells">
+    /// Per-cell exact-tie marks from sampling, parallel to <paramref name="cellMargins"/>. A true
+    /// entry paints red even though its margin is 0.
+    /// </param>
+    /// <param name="nearTieCells">
+    /// Per-cell near-tie marks. A true entry paints <see cref="NearTieWarning"/> instead of the
+    /// distance gradient. Cells that are not flagged keep that gradient.
+    /// </param>
+    public void RenderQuality(Layout layout, int[] cellMargins, string outPath,
+        long confidentDist = GridSampler.DefaultConfidentDist, long[]? rowFloors = null,
+        bool[]? ambiguousCells = null, bool[]? nearTieCells = null)
     {
         int w = layout.GridW * CellPx, h = layout.GridH * CellPx;
         var px = new Rgb24[w * h];
-        // Mirrors GridSampler's ConfidentDist (200) → green and AbsoluteSuspectDist (4000) → red.
-        const double confident = 200, ambiguous = 4000;
+        // A sparse palette's measured floor can sit above AbsoluteSuspectDist. RecordConfidence
+        // still trusts samples under that floor (and under the absolute cap), so the heatmap
+        // clamps there instead of treating the wide floor as "no green plateau".
+        double ambiguous = GridSampler.AbsoluteSuspectDist;
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {
+            long rowFloor = rowFloors is not null && gy < rowFloors.Length ? rowFloors[gy] : confidentDist;
+            double confident = Math.Clamp(rowFloor, 0, ambiguous);
+            double span = ambiguous - confident;
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
             {
                 int margin = cellMargins[(int)cellIndex];
-                var color = margin > ambiguous * 4
-                    ? new Rgb24(90, 0, 20) // far past any palette color — likely unreadable
-                    : Gradient(Math.Clamp((margin - confident) / (ambiguous - confident), 0, 1));
+                bool tied = ambiguousCells is not null && cellIndex < ambiguousCells.Length && ambiguousCells[cellIndex];
+                bool nearTie = nearTieCells is not null && cellIndex < nearTieCells.Length && nearTieCells[cellIndex];
+                // An exact tie stores margin 0 and paints red. A flagged near-tie (distance 64 at
+                // 10 bits) would otherwise sit almost on the confident green, so it gets a warning.
+                Rgb24 color = tied
+                    ? Gradient(1)
+                    : nearTie
+                        ? NearTieWarning
+                        : margin > ambiguous * 4
+                            ? new Rgb24(90, 0, 20) // far past any palette color — likely unreadable
+                            : Gradient(span <= 0
+                                ? (margin > ambiguous ? 1 : 0)
+                                : Math.Clamp((margin - confident) / span, 0, 1));
                 Fill(px, w, gx * CellPx, gy * CellPx, color);
             }
         }
