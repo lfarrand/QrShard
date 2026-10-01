@@ -116,4 +116,33 @@ internal sealed class DecodeScratch
             _deltas = new int[length];
         return _deltas;
     }
+
+    private ClosestPairScratch? _closestPairs;
+
+    /// <summary>Sort buffer and spatial hash reused across every interpolated row of this worker.</summary>
+    public ClosestPairScratch ClosestPairs => _closestPairs ??= new ClosestPairScratch();
+
+    /// <summary>Uniform-palette confidence floor measured while sampling this image.</summary>
+    public long UniformConfidenceFloor { get; set; }
+
+    private long[]? _rowFloors;
+    private int _rowFloorCount;
+
+    /// <summary>Per-row confidence floors for the current image. The returned buffer is reused.</summary>
+    public long[] RowFloors(int rows)
+    {
+        if (_rowFloors is null || _rowFloors.Length < rows)
+            _rowFloors = new long[rows];
+        _rowFloorCount = rows;
+        return _rowFloors;
+    }
+
+    /// <summary>A copy of the floors written by the last <see cref="RowFloors"/> call.</summary>
+    public long[] CopyRowFloors()
+    {
+        var copy = new long[_rowFloorCount];
+        if (_rowFloors is not null && _rowFloorCount > 0)
+            Array.Copy(_rowFloors, copy, _rowFloorCount);
+        return copy;
+    }
 }

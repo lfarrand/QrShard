@@ -102,7 +102,7 @@ globalization is deliberately not used or bundled.
   the CLI. See [Embedding QrShard.Core](#embedding-qrshardcore).
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
   [Building](#building-and-testing) for the ImageSharp license note). The exact SDK is
-  **10.0.400** (`global.json`, `rollForward: disable`).
+  **10.0.401** (`global.json`, `rollForward: disable`).
 - **Windows 1:1 hosts**: download `qrshard-display-win-x64.zip` / `qrshard-recorder-win-x64.zip`
   from a v1.7.6-or-later GitHub Release, or `dotnet build QrShard.Windows.slnx -c Release` on a
   machine with the **Windows Desktop SDK** (WPF + WinForms). See
@@ -299,7 +299,7 @@ There is no `qrshard display` or `qrshard record`. Those are separate Windows ex
 | `-o, --out <dir>` | any path | `<input>.shards` beside the input; `bundle.shards` beside the first input for multiple inputs | Output folder for the shard images |
 | `-r, --resolution <px>` | `auto`; one number (square); `WxH` — 700–16384 per side | `auto` | Image size. `auto` detects the primary monitor's native resolution so shards fill the screen they'll be captured from |
 | `-c, --cell <px>` | 1–64 | 3 | Data cell size in pixels. 3 survives fractional display rescaling; 1 doubles-to-quadruples density but needs pixel-perfect captures |
-| `-b, --bits <n>` | 1–8 | 4 | Bits per cell (color density): 2ⁿ palette colors |
+| `-b, --bits <n>` | 1–10 | 4 | Bits per cell (color density): 2ⁿ palette colors |
 | `-e, --ecc <n>` | even, 0–64 | 16 | Reed-Solomon parity bytes per 255-byte block. 16 ≈ 6% overhead; fixes 8 unknown-position bytes/block, up to ~14 when the classifier can flag them (erasures) |
 | `-R, --recovery <pct>` | 0–100 | 0 (off) | Extra **parity images** (Cauchy erasure code), calculated as a percentage of data images and distributed per stripe. Loss tolerance is per stripe: `-R 15` adds about 15 parity images per 100 data images (~13% of the resulting set) |
 | `-F, --fountain <pct>` | 0–1000 | 0 (off) | **Fountain-coded frames** (random linear code) for video mode: a full-rank set of roughly `stripeData` captured frames per stripe reconstructs the data; dependent/duplicate frames do not count. Mutually exclusive with `-R` |
@@ -463,7 +463,9 @@ folder must be decoded without it or split up.
   worst-case ECC headroom it consumed — the "will my file at these settings make it?" check the
   fixed-fixture self-test can't answer. (`test` alone still runs the built-in self-test.)
 - **`calibrate`**: writes a ladder of self-describing density probes (`-r` sizes them; `--camera`
-  for the photo ladder); capture them exactly like a real transfer and
+  for the photo ladder). Screen probes include 9 and 10 bits per cell only when that resolution
+  can give every calibration colour its own strip pixel; a narrower canvas such as 900 px stops
+  before 10 bits. Capture them exactly like a real transfer and
   `qrshard calibrate <capturedFolder>` measures what survived, recommending the densest `-c/-b`
   that decoded with comfortable ECC headroom on *your* screen/capture pair.
 
@@ -510,7 +512,7 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 |---|---|---|---|
 | `EncodeDefaults.Resolution` | `auto`, number, `WxH` | `auto` | Default for `-r` |
 | `EncodeDefaults.CellPx` | 1–64 | 3 | Default for `-c` |
-| `EncodeDefaults.BitsPerCell` | 1–8 | 4 | Default for `-b` |
+| `EncodeDefaults.BitsPerCell` | 1–10 | 4 | Default for `-b` |
 | `EncodeDefaults.EccParity` | even, 0–64 | 16 | Default for `-e` |
 | `EncodeDefaults.RecoveryPercent` | 0–100 | 0 | Default for `-R` |
 | `EncodeDefaults.ImageFormat` | `png` `bmp` `tga` `qoi` `webp` `tiff` | `png` | Default for `-f` |
@@ -579,6 +581,10 @@ silently produces the wrong bytes. So:
 
 > **Upgrade the receiver first, or upgrade both ends together.** A sender on 1.6.0 **or newer**
 > talking to a receiver on 1.5.x produces images the receiver cannot read.
+
+9- and 10-bit cells declare metadata version 5. A reader that stops at version 4 rejects those
+images. Output at 1–8 bits per cell still declares version 4, so a reader that already accepts
+version 4 keeps reading that output. The stream-header version is unchanged.
 
 Header *flags* signal features independently of the version nibble, but the one-byte flag field
 is exhausted: all eight bits are assigned. A future capability that is not a valid combination of
@@ -762,8 +768,9 @@ Six independent layers, from within-cell to whole-transfer:
    falloff, room light), the decoder *interpolates the reference palette per grid row* between
    them instead of picking one. Both copies sit at the same x as each other, though, so one
    narrow vertical mark can reach the same place in both — which is why neither strip relies on
-   the duplication alone. The metadata strip carries Reed-Solomon parity of its own (metadata
-   version 4), correcting a burst across two of its sixteen symbols. The palette strips are
+   duplication alone. The metadata strip carries Reed-Solomon parity of its own (metadata
+   versions 4 and 5 share that strip), correcting a burst across two of its sixteen symbols. The
+   palette strips are
    protected from both directions: selection excludes a copy whose colors have collapsed onto
    each other before comparing distance to the theoretical palette, so one damaged copy cannot
    displace a healthy but strongly gain-shifted one. A mark across **one** copy is also rejected
@@ -1045,7 +1052,7 @@ charts are emitted with every presentation attribute inlined — GitHub's SVG sa
 ### Image library choice
 
 Decode must parse arbitrary screenshots from unknown tools — that needs a mature fallback:
-**ImageSharp** (pure managed, cross-platform; pinned to v4.0.0 under Apache-2.0 for this
+**ImageSharp** (pure managed, cross-platform; pinned to v4.1.2 under Apache-2.0 for this
 MIT-licensed open-source project). The hot paths (PNG in both directions) are hand-rolled; everything else goes
 through ImageSharp with lossless speed-tuned settings.
 
@@ -1067,7 +1074,7 @@ through ImageSharp with lossless speed-tuned settings.
 
 ## Building and testing
 
-Requires the exact .NET SDK **10.0.400** enforced by `global.json`.
+Requires the exact .NET SDK **10.0.401** enforced by `global.json`.
 
 | Solution | TFM | Projects | Command | Who can run it |
 |---|---|---|---|---|
@@ -1128,10 +1135,10 @@ remote tag is peeled and compared with the event commit again before attestation
 and publication. Runs for the same tag are serialized without cancelling the earlier run.
 
 Four read-only matrix jobs on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and macos-15 use the exact
-.NET SDK 10.0.400 to test and Native-AOT publish win-x64, linux-x64, linux-arm64 and osx-arm64, add
+.NET SDK 10.0.401 to test and Native-AOT publish win-x64, linux-x64, linux-arm64 and osx-arm64, add
 redistribution notices, and smoke-test the **exact** `QrShard[.exe]` bytes (tagged version,
 self-test, and a real parity-recovery round trip). Each of those same-host matrix jobs then pins
-Microsoft.Sbom.DotNetTool 4.1.5 and generates the archive's SPDX 2.2 document from the exact
+Microsoft.Sbom.DotNetTool 4.1.13 and generates the archive's SPDX 2.2 document from the exact
 RID-aware publish graph. A fifth read-only `windows-hosts` job on windows-2025 publishes
 self-contained Display and Recorder win-x64 folders (no test suite; Recorder usage smoke and
 Display FileVersion only), then generates two Desktop-runtime SBOMs. A separate read-only job
@@ -1141,7 +1148,7 @@ artifact hash and reject stale, test, benchmark, and SBOM-tool components. The f
 manifests also reject wrong-RID graphs; the package manifests reject Native-AOT contamination;
 the host manifests reject Native-AOT and ImageSharp and require the win-x64 Desktop runtime.
 
-The Native AOT Apple runtime pack restored by SDK 10.0.400 (currently 10.0.11) contains debug
+The Native AOT Apple runtime pack restored by SDK 10.0.400 (10.0.11) contained debug
 references to temporary Swift/Clang module-cache files. On macOS the workflow therefore defers only
 the standard `dsymutil` and `strip` post-link operations out of the affected MSBuild `Exec` wrapper;
 the corresponding [upstream fix](https://github.com/dotnet/runtime/pull/124266) is not in those
@@ -1163,7 +1170,7 @@ artifact-only, no-checkout job creates signed SLSA provenance for every release 
 of the eight artifact-specific signed SBOM predicates, and creates one complete draft containing the
 six archives (four Native-AOT CLI plus Display and Recorder), both packages, eight SBOM documents,
 and `SHA256SUMS`. A downstream no-checkout
-NuGet OIDC job pins the 10.0.400 SDK explicitly because it has no checkout and therefore cannot
+NuGet OIDC job pins the 10.0.401 SDK explicitly because it has no checkout and therefore cannot
 read `global.json`. It first validates both exact package names and their bounded ZIP structure, then performs a
 read-only two-registry preflight. Any existing NuGet.org copy must have a valid repository signature
 and be semantically identical apart from that signature; any GitHub Packages copy must be
@@ -1211,7 +1218,7 @@ Authenticode, and the workflow does not verify a Developer ID signature or notar
 The plaintext `SHA256SUMS` file is not itself a detached platform signature; verify its attestation
 rather than trusting the file in isolation.
 
-ImageSharp is pinned to **4.0.0** and is used by this MIT-licensed open-source project under
+ImageSharp is pinned to **4.1.2** and is used by this MIT-licensed open-source project under
 **Apache-2.0**; copyright (c) Six Labors. The Apache-2.0 text ships in release archives and the
 global-tool package. Repository/CI build-validation keys are never committed; when the package's
 build target requests one, use your own gitignored `sixlabors.lic` or the `SixLaborsLicenseKey`

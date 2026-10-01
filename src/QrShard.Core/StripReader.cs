@@ -117,25 +117,28 @@ internal sealed class StripReader(Palette palette) : IStripReader
     {
         if (measured.Length < 2)
             return true;
-        long closest = long.MaxValue, widest = 0;
-        for (int i = 0; i < measured.Length; i++)
-            for (int j = i + 1; j < measured.Length; j++)
-            {
-                long dr = measured[i].R - measured[j].R;
-                long dg = measured[i].G - measured[j].G;
-                long db = measured[i].B - measured[j].B;
-                long d = dr * dr + dg * dg + db * db;
-                if (d < closest) closest = d;
-                if (d > widest) widest = d;
-            }
-        // An all-one-colour strip (widest 0) is total collapse, not a pass.
+        // Same predicate as comparing every pair: closest * divisor >= widest, and not a single colour.
+        // A duplicate is closest 0 and fails immediately. A healthy strip clears the divisor against
+        // the bounding-box diagonal, which is at least the true widest pair, so the all-pairs scan
+        // is only needed when that bound is too loose to decide.
+        long closest = Palette.ClosestSquared(measured);
+        if (closest == 0)
+            return false;
+        long box = Palette.AabbDiagonalSquared(measured);
+        if (closest * SeparabilityDivisor >= box)
+            return true;
+        long widest = Palette.WidestSquared(measured);
         return widest > 0 && closest * SeparabilityDivisor >= widest;
     }
 
+    /// <summary>Test seam for the closest/widest decision.</summary>
+    internal static bool IsSeparableForTests(Rgb24[] measured) => IsSeparable(measured);
+
     /// <summary>
     /// Closest pair must be at least 1/this of the widest. A 4-bit theoretical palette sits at
-    /// about 1/26 and an 8-bit one at about 1/260 by squared distance, so 4000 clears every real
-    /// palette by a wide margin while still catching a pair collapsed to near-zero separation.
+    /// about 1/26 and an 8-bit one at about 1/260 by squared distance; a 10-bit palette (minimum
+    /// channel step 17) sits at about 1/675. 4000 clears every real palette by a wide margin
+    /// while still catching a pair collapsed to near-zero separation.
     /// </summary>
     private const long SeparabilityDivisor = 4000;
 
