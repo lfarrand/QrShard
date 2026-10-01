@@ -765,8 +765,9 @@ Six independent layers, from within-cell to whole-transfer:
    falloff, room light), the decoder *interpolates the reference palette per grid row* between
    them instead of picking one. Both copies sit at the same x as each other, though, so one
    narrow vertical mark can reach the same place in both — which is why neither strip relies on
-   the duplication alone.    The metadata strip carries Reed-Solomon parity of its own (metadata
-   versions 4 and 5 share that strip), correcting a burst across two of its sixteen symbols. The palette strips are
+   duplication alone. The metadata strip carries Reed-Solomon parity of its own (metadata
+   versions 4 and 5 share that strip), correcting a burst across two of its sixteen symbols. The
+   palette strips are
    protected from both directions: selection excludes a copy whose colors have collapsed onto
    each other before comparing distance to the theoretical palette, so one damaged copy cannot
    displace a healthy but strongly gain-shifted one. A mark across **one** copy is also rejected
