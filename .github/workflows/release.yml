@@ -141,7 +141,7 @@ jobs:
           - os: macos-15
             rid: osx-arm64
             asset: qrshard-osx-arm64.tar.gz
-            # The Apple Native AOT pack restored by SDK 10.0.400 (10.0.11) contained
+            # The Apple Native AOT pack restored by SDK 10.0.400 (10.0.11) contains
             # stale Clang module-cache references. Defer dsymutil/strip to the
             # checked step below so MSBuild's Exec parser cannot turn dsymutil's
             # successful diagnostic into a failure.
@@ -359,7 +359,7 @@ jobs:
           output_dir="$RUNNER_TEMP/sbom-output"
           mkdir -p "$input_dir" "$output_dir"
           cp "${{ matrix.asset }}" "$input_dir/"
-          dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.13 --tool-path "$tool_dir"
+          dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.5 --tool-path "$tool_dir"
           sbom_tool="$tool_dir/sbom-tool"
           [ "${{ runner.os }}" = Windows ] && sbom_tool="$sbom_tool.exe"
 
@@ -387,9 +387,9 @@ jobs:
                 test("^(xunit|benchmarkdotnet|microsoft\\.sbom)"))] | length) == 0 and
               ([.packages[]? | select(
                 (.name | startswith("QrShard")) and .versionInfo != $version)] | length) == 0 and
-              any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.1.2") and
-              any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.12") and
-              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.12") and
+              any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.0.0") and
+              any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.10") and
+              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.11") and
               ([.packages[]? | select(.name | startswith("Microsoft.NETCore.App.Runtime.NativeAOT."))] | length) == 1 and
               any(.packages[]?; .name == $runtime and .versionInfo == $runtimeVer) and
               ([.packages[]? | select(.name | test("^runtime\\..*\\.Microsoft\\.DotNet\\.ILCompiler$"))] | length) == 1 and
@@ -555,7 +555,7 @@ jobs:
             exit 1
           }
           tool_dir="$RUNNER_TEMP/sbom-tool"
-          dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.13 --tool-path "$tool_dir"
+          dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.5 --tool-path "$tool_dir"
           sbom_tool="$tool_dir/sbom-tool"
           [ "${{ runner.os }}" = Windows ] && sbom_tool="$sbom_tool.exe"
 
@@ -670,7 +670,7 @@ jobs:
           set -euo pipefail
           version="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard/QrShard.csproj | head -1)"
           tool_dir="$RUNNER_TEMP/sbom-tool"
-          dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.13 --tool-path "$tool_dir"
+          dotnet tool install Microsoft.Sbom.DotNetTool --version 4.1.5 --tool-path "$tool_dir"
           sbom_tool="$tool_dir/sbom-tool"
 
           generate_sbom() {
@@ -706,9 +706,9 @@ jobs:
           validate_cli_dependencies() {
             local manifest="$1" label="$2"
             jq -e '
-              any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.1.2") and
-              any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.12") and
-              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.12")
+              any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.0.0") and
+              any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.10") and
+              any(.packages[]?; .name == "Microsoft.Extensions.DependencyInjection" and .versionInfo == "10.0.11")
             ' "$manifest" >/dev/null || {
               echo "::error::$label SBOM is missing pinned production dependencies"; exit 1;
             }
@@ -734,8 +734,8 @@ jobs:
           core_manifest="$core_output/_manifest/spdx_2.2/manifest.spdx.json"
           validate_sbom release-inputs/core-package "$core_output" "$core_manifest" core-package
           jq -e '
-            any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.1.2") and
-            any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.12") and
+            any(.packages[]?; .name == "SixLabors.ImageSharp" and .versionInfo == "4.0.0") and
+            any(.packages[]?; .name == "System.IO.Hashing" and .versionInfo == "10.0.10") and
             ([.packages[]? | select(.name | startswith("Microsoft.NETCore.App.Runtime.NativeAOT."))] | length) == 0
           ' "$core_manifest" >/dev/null || {
             echo "::error::Core package SBOM has the wrong production dependency graph"; exit 1;
@@ -958,7 +958,7 @@ jobs:
       # This job must not check out the repository. Pin the SDK instead of global.json.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.401
+          dotnet-version: 10.0.400
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: nuget-packages

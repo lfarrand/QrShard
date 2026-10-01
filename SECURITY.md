@@ -178,8 +178,7 @@ different process-launch boundary.
 ### Release artifacts
 
 Beginning with v1.7.0, tagged releases publish `SHA256SUMS` only after the exact Native-AOT binaries
-and NuGet packages have been tested with the pinned .NET SDK (currently 10.0.401) on versioned
-GitHub-hosted runner labels.
+and NuGet packages have been tested with .NET SDK 10.0.400 on versioned GitHub-hosted runner labels.
 An active no-bypass tag ruleset blocks update/deletion of `v*`, and the workflow independently
 peels the remote tag and compares it with the event commit before attestation, draft creation, and
 publication. GitHub
@@ -206,7 +205,7 @@ The release executable is `QrShard.exe` on Windows and case-sensitive `QrShard` 
 The `linux-x64` and `linux-arm64` Native-AOT assets require glibc 2.35 and 2.39 respectively.
 The macOS candidate also requires successful symbol extraction and stripping plus a non-empty dSYM
 whose Mach-O UUID matches the shipped binary. Those operations run directly because the Native AOT Apple runtime pack restored by
-SDK 10.0.400 (10.0.11) contained stale temporary module-cache debug references that its
+SDK 10.0.400 (currently 10.0.11) contains stale temporary module-cache debug references that its
 MSBuild wrapper misclassifies; an actual `dsymutil`, `strip`, signing, or signature-verification
 failure still stops the release.
 

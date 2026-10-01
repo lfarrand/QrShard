@@ -9,8 +9,8 @@
 ## Learned Workspace Facts
 
 - This repository has no SQL.
-- SDK is 10.0.401 with `rollForward: disable`. Native AOT runtime pack is 10.0.12. Product `Microsoft.Extensions.DependencyInjection` / `Abstractions` and `System.IO.Hashing` are 10.0.12. A product DI bump must refresh Tool + Tests + Benchmarks lockfiles together (`NU1004` if consumer locks still record QrShard.Tool project deps on the old range) and retarget `release.yml` SPDX `versionInfo` for DI. Do not retag v1.7.6.
-- The `publish-nuget` job has no checkout; pin `dotnet-version` 10.0.401, not `global.json`. CodeQL `init` and `analyze` must use the same action SHA.
+- SDK is 10.0.400 with `rollForward: disable`. Native AOT runtime pack is 10.0.11. Product `Microsoft.Extensions.DependencyInjection` / `Abstractions` are 10.0.11; `System.IO.Hashing` stays 10.0.10. A product DI bump must refresh Tool + Tests + Benchmarks lockfiles together (`NU1004` if consumer locks still record QrShard.Tool project deps on the old range) and retarget `release.yml` SPDX `versionInfo` for DI. Do not retag v1.7.6.
+- The `publish-nuget` job has no checkout; pin `dotnet-version` 10.0.400, not `global.json`. CodeQL `init` and `analyze` must use the same action SHA.
 - Header flags are exhausted (`KnownFlags` 0xFF); the next capability needs a version bump.
 - `QrShardDecodeSession` retains failed ECC captures and runs `PhotoFusion.Fuse` from 1.7.6. nuget.org / tagged Native-AOT **1.7.5** skipped that session path; folder `DecodeImages` already fused on 1.7.5.
 - Session v1-migrate TOCTOU tests must not poll for staging files (the race never plants on a fast machine). Use the `SessionStore.TestingBeforeReplaceExistingPublish` hook.

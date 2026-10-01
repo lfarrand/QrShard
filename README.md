@@ -102,7 +102,7 @@ globalization is deliberately not used or bundled.
   the CLI. See [Embedding QrShard.Core](#embedding-qrshardcore).
 - **From source**: `dotnet run --project src/QrShard -c Release -- <command>` (see
   [Building](#building-and-testing) for the ImageSharp license note). The exact SDK is
-  **10.0.401** (`global.json`, `rollForward: disable`).
+  **10.0.400** (`global.json`, `rollForward: disable`).
 - **Windows 1:1 hosts**: download `qrshard-display-win-x64.zip` / `qrshard-recorder-win-x64.zip`
   from a v1.7.6-or-later GitHub Release, or `dotnet build QrShard.Windows.slnx -c Release` on a
   machine with the **Windows Desktop SDK** (WPF + WinForms). See
@@ -1049,7 +1049,7 @@ charts are emitted with every presentation attribute inlined — GitHub's SVG sa
 ### Image library choice
 
 Decode must parse arbitrary screenshots from unknown tools — that needs a mature fallback:
-**ImageSharp** (pure managed, cross-platform; pinned to v4.1.2 under Apache-2.0 for this
+**ImageSharp** (pure managed, cross-platform; pinned to v4.0.0 under Apache-2.0 for this
 MIT-licensed open-source project). The hot paths (PNG in both directions) are hand-rolled; everything else goes
 through ImageSharp with lossless speed-tuned settings.
 
@@ -1071,7 +1071,7 @@ through ImageSharp with lossless speed-tuned settings.
 
 ## Building and testing
 
-Requires the exact .NET SDK **10.0.401** enforced by `global.json`.
+Requires the exact .NET SDK **10.0.400** enforced by `global.json`.
 
 | Solution | TFM | Projects | Command | Who can run it |
 |---|---|---|---|---|
@@ -1132,10 +1132,10 @@ remote tag is peeled and compared with the event commit again before attestation
 and publication. Runs for the same tag are serialized without cancelling the earlier run.
 
 Four read-only matrix jobs on windows-2025, ubuntu-22.04, ubuntu-24.04-arm and macos-15 use the exact
-.NET SDK 10.0.401 to test and Native-AOT publish win-x64, linux-x64, linux-arm64 and osx-arm64, add
+.NET SDK 10.0.400 to test and Native-AOT publish win-x64, linux-x64, linux-arm64 and osx-arm64, add
 redistribution notices, and smoke-test the **exact** `QrShard[.exe]` bytes (tagged version,
 self-test, and a real parity-recovery round trip). Each of those same-host matrix jobs then pins
-Microsoft.Sbom.DotNetTool 4.1.13 and generates the archive's SPDX 2.2 document from the exact
+Microsoft.Sbom.DotNetTool 4.1.5 and generates the archive's SPDX 2.2 document from the exact
 RID-aware publish graph. A fifth read-only `windows-hosts` job on windows-2025 publishes
 self-contained Display and Recorder win-x64 folders (no test suite; Recorder usage smoke and
 Display FileVersion only), then generates two Desktop-runtime SBOMs. A separate read-only job
@@ -1145,7 +1145,7 @@ artifact hash and reject stale, test, benchmark, and SBOM-tool components. The f
 manifests also reject wrong-RID graphs; the package manifests reject Native-AOT contamination;
 the host manifests reject Native-AOT and ImageSharp and require the win-x64 Desktop runtime.
 
-The Native AOT Apple runtime pack restored by SDK 10.0.400 (10.0.11) contained debug
+The Native AOT Apple runtime pack restored by SDK 10.0.400 (currently 10.0.11) contains debug
 references to temporary Swift/Clang module-cache files. On macOS the workflow therefore defers only
 the standard `dsymutil` and `strip` post-link operations out of the affected MSBuild `Exec` wrapper;
 the corresponding [upstream fix](https://github.com/dotnet/runtime/pull/124266) is not in those
@@ -1167,7 +1167,7 @@ artifact-only, no-checkout job creates signed SLSA provenance for every release 
 of the eight artifact-specific signed SBOM predicates, and creates one complete draft containing the
 six archives (four Native-AOT CLI plus Display and Recorder), both packages, eight SBOM documents,
 and `SHA256SUMS`. A downstream no-checkout
-NuGet OIDC job pins the 10.0.401 SDK explicitly because it has no checkout and therefore cannot
+NuGet OIDC job pins the 10.0.400 SDK explicitly because it has no checkout and therefore cannot
 read `global.json`. It first validates both exact package names and their bounded ZIP structure, then performs a
 read-only two-registry preflight. Any existing NuGet.org copy must have a valid repository signature
 and be semantically identical apart from that signature; any GitHub Packages copy must be
@@ -1215,7 +1215,7 @@ Authenticode, and the workflow does not verify a Developer ID signature or notar
 The plaintext `SHA256SUMS` file is not itself a detached platform signature; verify its attestation
 rather than trusting the file in isolation.
 
-ImageSharp is pinned to **4.1.2** and is used by this MIT-licensed open-source project under
+ImageSharp is pinned to **4.0.0** and is used by this MIT-licensed open-source project under
 **Apache-2.0**; copyright (c) Six Labors. The Apache-2.0 text ships in release archives and the
 global-tool package. Repository/CI build-validation keys are never committed; when the package's
 build target requests one, use your own gitignored `sixlabors.lic` or the `SixLaborsLicenseKey`
