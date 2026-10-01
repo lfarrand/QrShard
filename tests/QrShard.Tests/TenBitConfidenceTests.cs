@@ -71,6 +71,47 @@ public class TenBitConfidenceTests
     }
 
     [Fact]
+    public void TenBitBoundary_FlagsRed8AndRed9_AndRecordsTheChaseAlternative()
+    {
+        var palette = new Palette().Build(10);
+        // Cells 0 and 3 do not share bytes, so each Chase alternative can be read on its own.
+        var layout = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 1,
+            GridW = 4,
+            GridH = 1,
+            MetaH = 1,
+            InnerW = 2 + 4,
+            InnerH = 6 + 1,
+            EccParity = 16,
+            FinderModule = 0,
+        };
+        int w = layout.InnerW, h = layout.InnerH;
+        var px = new Rgb24[w * h];
+        int row = 3;
+        px[row * w + 1] = new Rgb24(8, 0, 0); // nearer red 0; distance 64, runner-up red 17
+        px[row * w + 4] = new Rgb24(9, 0, 0); // nearer red 17; distance 64, runner-up red 0
+        var palettes = new PaletteSet(palette, palette, palette, Interpolate: false);
+
+        byte[] stream = new GridSampler().ReadDataGrid(
+            new Bitmap(px, w, h), new InnerRect(0, 0, w, h), layout, palettes,
+            new DecodeScratch(), out bool[]? suspects, out byte[]? second);
+
+        var bits = new BitStream();
+        Assert.Equal(0, bits.ReadCell(stream, 0, 10));
+        Assert.Equal(64, bits.ReadCell(stream, 30, 10));
+        Assert.NotNull(suspects);
+        Assert.True(suspects[0]);
+        Assert.True(suspects[1]);
+        Assert.True(suspects[3]);
+        Assert.True(suspects[4]);
+        Assert.NotNull(second);
+        Assert.Equal(64, bits.ReadCell(second, 0, 10));
+        Assert.Equal(0, bits.ReadCell(second, 30, 10));
+    }
+
+    [Fact]
     public void QualityHeatmap_UsesTheTenBitFloor()
     {
         var layout = new Layout
