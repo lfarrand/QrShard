@@ -157,21 +157,24 @@ public class ReviewRegressionTests
     [Fact]
     public void UnknownMetadataVersion_IsRejectedRatherThanParsedAsV4()
     {
-        // SPEC section 2.2 requires unknown versions to be rejected — that nibble is the format's
-        // capability field and the reason older builds refuse a v4 strip. UnpackV4 checked neither
-        // magic nor version after correcting, and the comments on those two lines claimed the
-        // caller had already matched them. It had not: dispatch reaches UnpackV4 precisely BECAUSE
-        // the raw bytes did not look like v2 or v3, which is what allows a damaged version to be
-        // repaired. So a future version 5 strip whose CRC verified would have been silently parsed
-        // as v4 — fields read at the wrong offsets, geometry wrong, and no error.
+        // SPEC requires unknown versions to be rejected — that nibble is the format's capability
+        // field. Version 5 is now the 9- and 10-bit strip and shares these field offsets, so the
+        // unknown value past it is 6. A resealed version-6 strip must not be read as version 4.
         var layout = Layout.Create(2160, 2160, 3, 4, 16);
         byte[] strip = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionFec, strip[1] >> 4);
         Assert.NotNull(Layout.UnpackMetadata(ToModules(strip)));
 
-        // Re-stamp the version nibble as 5 and repair the CRC and parity so the strip is
-        // internally perfect — only the version is unknown.
-        byte[] forged = ForgeVersion(strip, 5);
+        byte[] forged = ForgeVersion(strip, 6);
         Assert.Null(Layout.UnpackMetadata(ToModules(forged)));
+
+        // Version 5 with a 1–8 bit density is legal and uses the same fields, so restamping this
+        // strip as 5 still decodes. It is not parsed by the version-4 acceptance check.
+        byte[] asWide = ForgeVersion(strip, Layout.MetaVersionWideCell);
+        var wide = Layout.UnpackMetadata(ToModules(asWide));
+        Assert.NotNull(wide);
+        Assert.Equal(layout.BitsPerCell, wide!.BitsPerCell);
+        Assert.Equal(layout.GridW, wide.GridW);
 
         // And a wrong magic is refused too, for the same reason.
         byte[] badMagic = (byte[])strip.Clone();

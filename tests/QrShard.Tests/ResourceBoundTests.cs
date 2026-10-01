@@ -211,7 +211,11 @@ public class ResourceBoundTests
         Assert.Equal(seed, bits.ReadCell(stream, 0, 8));
         Assert.Equal(exact, bits.ReadCell(stream, 8, 8));
         Assert.NotNull(suspects);
-        Assert.False(suspects[1]);
+        // The symbol is the exact nearest, not the cached 5-bit winner. Measured spacing of this
+        // gain-0.2 palette is about 7, so the floor drops far enough that dist 9 vs 16 is a
+        // near-tie and the probe byte is flagged. The exact seed stays confident.
+        Assert.False(suspects[0]);
+        Assert.True(suspects[1]);
     }
 
     [Fact]

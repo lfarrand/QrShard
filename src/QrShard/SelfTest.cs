@@ -24,8 +24,8 @@ internal sealed class SelfTest(IShardEncoder encoder, IShardDecoder decoder) : I
             allPass &= Case(root, "1 MB random, defaults + cursor damage", MakeRandom(1_000_000), new EncodeOptions(), [1.0, 1.25, 1.5], damage: true);
             allPass &= Case(root, "random, dense (cell 2, 6 bits)", MakeRandom(2_000_000),
                 new EncodeOptions { CellPx = 2, BitsPerCell = 6 }, [1.0]);
-            allPass &= Case(root, "random, max density (cell 1, 8 bits, 4096px)", MakeRandom(4_000_000),
-                new EncodeOptions { Width = 4096, Height = 4096, CellPx = 1, BitsPerCell = 8 }, []);
+            allPass &= Case(root, "random, max density (cell 1, 10 bits, 4096px)", MakeRandom(4_000_000),
+                new EncodeOptions { Width = 4096, Height = 4096, CellPx = 1, BitsPerCell = 10 }, []);
             allPass &= Case(root, "random, 4K widescreen (3840x2160, cell 1, 6 bits)", MakeRandom(3_000_000),
                 new EncodeOptions { Width = 3840, Height = 2160, CellPx = 1, BitsPerCell = 6 }, []);
             allPass &= Case(root, "empty file", [], new EncodeOptions(), [1.0, 1.25, 1.5]);
