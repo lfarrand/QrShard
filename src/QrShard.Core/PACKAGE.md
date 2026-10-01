@@ -100,6 +100,10 @@ thread-safe; feed it from one consumer or provide external synchronisation.
 | `Compress` | `true` | Brotli-compress when a sample indicates it is worthwhile |
 | `Interleave2` | `false` | Spread vertical as well as horizontal damage; requires ECC |
 
+Cells at 1 to 8 bits declare metadata version 4. Their minimum channel step is at least 32. A
+9-bit cell declares metadata version 5. Its minimum channel step is 36. A 10-bit cell declares
+metadata version 5. Its minimum channel step is 17.
+
 Unlike the CLI, Core does not auto-detect a monitor or read CLI `appsettings.json`; the values in
 `QrShardEncodeOptions` are explicit and deterministic. `EncodeFile` encodes one file. Applications
 that need folder or multi-input archive creation should use QrShard.Tool or prepare their own file

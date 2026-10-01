@@ -8,8 +8,8 @@
   <ItemGroup>
     <PackageReference Include="Azure.Core" Version="1.63.0" />
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
-    <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
-    <PackageReference Include="BenchmarkDotNet.Annotations" Version="0.15.8" />
+    <PackageReference Include="BenchmarkDotNet" Version="0.16.0-preview.2" />
+    <PackageReference Include="BenchmarkDotNet.Annotations" Version="0.16.0-preview.2" />
     <PackageReference Include="CommandLineParser" Version="2.9.1" />
     <PackageReference Include="Gee.External.Capstone" Version="2.3.0" />
     <PackageReference Include="Iced" Version="1.21.0" />
@@ -46,8 +46,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <!-- BenchmarkDotNet 0.15.8 pins Perfolizer 0.6.1 but we intentionally use 0.7.5. -->
-    <NoWarn>$(NoWarn);NU1608</NoWarn>
+    <!-- 0.16.0-preview.2 is the BenchmarkDotNet build that pins Perfolizer 0.7.5.
+         0.15.8 pins Perfolizer 0.6.1 and fails to load Pragmastat 14.0.1 at runtime. -->
     <!-- Match the CLI's GC mode so benchmark numbers reflect production behavior. -->
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
