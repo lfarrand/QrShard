@@ -27,6 +27,13 @@ internal sealed class Layout
     public const int MaxResolution = 16384;
     public const int MaxCellPx = 64;
 
+    /// <summary>
+    /// Largest cell stream the decoder will allocate: one byte per pixel of the maximum canvas.
+    /// An 8-bit, 1 px grid fits; the same grid at 9 or 10 bits does not. Encode and decode share
+    /// this cap so a shard that can be written can be read.
+    /// </summary>
+    public const long MaxCellStreamBytes = (long)MaxResolution * MaxResolution;
+
     /// <summary>Largest value a 14-bit version-4 metadata field can carry.</summary>
     public const int MaxMetaField = (1 << 14) - 1;
 
@@ -128,9 +135,38 @@ internal sealed class Layout
             FinderModule = finderModule,
             Interleave2 = interleave2,
         };
+        if (layout.TotalBytes > MaxCellStreamBytes)
+            throw new ArgumentException(
+                "Colour depth at this resolution exceeds the decodable maximum; use fewer bits, a larger cell, or a smaller image.");
+        if (!CalibrationStripCoversPalette(layout.GridW * layout.CellPx, bitsPerCell))
+            throw new ArgumentException(
+                "Resolution is too small for every calibration colour at this colour depth.");
         if (eccParity > 0 && layout.CodewordCount < 1)
             throw new ArgumentException("Image capacity is too small for error correction; increase resolution or use --ecc 0.");
         return layout;
+    }
+
+    /// <summary>
+    /// True when <see cref="ShardRenderer"/>'s calibration strip gives every palette colour at
+    /// least one pixel. Block edges are rounded the same way the strip is drawn, so a width of
+    /// at least one pixel per colour is necessary but a midpoint can still collapse a block.
+    /// </summary>
+    internal static bool CalibrationStripCoversPalette(int stripPx, int bitsPerCell)
+    {
+        if (bitsPerCell is < Palette.MinBits or > Palette.MaxBits || stripPx < 1)
+            return false;
+        int count = 1 << bitsPerCell;
+        if (stripPx < count)
+            return false;
+        double blockW = stripPx / (double)count;
+        for (int c = 0; c < count; c++)
+        {
+            int x0 = (int)Math.Round(c * blockW);
+            int x1 = (int)Math.Round((c + 1) * blockW);
+            if (x1 <= x0)
+                return false;
+        }
+        return true;
     }
 
     /// <summary>Shared encoder/decoder approximation for the metadata strip height and gutter.</summary>
@@ -176,6 +212,16 @@ internal sealed class Layout
     // check, and reject if the check fails.
     public const int MetaVersionFec = 4;
 
+    /// <summary>
+    /// Version 5: the version-4 strip with 9 or 10 bits per cell. The 128 modules and every field
+    /// width stay the same; only the version nibble changes, which is what makes an older reader
+    /// reject the image instead of reading a wider palette as version 4.
+    /// </summary>
+    public const int MetaVersionWideCell = 5;
+
+    /// <summary>Highest bits-per-cell versions 2–4 may declare. 9 and 10 require version 5.</summary>
+    public const int MetaVersionFecMaxBits = 8;
+
     /// <summary>Field bytes in a v4 strip, before CRC and parity.</summary>
     private const int V4FieldBytes = 9;
 
@@ -189,7 +235,10 @@ internal sealed class Layout
     {
         var bits = new BitWriter();
         bits.Write(MetaMagic, 8);
-        bits.Write(MetaVersionFec, 4);
+        // 1–8 bits stay on version 4, so a reader that already accepts that strip still can.
+        // 9 and 10 are a new capability and take version 5. The field widths are unchanged.
+        int version = BitsPerCell <= MetaVersionFecMaxBits ? MetaVersionFec : MetaVersionWideCell;
+        bits.Write((uint)version, 4);
         bits.Write((uint)BitsPerCell, 4);
         bits.Write((uint)GridW, 14);
         bits.Write((uint)GridH, 14);
@@ -197,7 +246,7 @@ internal sealed class Layout
         bits.Write((uint)MetaH, 14);
         bits.Write((uint)(EccParity / 2), 6); // even 0..64 stored as 0..32
         // The interleave that version 3 signalled is now a field rather than a version, so v4
-        // carries both variants and the version nibble stays free for the next capability.
+        // and v5 carry both variants. Version 5 is the nibble spent on 9- and 10-bit cells.
         bits.Write((uint)(Interleave2 ? 1 : 0), 1);
         bits.Write(0, 1);                     // reserved, must be zero — 72 bits exactly
         byte[] fields = bits.ToArray();       // 9 bytes
@@ -211,8 +260,9 @@ internal sealed class Layout
     }
 
     /// <summary>
-    /// Repairs and unpacks a v4 strip. Returns null when the damage exceeds what 5 parity symbols
-    /// can correct, or when the CRC still fails afterwards — a miscorrection RS could not detect.
+    /// Repairs and unpacks a version-4 or version-5 strip. Both share this field layout. Returns
+    /// null when the damage exceeds what 5 parity symbols can correct, when the CRC still fails
+    /// afterwards, or when the version nibble is neither 4 nor 5.
     /// </summary>
     private static Layout? UnpackV4(byte[] strip)
     {
@@ -229,13 +279,13 @@ internal sealed class Layout
         // damaged magic or version be repaired. So the check has to happen after correction, and
         // it was simply missing.
         //
-        // The consequence is worse than a lax magic. SPEC section 2.2 requires unknown versions to
-        // be rejected — that nibble is the format's capability field, and the whole reason a v4
-        // strip is refused by older builds. Without this, a future version 5 strip whose CRC
-        // happens to verify would be silently PARSED AS v4 by this decoder: fields read at the
-        // wrong offsets, geometry wrong, and no error. Rejecting unknown versions is what makes
-        // adding version 5 safe later.
-        if (reader.Read(8) != MetaMagic || reader.Read(4) != MetaVersionFec)
+        // Unknown versions stay rejected. Version 5 uses these same offsets, so it is accepted
+        // here as itself; a version-4 strip is not a stand-in for it, and a later version is not
+        // read as either. That is what keeps an older grammar from silently growing a new density.
+        if (reader.Read(8) != MetaMagic)
+            return null;
+        uint version = reader.Read(4);
+        if (version is not (MetaVersionFec or MetaVersionWideCell))
             return null;
         int bitsPerCell = (int)reader.Read(4);
         int gridW = (int)reader.Read(14);
@@ -249,6 +299,10 @@ internal sealed class Layout
         ushort crc = (ushort)reader.Read(16);
         if (crc != new Crc().Crc16Ccitt(strip.AsSpan(0, V4FieldBytes)))
             return null;
+        // Version 4 still means 1–8. A strip that claims 9 or 10 under that version is refused
+        // rather than treated as the wider palette version 5 introduced.
+        if (version == MetaVersionFec && bitsPerCell > MetaVersionFecMaxBits)
+            return null;
 
         // Derived, not carried. v2 stored these and rejected any strip where they disagreed with
         // exactly this arithmetic, so computing them is the same constraint expressed once.
@@ -257,7 +311,8 @@ internal sealed class Layout
         if (innerW is < 1 or > MaxResolution || innerH is < 1 or > MaxResolution)
             return null;
 
-        return Validated(bitsPerCell, gridW, gridH, cellPx, metaH, (int)innerW, (int)innerH, eccParity, interleave2);
+        return Validated(bitsPerCell, gridW, gridH, cellPx, metaH, (int)innerW, (int)innerH, eccParity, interleave2,
+            version == MetaVersionWideCell ? Palette.MaxBits : MetaVersionFecMaxBits);
     }
 
     /// <summary>
@@ -320,7 +375,7 @@ internal sealed class Layout
         if (crc != new Crc().Crc16Ccitt(bytes.AsSpan(0, 14)))
             return null;
         return Validated(bitsPerCell, gridW, gridH, cellPx, metaH, innerW, innerH, eccParity,
-            interleave2: version == MetaVersionInterleave2);
+            interleave2: version == MetaVersionInterleave2, maxBits: MetaVersionFecMaxBits);
     }
 
     /// <summary>
@@ -330,9 +385,9 @@ internal sealed class Layout
     /// side that is not under attack.
     /// </summary>
     private static Layout? Validated(int bitsPerCell, int gridW, int gridH, int cellPx, int metaH,
-        int innerW, int innerH, int eccParity, bool interleave2)
+        int innerW, int innerH, int eccParity, bool interleave2, int maxBits)
     {
-        if (bitsPerCell is < Palette.MinBits or > Palette.MaxBits || gridW < 1 || gridH < 1 || cellPx < 1 || metaH < 1)
+        if (bitsPerCell is < Palette.MinBits || bitsPerCell > maxBits || gridW < 1 || gridH < 1 || cellPx < 1 || metaH < 1)
             return null;
         // Range alone is not enough: Create rejects ODD parity, and the decode path has to reject
         // it too. Parity 1 in particular makes Fec.TryErasureRetry compute
@@ -369,6 +424,10 @@ internal sealed class Layout
             FinderModule = 0,
             Interleave2 = interleave2,
         };
+        if (layout.TotalBytes > MaxCellStreamBytes)
+            return null;
+        if (!CalibrationStripCoversPalette(gridW * cellPx, bitsPerCell))
+            return null;
         // With CodewordCount 0 the FEC pass writes nothing and reports success, so the recovered
         // buffer — pooled per worker and never cleared — is handed on still holding the PREVIOUS
         // image's fully valid stream, and a shard is accepted from an image that contributed no

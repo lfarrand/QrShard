@@ -19,7 +19,7 @@ Pin `github/codeql-action/init` and `github/codeql-action/analyze` to the same c
 
 ## Product DI / Hashing
 
-Product `Microsoft.Extensions.DependencyInjection` and `Microsoft.Extensions.DependencyInjection.Abstractions` are **10.0.11**. `System.IO.Hashing` stays **10.0.10**. A product DI bump must update `src/QrShard` csproj + lock, both test/benchmark locks (`QrShard.Tool` project deps), `release.yml` SPDX `versionInfo` assertions, and `THIRD-PARTY-NOTICES.md` in the same PR. Native AOT / ILLink stay **10.0.11**.
+Product `Microsoft.Extensions.DependencyInjection`, `Microsoft.Extensions.DependencyInjection.Abstractions`, and `System.IO.Hashing` are **10.0.12**. A product DI bump must update `src/QrShard` csproj + lock, both test/benchmark locks (`QrShard.Tool` project deps), `release.yml` SPDX `versionInfo` assertions, and `THIRD-PARTY-NOTICES.md` in the same PR. SDK **10.0.401** selects Native AOT / ILLink **10.0.12**.
 
 ## Coordinated product DI PRs
 

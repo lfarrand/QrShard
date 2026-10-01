@@ -49,12 +49,138 @@ public class LayoutTests
     [InlineData(2160, 2160, 0, 4, 0)]   // cell too small
     [InlineData(2160, 2160, 65, 4, 0)]  // cell too large
     [InlineData(2160, 2160, 3, 0, 0)]   // bits too small
-    [InlineData(2160, 2160, 3, 9, 0)]   // bits too large
+    [InlineData(2160, 2160, 3, 11, 0)]  // bits too large
+    [InlineData(2160, 2160, 3, 16, 0)]  // 16 does not fit the 4-bit field
     [InlineData(2160, 2160, 3, 4, -2)]  // negative parity
     [InlineData(2160, 2160, 3, 4, 66)]  // parity above max
     [InlineData(2160, 2160, 3, 4, 15)]  // odd parity
     public void Create_RejectsInvalidOptions(int width, int height, int cell, int bits, int parity) =>
         Assert.Throws<ArgumentException>(() => Layout.Create(width, height, cell, bits, parity));
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(8)]
+    public void Metadata_OneThroughEight_PacksVersion4_AndDecodes(int bits)
+    {
+        var layout = Layout.Create(2160, 2160, 3, bits, 16);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionFec, packed[1] >> 4);
+        var restored = Layout.UnpackMetadata(ToModules(packed));
+        Assert.NotNull(restored);
+        Assert.Equal(bits, restored!.BitsPerCell);
+        Assert.Equal(layout.GridW, restored.GridW);
+    }
+
+    [Theory]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void Metadata_NineAndTen_PackVersion5_AndRoundTrip(int bits)
+    {
+        var layout = Layout.Create(2160, 2160, 3, bits, 16);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionWideCell, packed[1] >> 4);
+        Assert.Equal(bits, packed[1] & 0x0F);
+        var restored = Layout.UnpackMetadata(ToModules(packed));
+        Assert.NotNull(restored);
+        Assert.Equal(bits, restored!.BitsPerCell);
+        Assert.Equal(layout.GridW, restored.GridW);
+        Assert.Equal(layout.EccParity, restored.EccParity);
+    }
+
+    [Theory]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void Metadata_Version4WithNineOrTenBits_IsRejected(int bits)
+    {
+        var layout = Layout.Create(2160, 2160, 3, bits, 16);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionWideCell, packed[1] >> 4);
+        packed[1] = (byte)((packed[1] & 0x0F) | (Layout.MetaVersionFec << 4));
+        ushort crc = new Crc().Crc16Ccitt(packed.AsSpan(0, 9));
+        packed[9] = (byte)(crc >> 8);
+        packed[10] = (byte)crc;
+        new ReedSolomon().Encode(packed.AsSpan(0, 11), packed.AsSpan(11, 5));
+        Assert.Equal(Layout.MetaVersionFec, packed[1] >> 4);
+        Assert.Null(Layout.UnpackMetadata(ToModules(packed)));
+    }
+
+    [Theory]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void Create_AcceptsNineAndTenBits_AndStripRoundTrips(int bits)
+    {
+        var layout = Layout.Create(2160, 2160, 3, bits, 16);
+        Assert.Equal(bits, layout.BitsPerCell);
+        var restored = Layout.UnpackMetadata(ToModules(layout.PackMetadata()));
+        Assert.NotNull(restored);
+        Assert.Equal(bits, restored!.BitsPerCell);
+    }
+
+    [Fact]
+    public void Create_MaxCanvas_RejectsNineAndTenBitStreams()
+    {
+        var eight = Layout.Create(Layout.MaxResolution, Layout.MaxResolution, 1, 8, 0);
+        Assert.True(eight.TotalBytes <= Layout.MaxCellStreamBytes);
+        Assert.NotNull(Layout.UnpackMetadata(ToModules(eight.PackMetadata())));
+
+        var nine = Assert.Throws<ArgumentException>(() => Layout.Create(Layout.MaxResolution, Layout.MaxResolution, 1, 9, 0));
+        Assert.Contains("decodable", nine.Message, StringComparison.OrdinalIgnoreCase);
+        var ten = Assert.Throws<ArgumentException>(() => Layout.Create(Layout.MaxResolution, Layout.MaxResolution, 1, 10, 0));
+        Assert.Contains("decodable", ten.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Unpack_RejectsOverCapTenBitGrid_WithoutAllocatingAnImage()
+    {
+        // The 1 px grid Create would build at 16384². Packing the fields allocates no bitmap.
+        var layout = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 1,
+            GridW = 16002,
+            GridH = 15350,
+            MetaH = 163,
+            InnerW = 2 * 163 + 16002,
+            InnerH = 6 * 163 + 15350,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        Assert.True(layout.TotalBytes > Layout.MaxCellStreamBytes);
+        Assert.Null(Layout.UnpackMetadata(ToModules(layout.PackMetadata())));
+    }
+
+    [Fact]
+    public void Create_RejectsTenBitStripThatCannotPaintEveryColour()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => Layout.Create(700, 700, 3, 10, 0));
+        Assert.Contains("calibration", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(Layout.Create(700, 700, 3, 8, 0));
+        Assert.False(Layout.CalibrationStripCoversPalette(630, 10));
+        Assert.True(Layout.CalibrationStripCoversPalette(630, 8));
+
+        var narrow = new Layout
+        {
+            BitsPerCell = 10,
+            CellPx = 3,
+            GridW = 210,
+            GridH = 202,
+            MetaH = 6,
+            InnerW = 2 * 6 + 210 * 3,
+            InnerH = 6 * 6 + 202 * 3,
+            EccParity = 0,
+            FinderModule = 0,
+        };
+        Assert.Null(Layout.UnpackMetadata(ToModules(narrow.PackMetadata())));
+    }
+
+    [Fact]
+    public void TenBit_CalibrationBlocks_AreAboutTwoPixelsOn2160()
+    {
+        var layout = Layout.Create(2160, 2160, 3, 10, 0);
+        double blockW = (layout.InnerW - 2.0 * layout.Gutter) / (1 << 10);
+        Assert.InRange(blockW, 1.5, 2.5);
+    }
 
     [Fact]
     public void Create_TooSmallForEcc_IsRejected()
@@ -70,6 +196,8 @@ public class LayoutTests
     [InlineData(3840, 2160, 1, 6, 32)]
     [InlineData(4096, 4096, 1, 8, 64)]
     [InlineData(16384, 16384, 64, 8, 2)]
+    [InlineData(2160, 2160, 3, 9, 16)]
+    [InlineData(2160, 2160, 3, 10, 16)]
     public void Metadata_PackUnpack_RoundTrips(int width, int height, int cell, int bits, int parity)
     {
         var layout = Layout.Create(width, height, cell, bits, parity);

@@ -161,6 +161,6 @@ Wire-format specification: <https://github.com/lfarrand/QrShard/blob/main/SPEC.m
 
 ## License
 
-QrShard is MIT licensed. QrShard.Tool uses SixLabors.ImageSharp 4.0.0 under Apache-2.0 for this
+QrShard is MIT licensed. QrShard.Tool uses SixLabors.ImageSharp 4.1.2 under Apache-2.0 for this
 open-source project. The package carries the project license and reviewed redistribution notices
 beside its bundled dependencies.
