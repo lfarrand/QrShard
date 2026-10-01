@@ -48,7 +48,6 @@
     <Nullable>enable</Nullable>
     <!-- 0.16.0-preview.2 is the BenchmarkDotNet build that pins Perfolizer 0.7.5.
          0.15.8 pins Perfolizer 0.6.1 and fails to load Pragmastat 14.0.1 at runtime. -->
-    <NoWarn>$(NoWarn);NU1608</NoWarn>
     <!-- Match the CLI's GC mode so benchmark numbers reflect production behavior. -->
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
