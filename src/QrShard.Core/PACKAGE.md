@@ -173,6 +173,6 @@ Wire-format specification: <https://github.com/lfarrand/QrShard/blob/main/SPEC.m
 
 ## License
 
-QrShard.Core is MIT licensed and uses SixLabors.ImageSharp 4.0.0 under Apache-2.0 for this
+QrShard.Core is MIT licensed and uses SixLabors.ImageSharp 4.1.2 under Apache-2.0 for this
 open-source project. ImageSharp remains a normal NuGet dependency rather than a bundled assembly.
 The QrShard MIT license is included in the package.
