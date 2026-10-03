@@ -335,7 +335,7 @@
         "dependencies": {
           "Microsoft.Extensions.DependencyInjection": "[10.0.12, )",
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[10.0.12, )",
-          "QrShard.Core": "[1.7.9, )",
+          "QrShard.Core": "[2.0.0, )",
           "SixLabors.ImageSharp": "[4.1.2, )",
           "System.IO.Hashing": "[10.0.12, )"
         }
