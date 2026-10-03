@@ -91,7 +91,7 @@ thread-safe; feed it from one consumer or provide external synchronisation.
 |---|---:|---|
 | `Width`, `Height` | 2160 | 700–16384 pixels per side |
 | `CellPx` | 3 | 1–64; smaller cells increase density and demand cleaner captures |
-| `BitsPerCell` | 4 | 1–12 bits; controls palette size and density. 11 and 12 declare metadata version 6 |
+| `BitsPerCell` | 4 | 1–12 bits; 13–16 stay illegal. 1–8 declare metadata version 4, 9–10 version 5, and 11–12 version 6 |
 | `EccParity` | 16 | Even, 0–64 Reed-Solomon parity bytes per 255-byte codeword |
 | `RecoveryPercent` | 0 | 0–100% extra Cauchy parity images for whole-image loss |
 | `FountainPercent` | 0 | 0–1000% random-linear coded frames; mutually exclusive with recovery parity |
@@ -100,12 +100,16 @@ thread-safe; feed it from one consumer or provide external synchronisation.
 | `Compress` | `true` | Brotli-compress when a sample indicates it is worthwhile |
 | `Interleave2` | `false` | Spread vertical as well as horizontal damage; requires ECC |
 
-Cells at 1 to 8 bits declare metadata version 4. Their minimum channel step is at least 32. A
-9-bit cell declares metadata version 5. Its minimum channel step is 36. A 10-bit cell declares
-metadata version 5. Its minimum channel step is 17. An 11-bit cell declares metadata version 6.
-Its split is 16×16×8, so red and green step by 17 and blue stays at 36. A 12-bit cell declares
-metadata version 6 and steps by 17 on every channel. It needs a calibration strip at least 4096 px
-wide.
+Cells at 1 to 8 bits still declare metadata version 4. Their minimum channel step is at least 32. A
+9-bit cell still declares metadata version 5. Its minimum channel step is 36. A 10-bit cell still
+declares metadata version 5. Its split is 16×8×8 and its minimum channel step is 17. An 11-bit cell
+declares metadata version 6. Its split is 16×16×8, so red and green step by 17 and blue stays at 36.
+A 12-bit cell declares metadata version 6. Its split is 16×16×16 and it steps by 17 on every channel.
+It is accepted only when the calibration strip covers 4096 colours. A 4K 1 px strip covers 11 bits and rejects
+12. Values 13–16 stay illegal. Version 6 uses the same 128-module strip. The stream header stays
+version 2, and the flag field is unchanged. On a pixel-perfect 4K grid of 3708×1876 cells at 1 px
+with 16 parity bytes, the 11-bit usable payload is about 9.0 MB, about 1.10× the 10-bit figure of
+about 8.1 MB.
 
 Unlike the CLI, Core does not auto-detect a monitor or read CLI `appsettings.json`; the values in
 `QrShardEncodeOptions` are explicit and deterministic. `EncodeFile` encodes one file. Applications

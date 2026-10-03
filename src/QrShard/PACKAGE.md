@@ -135,12 +135,16 @@ destination must be absent or empty.
 At the robust default (2160 px square, 3 px cells, 4 bits per cell), capacity is approximately
 212 KB per image after default ECC. Pixel-perfect 4K captures can reach about 4.9 MB per image with
 the Max4K profile, about 6.5 MB at 8-bit density, about 8.1 MB at 10-bit density, and about 9.0 MB
-at 11-bit density. The tool accepts 1 to 12 bits per cell. Cells at 1 to 8 bits declare metadata
-version 4. Those cells keep a minimum channel step of at least 32. Cells at 9 and 10 bits declare
-metadata version 5. At 9 bits the minimum channel step is 36. At 10 bits the minimum channel step
-is 17. Cells at 11 and 12 bits declare metadata version 6. At 11 bits red and green step by 17 and
-blue stays at 36. At 12 bits every channel steps by 17, and the calibration strip must be at least
-4096 px wide, so a 4K image rejects it. Camera mode deliberately trades density for photo tolerance.
+at 11-bit density. That 4K grid is 3708×1876 cells at 1 px with 16 parity bytes, so the 11-bit
+usable payload is about 1.10× the 10-bit figure. The tool accepts 1 to 12 bits per cell. Values
+13–16 stay illegal. Cells at 1 to 8 bits still declare metadata version 4 on the same 128-module
+strip and keep a minimum channel step of at least 32. Cells at 9 and 10 bits still declare metadata
+version 5. At 9 bits the minimum channel step is 36. At 10 bits the split is 16×8×8 and the minimum
+channel step is 17. Cells at 11 and 12 bits declare metadata version 6. At 11 bits the split is
+16×16×8, so red and green step by 17 and blue stays at 36. At 12 bits the split is 16×16×16 and
+every channel steps by 17. It is accepted only when the calibration strip covers 4096 colours. A 4K 1 px strip
+covers 11 bits and rejects 12. The stream header stays version 2, and the flag field is unchanged.
+Camera mode deliberately trades density for photo tolerance.
 
 An optional `appsettings.json` controls encode defaults, named profiles, PNG/Brotli compression,
 encode/decode memory budgets, decode parallelism, live-receiver settings, watch polling, and the
