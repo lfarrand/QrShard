@@ -158,15 +158,21 @@ public class ReviewRegressionTests
     public void UnknownMetadataVersion_IsRejectedRatherThanParsedAsV4()
     {
         // SPEC requires unknown versions to be rejected — that nibble is the format's capability
-        // field. Version 5 is now the 9- and 10-bit strip and shares these field offsets, so the
-        // unknown value past it is 6. A resealed version-6 strip must not be read as version 4.
+        // field. Version 6 is the 11- and 12-bit strip and shares these field offsets, so the
+        // unknown value past it is 7. A resealed version-7 strip must not be read as version 4.
+        // Version 6 accepts 1–12 bits, so restamping this 4-bit strip as 6 still decodes.
         var layout = Layout.Create(2160, 2160, 3, 4, 16);
         byte[] strip = layout.PackMetadata();
         Assert.Equal(Layout.MetaVersionFec, strip[1] >> 4);
         Assert.NotNull(Layout.UnpackMetadata(ToModules(strip)));
 
-        byte[] forged = ForgeVersion(strip, 6);
+        byte[] forged = ForgeVersion(strip, 7);
         Assert.Null(Layout.UnpackMetadata(ToModules(forged)));
+
+        byte[] asDeep = ForgeVersion(strip, Layout.MetaVersionDeepCell);
+        var deep = Layout.UnpackMetadata(ToModules(asDeep));
+        Assert.NotNull(deep);
+        Assert.Equal(layout.BitsPerCell, deep!.BitsPerCell);
 
         // Version 5 with a 1–8 bit density is legal and uses the same fields, so restamping this
         // strip as 5 still decodes. It is not parsed by the version-4 acceptance check.

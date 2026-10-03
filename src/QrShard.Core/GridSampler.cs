@@ -79,8 +79,11 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// Records classification confidence: an uncertain cell (far from every palette color, or
     /// nearly equidistant to a second one) has its bytes flagged as erasure candidates and its
     /// runner-up value written to the second-choice stream — the raw material for Chase
-    /// decoding. Confident cells write their winning value to both streams, so a byte-level
-    /// splice of the two streams flips exactly the ambiguous cells.
+    /// decoding. On the unpacked path, confident cells write their winning value to both streams,
+    /// so a byte-level splice flips exactly the ambiguous cells. The row packer leaves the
+    /// runner-up stream untouched until a cell is suspect, and copies a confident neighbour from
+    /// the primary stream when that neighbour shares a flagged byte. Chase only reads flagged
+    /// bytes, and still treats a confident cell as runner-up equals winner.
     ///
     /// <paramref name="confidenceFloor"/> is the largest squared distance at which a runner-up
     /// one measured palette step away cannot satisfy the near-tie test. Exact hits (distance 0)
@@ -92,9 +95,23 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
     /// </summary>
     private void RecordConfidence(bool[]? suspects, byte[]? second, Rgb24[] palette, int best, long bestDist,
         byte r, byte g, byte b, long cellIndex, int bits, long confidenceFloor, bool[]? ambiguousCells,
-        bool[]? nearTieCells, SeparablePalette? product, MeasuredColorIndex? measured)
+        bool[]? nearTieCells, SeparablePalette? product, MeasuredColorIndex? measured) =>
+        RecordConfidence(suspects, second, palette, best, bestDist, r, g, b, cellIndex, bits, confidenceFloor,
+            ambiguousCells, nearTieCells, product, measured, writeSecond: true, out _, out _);
+
+    /// <param name="writeSecond">
+    /// When false, a confident cell does not touch the runner-up stream.
+    /// <paramref name="runnerUpPending"/> is then set only for a suspect cell, and the caller
+    /// writes <paramref name="runnerUp"/> after the primary row is packed.
+    /// </param>
+    private void RecordConfidence(bool[]? suspects, byte[]? second, Rgb24[] palette, int best, long bestDist,
+        byte r, byte g, byte b, long cellIndex, int bits, long confidenceFloor, bool[]? ambiguousCells,
+        bool[]? nearTieCells, SeparablePalette? product, MeasuredColorIndex? measured, bool writeSecond,
+        out bool runnerUpPending, out int runnerUp)
     {
         int alternative = best;
+        runnerUpPending = false;
+        runnerUp = best;
         bool far = bestDist > AbsoluteSuspectDist;
         // Floor 0 is the only floor at which an exact hit can be two indices of one colour.
         bool maybeExactTie = bestDist == 0 && confidenceFloor == 0;
@@ -119,8 +136,15 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
                     suspects[i] = true;
             }
         }
-        if (second is not null)
-            bitStream.WriteCell(second, cellIndex * bits, bits, alternative);
+        if (second is null || (alternative == best && !writeSecond))
+            return;
+        if (!writeSecond)
+        {
+            runnerUpPending = true;
+            runnerUp = alternative;
+            return;
+        }
+        bitStream.WriteCell(second, cellIndex * bits, bits, alternative);
     }
 
     private int RunnerUp(SeparablePalette? product, MeasuredColorIndex? measured, Rgb24[] palette,
@@ -285,59 +309,158 @@ internal sealed class GridSampler(Palette paletteMath, BitStream bitStream) : IG
         for (int k = 0; k < offsets.Length; k++)
             deltas[k] = offsets[k].dy * width + offsets[k].dx;
 
+        bool pack = RowPacker.Supports(bits);
+        int[]? rowValues = pack ? scratch.RowValues(layout.GridW) : null;
+        long[]? rowDists = pack ? scratch.RowDists(layout.GridW) : null;
+        Rgb24[]? rowSamples = pack ? scratch.RowSamples(layout.GridW) : null;
+        // Byte index last seeded into the runner-up stream, in a 16-slot ring. A cell spans at
+        // most three bytes, so a slot is never live for two different indices at once.
+        Span<long> seededAt = stackalloc long[16];
+        seededAt.Fill(-1);
+        Span<long> deferBit = stackalloc long[4];
+        Span<int> deferValue = stackalloc int[4];
+        int deferCount = 0;
+
         long cellIndex = 0;
         for (int gy = 0; gy < layout.GridH; gy++)
         {
             int rowY = RowPixel(inner, layout, sy, height, gy);
             bool rowInterior = rowY >= 1 && rowY < height - 1;
+            long rowStart = cellIndex;
             for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
             {
-                int colX = cols[gx];
-                int best = 0;
-                long bestDist = long.MaxValue;
-                byte bR = 0, bG = 0, bB = 0;
-                if (rowInterior && colX >= 1 && colX < width - 1)
+                ClassifyCell(px, width, height, cols[gx], rowY, rowInterior, deltas, offsets, lut, palette, index, measured,
+                    out int best, out long bestDist, out byte bR, out byte bG, out byte bB);
+                if (pack)
                 {
-                    int baseIndex = rowY * width + colX;
-                    foreach (int delta in deltas)
-                    {
-                        var c = px[baseIndex + delta];
-                        int v = ClassifyUniform(lut, palette, index, measured, c.R, c.G, c.B, out long dist);
-                        if (dist < bestDist)
-                        {
-                            bestDist = dist;
-                            best = v;
-                            (bR, bG, bB) = (c.R, c.G, c.B);
-                            if (dist == 0)
-                                break;
-                        }
-                    }
+                    rowValues![gx] = best;
+                    rowDists![gx] = bestDist;
+                    rowSamples![gx] = new Rgb24(bR, bG, bB);
+                    continue;
                 }
-                else
-                {
-                    foreach (var (dx, dy) in offsets)
-                    {
-                        int xi = Math.Clamp(colX + dx, 0, width - 1);
-                        int yi = Math.Clamp(rowY + dy, 0, height - 1);
-                        var c = px[yi * width + xi];
-                        int v = ClassifyUniform(lut, palette, index, measured, c.R, c.G, c.B, out long dist);
-                        if (dist < bestDist)
-                        {
-                            bestDist = dist;
-                            best = v;
-                            (bR, bG, bB) = (c.R, c.G, c.B);
-                            if (dist == 0)
-                                break;
-                        }
-                    }
-                }
+
                 bitStream.WriteCell(stream, cellIndex * bits, bits, best);
                 RecordConfidence(suspects, second, palette, best, bestDist, bR, bG, bB, cellIndex, bits, confidenceFloor,
                     ambiguousCells, nearTieCells, index, index is null ? measured : null);
                 if (cellMargins is not null)
                     cellMargins[(int)cellIndex] = (int)Math.Min(bestDist, int.MaxValue);
             }
+
+            if (!pack)
+                continue;
+
+            RowPacker.Write(stream, rowStart * bits, bits, rowValues!.AsSpan(0, layout.GridW), bitStream);
+            // The previous row's trailing byte is finished now that this row has been packed.
+            FlushDeferred(second, stream, seededAt, deferBit, deferValue, bits, ref deferCount);
+            long rowEnd = cellIndex * bits;
+            SeparablePalette? product = index;
+            MeasuredColorIndex? measuredIndex = index is null ? measured : null;
+            for (int gx = 0; gx < layout.GridW; gx++)
+            {
+                long at = rowStart + gx;
+                Rgb24 sample = rowSamples![gx];
+                RecordConfidence(suspects, second, palette, rowValues![gx], rowDists![gx], sample.R, sample.G, sample.B,
+                    at, bits, confidenceFloor, ambiguousCells, nearTieCells, product, measuredIndex,
+                    writeSecond: false, out bool pending, out int runnerUp);
+                if (cellMargins is not null)
+                    cellMargins[(int)at] = (int)Math.Min(rowDists![gx], int.MaxValue);
+                if (!pending)
+                    continue;
+                long bit = at * bits;
+                long lastByteEnd = (((bit + bits - 1) >> 3) + 1) * 8;
+                if (rowEnd >= lastByteEnd)
+                    WriteRunnerUp(second!, stream, seededAt, bit, bits, runnerUp);
+                else
+                {
+                    // The cell spills into a byte the next row still has to fill. One cell is
+                    // wider than the unfinished tail, so a handful of slots covers the spill.
+                    if (deferCount == deferBit.Length)
+                        throw new InvalidOperationException("A row spilled more runner-up cells than the deferred buffer holds.");
+                    deferBit[deferCount] = bit;
+                    deferValue[deferCount] = runnerUp;
+                    deferCount++;
+                }
+            }
         }
+
+        FlushDeferred(second, stream, seededAt, deferBit, deferValue, bits, ref deferCount);
+    }
+
+    private void ClassifyCell(Rgb24[] px, int width, int height, int colX, int rowY, bool rowInterior,
+        int[] deltas, (int dx, int dy)[] offsets, int[]? lut, Rgb24[] palette, SeparablePalette? index,
+        MeasuredColorIndex measured, out int best, out long bestDist, out byte bR, out byte bG, out byte bB)
+    {
+        best = 0;
+        bestDist = long.MaxValue;
+        bR = 0;
+        bG = 0;
+        bB = 0;
+        if (rowInterior && colX >= 1 && colX < width - 1)
+        {
+            int baseIndex = rowY * width + colX;
+            foreach (int delta in deltas)
+            {
+                Rgb24 c = px[baseIndex + delta];
+                int v = ClassifyUniform(lut, palette, index, measured, c.R, c.G, c.B, out long dist);
+                if (dist >= bestDist)
+                    continue;
+                bestDist = dist;
+                best = v;
+                (bR, bG, bB) = (c.R, c.G, c.B);
+                if (dist == 0)
+                    break;
+            }
+            return;
+        }
+
+        foreach (var (dx, dy) in offsets)
+        {
+            int xi = Math.Clamp(colX + dx, 0, width - 1);
+            int yi = Math.Clamp(rowY + dy, 0, height - 1);
+            Rgb24 c = px[yi * width + xi];
+            int v = ClassifyUniform(lut, palette, index, measured, c.R, c.G, c.B, out long dist);
+            if (dist >= bestDist)
+                continue;
+            bestDist = dist;
+            best = v;
+            (bR, bG, bB) = (c.R, c.G, c.B);
+            if (dist == 0)
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Copies the finished primary bytes a suspect cell touches, then replaces that cell with
+    /// its runner-up. Confident cells that share the byte stay equal to the primary stream.
+    /// </summary>
+    private void WriteRunnerUp(byte[] second, byte[] primary, Span<long> seededAt, long bitOffset, int bits, int value)
+    {
+        long first = bitOffset >> 3;
+        long last = (bitOffset + bits - 1) >> 3;
+        for (long i = first; i <= last && i < second.Length; i++)
+        {
+            int slot = (int)(i & 15);
+            if (seededAt[slot] == i)
+                continue;
+            if (i < primary.Length)
+                second[i] = primary[i];
+            seededAt[slot] = i;
+        }
+        bitStream.ClearCell(second, bitOffset, bits);
+        bitStream.WriteCell(second, bitOffset, bits, value);
+    }
+
+    private void FlushDeferred(byte[]? second, byte[] primary, Span<long> seededAt, Span<long> deferBit, Span<int> deferValue,
+        int bits, ref int deferCount)
+    {
+        if (second is null || deferCount == 0)
+        {
+            deferCount = 0;
+            return;
+        }
+        for (int i = 0; i < deferCount; i++)
+            WriteRunnerUp(second, primary, seededAt, deferBit[i], bits, deferValue[i]);
+        deferCount = 0;
     }
 
     /// <summary>

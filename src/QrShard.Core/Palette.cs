@@ -9,7 +9,14 @@ namespace QrShard;
 internal sealed class Palette
 {
     public const int MinBits = 1;
-    public const int MaxBits = 10;
+
+    /// <summary>
+    /// Highest density the palette can build. Eleven bits is 16×16×8 (red and green step by 17,
+    /// blue stays at 36). Twelve bits is 16×16×16, step 17 on every channel. Thirteen and above
+    /// put a step of about 8 on a channel, inside an 8-bit sample with no room for a 1 px miss,
+    /// and sixteen does not fit the metadata nibble.
+    /// </summary>
+    public const int MaxBits = 12;
 
     public Rgb24[] Build(int bitsPerCell)
     {

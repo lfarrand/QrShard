@@ -134,10 +134,13 @@ destination must be absent or empty.
 
 At the robust default (2160 px square, 3 px cells, 4 bits per cell), capacity is approximately
 212 KB per image after default ECC. Pixel-perfect 4K captures can reach about 4.9 MB per image with
-the Max4K profile, about 6.5 MB at 8-bit density, and about 8.1 MB at 10-bit density. The tool
-accepts 1 to 10 bits per cell. Cells at 1 to 8 bits declare metadata version 4. Those cells keep a
-minimum channel step of at least 32. Cells at 9 and 10 bits declare metadata version 5. At 9 bits the minimum channel step is 36.
-At 10 bits the minimum channel step is 17. Camera mode deliberately trades density for photo tolerance.
+the Max4K profile, about 6.5 MB at 8-bit density, about 8.1 MB at 10-bit density, and about 9.0 MB
+at 11-bit density. The tool accepts 1 to 12 bits per cell. Cells at 1 to 8 bits declare metadata
+version 4. Those cells keep a minimum channel step of at least 32. Cells at 9 and 10 bits declare
+metadata version 5. At 9 bits the minimum channel step is 36. At 10 bits the minimum channel step
+is 17. Cells at 11 and 12 bits declare metadata version 6. At 11 bits red and green step by 17 and
+blue stays at 36. At 12 bits every channel steps by 17, and the calibration strip must be at least
+4096 px wide, so a 4K image rejects it. Camera mode deliberately trades density for photo tolerance.
 
 An optional `appsettings.json` controls encode defaults, named profiles, PNG/Brotli compression,
 encode/decode memory budgets, decode parallelism, live-receiver settings, watch polling, and the

@@ -51,6 +51,8 @@ public class BitIoTests
     [InlineData(8)]
     [InlineData(9)]
     [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
     public void BitStream_ReadWriteCell_RoundTripsAllValues(int bits)
     {
         int cells = 200;
@@ -104,6 +106,8 @@ public class BitIoTests
     [InlineData(8)]
     [InlineData(9)]
     [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
     public void BitStream_CellWindow_MatchesBitWriter_AtEveryAlignment(int bits)
     {
         var stream = new BitStream();
@@ -190,5 +194,51 @@ public class BitIoTests
         new BitStream().WriteCell(viaStream, 0, 8, 0xAB);
         new BitStream().WriteCell(viaStream, 8, 8, 0xCD);
         Assert.Equal(viaWriter, viaStream);
+    }
+
+    [Theory]
+    [InlineData(4, 0)]
+    [InlineData(4, 1)]
+    [InlineData(4, 4)]
+    [InlineData(6, 0)]
+    [InlineData(6, 3)]
+    [InlineData(8, 0)]
+    [InlineData(8, 2)]
+    [InlineData(10, 0)]
+    [InlineData(10, 6)]
+    [InlineData(11, 0)]
+    [InlineData(11, 5)]
+    public void RowPacker_MatchesWriteCell_AtAlignedAndSplitRows(int bits, int align)
+    {
+        int cells = 23;
+        var values = new int[cells];
+        var rng = new Random(bits * 10 + align);
+        int mask = (1 << bits) - 1;
+        for (int i = 0; i < cells; i++)
+            values[i] = rng.Next(mask + 1);
+
+        var stream = new BitStream();
+        int length = (align + cells * bits + 7) / 8 + 2;
+        var packed = new byte[length];
+        var reference = new byte[length];
+        RowPacker.Write(packed, align, bits, values, stream);
+        for (int i = 0; i < cells; i++)
+            stream.WriteCell(reference, align + (long)i * bits, bits, values[i]);
+        Assert.Equal(reference, packed);
+        for (int i = 0; i < cells; i++)
+            Assert.Equal(values[i], stream.ReadCell(packed, align + (long)i * bits, bits));
+    }
+
+    [Fact]
+    public void ClearCell_RemovesOneCell_AndLeavesItsNeighbour()
+    {
+        var stream = new BitStream();
+        var buffer = new byte[2];
+        stream.WriteCell(buffer, 0, 4, 0xA);
+        stream.WriteCell(buffer, 4, 4, 0x5);
+        stream.ClearCell(buffer, 0, 4);
+        Assert.Equal(0x05, buffer[0]);
+        stream.WriteCell(buffer, 0, 4, 0x3);
+        Assert.Equal(0x35, buffer[0]);
     }
 }

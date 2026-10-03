@@ -16,6 +16,8 @@ public class PaletteTests
     [InlineData(8)]
     [InlineData(9)]
     [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
     public void Build_ReturnsCorrectColorCount(int bits) =>
         Assert.Equal(1 << bits, new Palette().Build(bits).Length);
 
@@ -26,6 +28,8 @@ public class PaletteTests
     [InlineData(8)]
     [InlineData(9)]
     [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
     public void Build_AllColorsAreDistinct(int bits)
     {
         var colors = new Palette().Build(bits);
@@ -42,7 +46,7 @@ public class PaletteTests
 
     [Theory]
     [InlineData(0)]
-    [InlineData(11)]
+    [InlineData(13)]
     [InlineData(16)]
     [InlineData(-1)]
     public void Build_RejectsOutOfRangeBits(int bits) =>
@@ -117,6 +121,28 @@ public class PaletteTests
         Assert.Equal(1 << 10, colors.Length);
         // 16 red levels inside 8-bit RGB: 255/15 = 17. That is the closest pair.
         Assert.Equal(17 * 17, MinimumDistanceSquared(colors));
+    }
+
+    [Fact]
+    public void Build_ElevenBits_Is16x16x8_WithRedAndGreenStep17()
+    {
+        Assert.Equal((16, 16, 8), Palette.ChannelCounts(11));
+        var colors = new Palette().Build(11);
+        Assert.Equal(1 << 11, colors.Length);
+        Assert.Equal(17 * 17, MinimumDistanceSquared(colors));
+        Assert.Equal(new Rgb24(17, 0, 0), colors[128]); // one red step, 16×8
+        Assert.Equal(new Rgb24(0, 17, 0), colors[8]);   // one green step
+        Assert.Equal(new Rgb24(0, 0, 36), colors[1]);   // blue stays at 255/7
+    }
+
+    [Fact]
+    public void Build_TwelveBits_Is16x16x16_WithStep17()
+    {
+        Assert.Equal((16, 16, 16), Palette.ChannelCounts(12));
+        var colors = new Palette().Build(12);
+        Assert.Equal(1 << 12, colors.Length);
+        Assert.Equal(17 * 17, MinimumDistanceSquared(colors));
+        Assert.Equal(new Rgb24(0, 0, 17), colors[1]);
     }
 
     private static int MinimumDistanceSquared(Rgb24[] colors)
