@@ -109,6 +109,21 @@ internal sealed class DecodeScratch
 
     // Cached flat-delta array for GridSampler.ReadUniform — avoids allocating on every call.
     private int[]? _deltas;
+    private int[]? _rowValues;
+    private long[]? _rowDists;
+    private Rgb24[]? _rowSamples;
+
+    /// <summary>Winning palette index for one grid row. Reused across rows and images.</summary>
+    public int[] RowValues(int count) =>
+        _rowValues is { } values && values.Length >= count ? values : _rowValues = new int[count];
+
+    /// <summary>Squared distance of the winning sample for one grid row.</summary>
+    public long[] RowDists(int count) =>
+        _rowDists is { } dists && dists.Length >= count ? dists : _rowDists = new long[count];
+
+    /// <summary>The sample colour that produced each winning index, for the runner-up search.</summary>
+    public Rgb24[] RowSamples(int count) =>
+        _rowSamples is { } samples && samples.Length >= count ? samples : _rowSamples = new Rgb24[count];
 
     public int[] Deltas(int length)
     {

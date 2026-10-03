@@ -168,18 +168,32 @@ internal sealed class ShardRenderer(Fec fec, BitStream bitStream, FastPng fastPn
         int dataX = ix + layout.DataLeft, dataY = iy + layout.DataTop;
         int cell = layout.CellPx, bits = layout.BitsPerCell;
         long cellIndex = 0;
-        for (int gy = 0; gy < layout.GridH; gy++)
+        if (cell == 1)
         {
-            int firstRow = (dataY + gy * cell) * w;
-            for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
+            // One pixel is one store. Array.Fill of length 1 is that store plus a length check,
+            // and the colour is already the palette entry ReadCell names.
+            for (int gy = 0; gy < layout.GridH; gy++)
             {
-                int v = bitStream.ReadCell(cellBuffer, cellIndex * bits, bits);
-                Array.Fill(px, palette[v], firstRow + dataX + gx * cell, cell);
+                int row = (dataY + gy) * w + dataX;
+                for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
+                    px[row + gx] = palette[bitStream.ReadCell(cellBuffer, cellIndex * bits, bits)];
             }
-            int rowStart = firstRow + dataX;
-            int rowLen = layout.GridW * cell;
-            for (int r = 1; r < cell; r++)
-                Array.Copy(px, rowStart, px, rowStart + r * w, rowLen);
+        }
+        else
+        {
+            for (int gy = 0; gy < layout.GridH; gy++)
+            {
+                int firstRow = (dataY + gy * cell) * w;
+                for (int gx = 0; gx < layout.GridW; gx++, cellIndex++)
+                {
+                    int v = bitStream.ReadCell(cellBuffer, cellIndex * bits, bits);
+                    Array.Fill(px, palette[v], firstRow + dataX + gx * cell, cell);
+                }
+                int rowStart = firstRow + dataX;
+                int rowLen = layout.GridW * cell;
+                for (int r = 1; r < cell; r++)
+                    Array.Copy(px, rowStart, px, rowStart + r * w, rowLen);
+            }
         }
 
         writer.Write(outPath, px, w, h);

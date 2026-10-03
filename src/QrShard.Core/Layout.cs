@@ -29,7 +29,7 @@ internal sealed class Layout
 
     /// <summary>
     /// Largest cell stream the decoder will allocate: one byte per pixel of the maximum canvas.
-    /// An 8-bit, 1 px grid fits; the same grid at 9 or 10 bits does not. Encode and decode share
+    /// An 8-bit, 1 px grid fits; the same grid at 9 bits or more does not. Encode and decode share
     /// this cap so a shard that can be written can be read.
     /// </summary>
     public const long MaxCellStreamBytes = (long)MaxResolution * MaxResolution;
@@ -219,8 +219,23 @@ internal sealed class Layout
     /// </summary>
     public const int MetaVersionWideCell = 5;
 
+    /// <summary>
+    /// Version 6: the same strip with 11 or 12 bits per cell. Encoders still write version 4 for
+    /// 1–8 bits and version 5 for 9–10. The version nibble is the only new wire bit.
+    /// </summary>
+    public const int MetaVersionDeepCell = 6;
+
     /// <summary>Highest bits-per-cell versions 2–4 may declare. 9 and 10 require version 5.</summary>
     public const int MetaVersionFecMaxBits = 8;
+
+    /// <summary>Highest bits-per-cell version 5 may declare. 11 and 12 require version 6.</summary>
+    public const int MetaVersionWideCellMaxBits = 10;
+
+    /// <summary>
+    /// Highest bits-per-cell version 6 may declare. Matches <see cref="Palette.MaxBits"/>: the
+    /// product stops at 12, where every channel still steps by 17.
+    /// </summary>
+    public const int MetaVersionDeepCellMaxBits = 12;
 
     /// <summary>Field bytes in a v4 strip, before CRC and parity.</summary>
     private const int V4FieldBytes = 9;
@@ -236,8 +251,12 @@ internal sealed class Layout
         var bits = new BitWriter();
         bits.Write(MetaMagic, 8);
         // 1–8 bits stay on version 4, so a reader that already accepts that strip still can.
-        // 9 and 10 are a new capability and take version 5. The field widths are unchanged.
-        int version = BitsPerCell <= MetaVersionFecMaxBits ? MetaVersionFec : MetaVersionWideCell;
+        // 9 and 10 take version 5. 11 and 12 take version 6. The field widths are unchanged.
+        int version = BitsPerCell <= MetaVersionFecMaxBits
+            ? MetaVersionFec
+            : BitsPerCell <= MetaVersionWideCellMaxBits
+                ? MetaVersionWideCell
+                : MetaVersionDeepCell;
         bits.Write((uint)version, 4);
         bits.Write((uint)BitsPerCell, 4);
         bits.Write((uint)GridW, 14);
@@ -246,7 +265,7 @@ internal sealed class Layout
         bits.Write((uint)MetaH, 14);
         bits.Write((uint)(EccParity / 2), 6); // even 0..64 stored as 0..32
         // The interleave that version 3 signalled is now a field rather than a version, so v4
-        // and v5 carry both variants. Version 5 is the nibble spent on 9- and 10-bit cells.
+        // onward carry both variants. Version 5 is 9- and 10-bit cells; version 6 is 11 and 12.
         bits.Write((uint)(Interleave2 ? 1 : 0), 1);
         bits.Write(0, 1);                     // reserved, must be zero — 72 bits exactly
         byte[] fields = bits.ToArray();       // 9 bytes
@@ -260,9 +279,9 @@ internal sealed class Layout
     }
 
     /// <summary>
-    /// Repairs and unpacks a version-4 or version-5 strip. Both share this field layout. Returns
-    /// null when the damage exceeds what 5 parity symbols can correct, when the CRC still fails
-    /// afterwards, or when the version nibble is neither 4 nor 5.
+    /// Repairs and unpacks a version-4, version-5, or version-6 strip. They share this field
+    /// layout. Returns null when the damage exceeds what 5 parity symbols can correct, when the
+    /// CRC still fails afterwards, or when the version nibble is not 4, 5, or 6.
     /// </summary>
     private static Layout? UnpackV4(byte[] strip)
     {
@@ -279,13 +298,14 @@ internal sealed class Layout
         // damaged magic or version be repaired. So the check has to happen after correction, and
         // it was simply missing.
         //
-        // Unknown versions stay rejected. Version 5 uses these same offsets, so it is accepted
-        // here as itself; a version-4 strip is not a stand-in for it, and a later version is not
-        // read as either. That is what keeps an older grammar from silently growing a new density.
+        // Unknown versions stay rejected. Versions 5 and 6 use these same offsets, so each is
+        // accepted as itself; a version-4 strip is not a stand-in for either, and a later version
+        // is not read as one of them. That is what keeps an older grammar from silently growing
+        // a new density.
         if (reader.Read(8) != MetaMagic)
             return null;
         uint version = reader.Read(4);
-        if (version is not (MetaVersionFec or MetaVersionWideCell))
+        if (version is not (MetaVersionFec or MetaVersionWideCell or MetaVersionDeepCell))
             return null;
         int bitsPerCell = (int)reader.Read(4);
         int gridW = (int)reader.Read(14);
@@ -299,9 +319,12 @@ internal sealed class Layout
         ushort crc = (ushort)reader.Read(16);
         if (crc != new Crc().Crc16Ccitt(strip.AsSpan(0, V4FieldBytes)))
             return null;
-        // Version 4 still means 1–8. A strip that claims 9 or 10 under that version is refused
-        // rather than treated as the wider palette version 5 introduced.
+        // Each version keeps the contract it shipped with. A version-4 strip that claims 9 or
+        // more, or a version-5 strip that claims 11 or 12, is refused rather than treated as the
+        // wider palette a later version introduced.
         if (version == MetaVersionFec && bitsPerCell > MetaVersionFecMaxBits)
+            return null;
+        if (version == MetaVersionWideCell && bitsPerCell > MetaVersionWideCellMaxBits)
             return null;
 
         // Derived, not carried. v2 stored these and rejected any strip where they disagreed with
@@ -311,8 +334,14 @@ internal sealed class Layout
         if (innerW is < 1 or > MaxResolution || innerH is < 1 or > MaxResolution)
             return null;
 
+        int maxBits = version switch
+        {
+            MetaVersionDeepCell => MetaVersionDeepCellMaxBits,
+            MetaVersionWideCell => MetaVersionWideCellMaxBits,
+            _ => MetaVersionFecMaxBits,
+        };
         return Validated(bitsPerCell, gridW, gridH, cellPx, metaH, (int)innerW, (int)innerH, eccParity, interleave2,
-            version == MetaVersionWideCell ? Palette.MaxBits : MetaVersionFecMaxBits);
+            maxBits);
     }
 
     /// <summary>

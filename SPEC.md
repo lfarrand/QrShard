@@ -1,17 +1,19 @@
 # QrShard wire-format specification
 
-Version: format v2 (header version 2, metadata versions 2–5). Metadata version 4 adds error
+Version: format v2 (header version 2, metadata versions 2–6). Metadata version 4 adds error
 correction to the strip (§2.2). Metadata version 5 is that same strip with 9 or 10 bits per cell
-(§2.3). Encoders emit version 4 for 1–8 bits and version 5 for 9 and 10. Versions 2 and 3 remain
-readable, and the golden fixtures in `tests/QrShard.Tests/golden/` pin every released minor line
-against the current decoder.
+(§2.3). Metadata version 6 is that same strip with 11 or 12 bits per cell (§2.4). Encoders emit
+version 4 for 1–8 bits, version 5 for 9 and 10, and version 6 for 11 and 12. Versions 2 and 3
+remain readable, and the golden fixtures in `tests/QrShard.Tests/golden/` pin every released minor
+line against the current decoder.
 
 **Versions 4 and 5 are not readable by decoders older than them.** The version nibble is the
 capability field and unknown values are rejected rather than guessed at, so a shard written by a
 current encoder will not decode on an older build when it uses a version that build does not
 know. A 1–8 bit shard still declares version 4. A 9- or 10-bit shard declares version 5, which a
-version-4 reader rejects. That is the intended direction — old shards keep working forever, new
-ones need a current reader.
+version-4 reader rejects. An 11- or 12-bit shard declares version 6, which a version-5 reader
+rejects. That is the intended direction — old shards keep working forever, new ones need a
+current reader.
 
 Header *flags* (§4.1) provide separate feature signalling, but the one-byte field is now exhausted:
 all eight bits have assigned meanings. A future capability that cannot be expressed by their valid
@@ -87,8 +89,9 @@ top band.
 
 128 one-module-wide black/white cells, dark = 1, MSB-first.
 
-Four versions exist. **Encoders emit version 4 for 1–8 bits per cell and version 5 for 9 and 10.**
-Decoders MUST read all four. The stream header stays version 2; this bump is only the metadata nibble.
+Five versions exist. **Encoders emit version 4 for 1–8 bits per cell, version 5 for 9 and 10, and
+version 6 for 11 and 12.** Decoders MUST read all five. The stream header stays version 2; these
+bumps are only the metadata nibble.
 
 ### 2.1 Versions 2 and 3 (legacy, no error correction)
 
@@ -169,9 +172,23 @@ field. The only difference on the wire is the version nibble:
 | bitsPerCell | 4 | 1–10. Encoders emit this version only for 9 and 10 |
 
 A decoder MUST accept a version-5 strip whose `bitsPerCell` is 1–10, and MUST reject a version-4
-strip whose `bitsPerCell` is 9 or 10. A version-5 strip MUST NOT be accepted by the version-4
-check. Versions other than 2, 3, 4, and 5 MUST be rejected. Nothing else in the strip grows: the
-reserved bit stays zero, and `innerW` / `innerH` are still derived.
+strip whose `bitsPerCell` is 9 or 10. A version-5 strip whose `bitsPerCell` is 11 or 12 MUST be
+rejected. A version-5 strip MUST NOT be accepted by the version-4 check. Nothing else in the strip
+grows: the reserved bit stays zero, and `innerW` / `innerH` are still derived.
+
+### 2.4 Version 6 (11 and 12 bits per cell)
+
+Same 128 modules and the same field widths as versions 4 and 5, including the 4-bit
+`bitsPerCell` field. The only difference on the wire is the version nibble:
+
+| Field | Bits | Meaning |
+|---|---|---|
+| version | 4 | `6` |
+| bitsPerCell | 4 | 1–12. Encoders emit this version only for 11 and 12 |
+
+A decoder MUST accept a version-6 strip whose `bitsPerCell` is 1–12, and MUST reject a version-5
+strip whose `bitsPerCell` is 11 or 12. Versions other than 2, 3, 4, 5, and 6 MUST be rejected.
+The reserved bit stays zero. The stream header stays version 2.
 
 ## 3. Palette
 
@@ -182,13 +199,16 @@ or 0 when `count = 1`. Color index `v` decomposes as `iR = v / (nG·nB)`, `iG = 
 `iB = v mod nB`.
 
 Values 9 and 10 use this same 4-bit field (the nibble represents 0–15; 16 does not fit) and are
-carried by metadata version 5 (§2.3). A decoder that only accepts version 4 rejects those shards.
-Images
-stay 8 bits per channel. At 10 bits the split is 16×8×8 levels, so the minimum channel step
-inside 8-bit RGB is 17. Densities 1–8 keep a minimum step of at least 32. A geometry whose
+carried by metadata version 5 (§2.3). Values 11 and 12 are carried by metadata version 6 (§2.4).
+A decoder that only accepts version 4 rejects 9 and 10; a decoder that only accepts version 5
+rejects 11 and 12. Images stay 8 bits per channel. At 10 bits the split is 16×8×8 levels, so the
+minimum channel step inside 8-bit RGB is 17. At 11 bits the split is 16×16×8: red and green step
+by 17, and blue stays at 36. At 12 bits the split is 16×16×16, step 17 on every channel. Densities
+1–8 keep a minimum step of at least 32. Thirteen and above are rejected. A geometry whose
 calibration strip cannot give every colour at least one pixel is rejected, as is a cell stream
-larger than 16384² bytes. At the maximum canvas with 1 px cells, 9- and 10-bit depths exceed
-that cap; densities 1–8 do not.
+larger than 16384² bytes. At the maximum canvas with 1 px cells, 9-bit and deeper densities exceed
+that cap; densities 1–8 do not. A 4K strip is wide enough for the 2048 colours of 11 bits and too
+narrow for the 4096 colours of 12 bits.
 
 The palette strips draw the `n` colors as equal-width blocks in index order. Decoders normally
 classify data cells against the **measured** strip colors (nearest squared-RGB distance), so the

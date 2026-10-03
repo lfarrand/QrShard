@@ -10,7 +10,7 @@ back into the original file, **bit-for-bit, verified by SHA-256**.
 The image format is custom (not QR-standard) and tuned for screen-to-screenshot transfer.
 Because a screenshot is a lossless pixel copy, each image carries more than a QR code. A robust
 default image holds about 212 KB. The Max4K profile holds about 4.9 MB. A 4K image at 10 bits per
-cell holds about **8.1 MB**. A 100 MB file fits in 22 Max4K screenshots. A 300 MB zip fits in about 65 Max4K
+cell holds about **8.1 MB**, and at 11 bits about **9.0 MB**. A 100 MB file fits in 22 Max4K screenshots. A 300 MB zip fits in about 65 Max4K
 screenshots. Layered error correction
 (including errors-and-erasures Reed-Solomon fed by the classifier's own confidence) absorbs
 cursors, pop-ups, and re-encoding; parity or fountain-coded images let whole captures be lost
@@ -299,7 +299,7 @@ There is no `qrshard display` or `qrshard record`. Those are separate Windows ex
 | `-o, --out <dir>` | any path | `<input>.shards` beside the input; `bundle.shards` beside the first input for multiple inputs | Output folder for the shard images |
 | `-r, --resolution <px>` | `auto`; one number (square); `WxH` — 700–16384 per side | `auto` | Image size. `auto` detects the primary monitor's native resolution so shards fill the screen they'll be captured from |
 | `-c, --cell <px>` | 1–64 | 3 | Data cell size in pixels. 3 survives fractional display rescaling; 1 doubles-to-quadruples density but needs pixel-perfect captures |
-| `-b, --bits <n>` | 1–10 | 4 | Bits per cell (color density): 2ⁿ palette colors |
+| `-b, --bits <n>` | 1–12 | 4 | Bits per cell (color density): 2ⁿ palette colors. 11 and 12 declare metadata version 6; 12 needs a calibration strip at least 4096 px wide |
 | `-e, --ecc <n>` | even, 0–64 | 16 | Reed-Solomon parity bytes per 255-byte block. 16 ≈ 6% overhead; fixes 8 unknown-position bytes/block, up to ~14 when the classifier can flag them (erasures) |
 | `-R, --recovery <pct>` | 0–100 | 0 (off) | Extra **parity images** (Cauchy erasure code), calculated as a percentage of data images and distributed per stripe. Loss tolerance is per stripe: `-R 15` adds about 15 parity images per 100 data images (~13% of the resulting set) |
 | `-F, --fountain <pct>` | 0–1000 | 0 (off) | **Fountain-coded frames** (random linear code) for video mode: a full-rank set of roughly `stripeData` captured frames per stripe reconstructs the data; dependent/duplicate frames do not count. Mutually exclusive with `-R` |
@@ -512,7 +512,7 @@ appsettings.json > built-in default**. Invalid values fail loudly, naming the se
 |---|---|---|---|
 | `EncodeDefaults.Resolution` | `auto`, number, `WxH` | `auto` | Default for `-r` |
 | `EncodeDefaults.CellPx` | 1–64 | 3 | Default for `-c` |
-| `EncodeDefaults.BitsPerCell` | 1–10 | 4 | Default for `-b` |
+| `EncodeDefaults.BitsPerCell` | 1–12 | 4 | Default for `-b`. 12 needs a strip at least 4096 px wide |
 | `EncodeDefaults.EccParity` | even, 0–64 | 16 | Default for `-e` |
 | `EncodeDefaults.RecoveryPercent` | 0–100 | 0 | Default for `-R` |
 | `EncodeDefaults.ImageFormat` | `png` `bmp` `tga` `qoi` `webp` `tiff` | `png` | Default for `-f` |
@@ -583,8 +583,10 @@ silently produces the wrong bytes. So:
 > talking to a receiver on 1.5.x produces images the receiver cannot read.
 
 9- and 10-bit cells declare metadata version 5. A reader that stops at version 4 rejects those
-images. Output at 1–8 bits per cell still declares version 4, so a reader that already accepts
-version 4 keeps reading that output. The stream-header version is unchanged.
+images. 11- and 12-bit cells declare metadata version 6. A reader that stops at version 5 rejects
+those images. Output at 1–8 bits per cell still declares version 4, and output at 9–10 bits still
+declares version 5, so a reader that already accepts that version keeps reading that output. The
+stream-header version is unchanged.
 
 Header *flags* signal features independently of the version nibble, but the one-byte flag field
 is exhausted: all eight bits are assigned. A future capability that is not a valid combination of
@@ -602,15 +604,19 @@ Per image (with the default ECC): `bytes ≈ grid cells × bits/cell / 8 × 239/
 | 3840x2160   | 1 px | 8    | ~6.5 MB       | pixel-perfect, ideal conditions |
 | 3840x2160   | 1 px | 9    | ~7.3 MB       | pixel-perfect, ideal conditions |
 | 3840x2160   | 1 px | 10   | ~8.1 MB       | pixel-perfect, ideal conditions |
+| 3840x2160   | 1 px | 11   | ~9.0 MB       | pixel-perfect, ideal conditions; metadata version 6 |
 | 4096²       | 1 px | 8    | ~14.1 MB      | pixel-perfect; needs a >4K display to show at 100% |
 | 4096²       | 1 px | 10   | ~17.6 MB      | pixel-perfect; needs a >4K display to show at 100% |
 
 Densities 1 to 8 keep a minimum channel step of at least 32 inside an 8-bit colour channel.
 Density 9 uses 8 levels on each channel, so its minimum step is 36. Density 10 uses 16 red levels,
-8 green levels, and 8 blue levels, so its minimum step is 17. A 16384 px square with 1 px cells
-rejects 9 and 10 bits, because the cell stream would exceed 16384 squared bytes. Densities 1 to 8
-stay under that cap. 9- and 10-bit cells declare metadata version 5. Output at 1 to 8 bits per cell
-still declares version 4.
+8 green levels, and 8 blue levels, so its minimum step is 17. Density 11 uses 16 red, 16 green, and
+8 blue levels, so red and green step by 17 and blue stays at 36. Density 12 uses 16 levels on every
+channel, step 17, and needs a calibration strip at least 4096 px wide; a 4K image rejects it.
+Thirteen and above are rejected. A 16384 px square with 1 px cells
+rejects 9 bits and above, because the cell stream would exceed 16384 squared bytes. Densities 1 to 8
+stay under that cap. 9- and 10-bit cells declare metadata version 5. 11- and 12-bit cells declare
+metadata version 6. Output at 1 to 8 bits per cell still declares version 4.
 
 **Can you transfer a 300 MB zip? Yes.** At 4K density it is ~65 images; with `-R 10` you also
 get 7 parity images in its stripe, so any 7 images in that stripe can be lost. End-to-end time is

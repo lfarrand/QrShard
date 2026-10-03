@@ -12,7 +12,7 @@ public sealed record QrShardEncodeOptions
     /// <summary>Data cell size in pixels (1-64). 3 survives display rescaling; 1 maximizes density.</summary>
     public int CellPx { get; init; } = 3;
 
-    /// <summary>Bits per cell (1-10): 2^n palette colors.</summary>
+    /// <summary>Bits per cell (1-12): 2^n palette colors. 11 and 12 declare metadata version 6.</summary>
     public int BitsPerCell { get; init; } = 4;
 
     /// <summary>Reed-Solomon parity bytes per 255-byte codeword (even, 0-64).</summary>

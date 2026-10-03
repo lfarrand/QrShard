@@ -250,7 +250,9 @@ public class AppSettingsTests
     [Theory]
     [InlineData(9)]
     [InlineData(10)]
-    public void BitsPerCell_NineAndTen_AreAccepted(int bits)
+    [InlineData(11)]
+    [InlineData(12)]
+    public void BitsPerCell_NineThroughTwelve_AreAccepted(int bits)
     {
         using var tmp = new TempDir();
         var settings = LoadJson(tmp, $$"""{ "EncodeDefaults": { "BitsPerCell": {{bits}} } }""");
@@ -266,7 +268,7 @@ public class AppSettingsTests
 
     [Theory]
     [InlineData("""{ "EncodeDefaults": { "CellPx": 0 } }""", "CellPx")]
-    [InlineData("""{ "EncodeDefaults": { "BitsPerCell": 11 } }""", "BitsPerCell")]
+    [InlineData("""{ "EncodeDefaults": { "BitsPerCell": 13 } }""", "BitsPerCell")]
     [InlineData("""{ "EncodeDefaults": { "BitsPerCell": 16 } }""", "BitsPerCell")]
     [InlineData("""{ "EncodeDefaults": { "EccParity": 15 } }""", "EccParity")]
     [InlineData("""{ "EncodeDefaults": { "RecoveryPercent": 150 } }""", "RecoveryPercent")]

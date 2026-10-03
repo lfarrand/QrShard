@@ -49,7 +49,7 @@ public class LayoutTests
     [InlineData(2160, 2160, 0, 4, 0)]   // cell too small
     [InlineData(2160, 2160, 65, 4, 0)]  // cell too large
     [InlineData(2160, 2160, 3, 0, 0)]   // bits too small
-    [InlineData(2160, 2160, 3, 11, 0)]  // bits too large
+    [InlineData(2160, 2160, 3, 13, 0)]  // bits too large; 11 and 12 are legal, 13 is not
     [InlineData(2160, 2160, 3, 16, 0)]  // 16 does not fit the 4-bit field
     [InlineData(2160, 2160, 3, 4, -2)]  // negative parity
     [InlineData(2160, 2160, 3, 4, 66)]  // parity above max
@@ -150,6 +150,64 @@ public class LayoutTests
         Assert.Null(Layout.UnpackMetadata(ToModules(layout.PackMetadata())));
     }
 
+    [Theory]
+    [InlineData(11)]
+    [InlineData(12)]
+    public void Metadata_ElevenAndTwelve_PackVersion6_AndRoundTrip(int bits)
+    {
+        int width = bits == 11 ? 3840 : 4300;
+        int height = bits == 11 ? 2160 : 4300;
+        var layout = Layout.Create(width, height, 1, bits, 0);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionDeepCell, packed[1] >> 4);
+        Assert.Equal(bits, packed[1] & 0x0F);
+        Assert.Equal(0, packed[8] & 1); // reserved metadata bit
+        var restored = Layout.UnpackMetadata(ToModules(packed));
+        Assert.NotNull(restored);
+        Assert.Equal(bits, restored!.BitsPerCell);
+        Assert.Equal(layout.GridW, restored.GridW);
+        Assert.Equal(layout.EccParity, restored.EccParity);
+    }
+
+    [Theory]
+    [InlineData(11)]
+    [InlineData(12)]
+    public void Metadata_Version5WithElevenOrTwelveBits_IsRejected(int bits)
+    {
+        int width = bits == 11 ? 3840 : 4300;
+        int height = bits == 11 ? 2160 : 4300;
+        var layout = Layout.Create(width, height, 1, bits, 0);
+        byte[] packed = layout.PackMetadata();
+        Assert.Equal(Layout.MetaVersionDeepCell, packed[1] >> 4);
+        packed[1] = (byte)((packed[1] & 0x0F) | (Layout.MetaVersionWideCell << 4));
+        Reseal(packed);
+        Assert.Equal(Layout.MetaVersionWideCell, packed[1] >> 4);
+        Assert.Null(Layout.UnpackMetadata(ToModules(packed)));
+    }
+
+    [Fact]
+    public void Metadata_UnknownVersion7_IsRejected()
+    {
+        var layout = Layout.Create(2160, 2160, 3, 4, 16);
+        byte[] packed = layout.PackMetadata();
+        packed[1] = (byte)((packed[1] & 0x0F) | (7 << 4));
+        Reseal(packed);
+        Assert.Null(Layout.UnpackMetadata(ToModules(packed)));
+    }
+
+    [Fact]
+    public void Create_FourK_CoversElevenBitPalette_AndRejectsTwelve()
+    {
+        var eleven = Layout.Create(3840, 2160, 1, 11, 16);
+        Assert.True(Layout.CalibrationStripCoversPalette(eleven.GridW * eleven.CellPx, 11));
+        Assert.Equal(2048, 1 << 11);
+        var twelve = Assert.Throws<ArgumentException>(() => Layout.Create(3840, 2160, 1, 12, 16));
+        Assert.Contains("calibration", twelve.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(Layout.CalibrationStripCoversPalette(4095, 12));
+        Assert.True(Layout.CalibrationStripCoversPalette(4096, 12));
+        Assert.False(Layout.CalibrationStripCoversPalette(3708, 12));
+    }
+
     [Fact]
     public void Create_RejectsTenBitStripThatCannotPaintEveryColour()
     {
@@ -198,6 +256,7 @@ public class LayoutTests
     [InlineData(16384, 16384, 64, 8, 2)]
     [InlineData(2160, 2160, 3, 9, 16)]
     [InlineData(2160, 2160, 3, 10, 16)]
+    [InlineData(3840, 2160, 1, 11, 16)]
     public void Metadata_PackUnpack_RoundTrips(int width, int height, int cell, int bits, int parity)
     {
         var layout = Layout.Create(width, height, cell, bits, parity);
@@ -320,6 +379,15 @@ public class LayoutTests
             Assert.True(Math.Abs(estimate - layout.MetaH) <= 1.5,
                 $"res={res}: estimate {estimate} vs encoded {layout.MetaH}");
         }
+    }
+
+    /// <summary>Recomputes the CRC over the 9 field bytes and the RS parity over the 11 that follow.</summary>
+    private static void Reseal(byte[] strip)
+    {
+        ushort crc = new Crc().Crc16Ccitt(strip.AsSpan(0, 9));
+        strip[9] = (byte)(crc >> 8);
+        strip[10] = (byte)crc;
+        new ReedSolomon().Encode(strip.AsSpan(0, 11), strip.AsSpan(11, 5));
     }
 
     private static bool[] ToModules(byte[] packed)

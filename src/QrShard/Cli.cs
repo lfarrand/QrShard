@@ -1805,7 +1805,7 @@ internal sealed class Cli(AppSettings? settings = null)
                                          WxH, 700-16384, to override (e.g. a smaller size shows
                                          the code surrounded by padding)
                 -c, --cell <px>          Data cell size in pixels, 1-64 (default: 3)
-                -b, --bits <n>           Bits per cell / color density, 1-10 (default: 4)
+                -b, --bits <n>           Bits per cell / color density, 1-12 (default: 4)
                 -e, --ecc <n>            Reed-Solomon parity per 255-byte block, even, 0-64
                                          (default: 16 ≈ 6% overhead, fixes 8 bad bytes per block)
                 -R, --recovery <pct>     Add parity IMAGES so whole missing/damaged images can be

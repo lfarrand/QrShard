@@ -91,7 +91,7 @@ thread-safe; feed it from one consumer or provide external synchronisation.
 |---|---:|---|
 | `Width`, `Height` | 2160 | 700–16384 pixels per side |
 | `CellPx` | 3 | 1–64; smaller cells increase density and demand cleaner captures |
-| `BitsPerCell` | 4 | 1–10 bits; controls palette size and density |
+| `BitsPerCell` | 4 | 1–12 bits; controls palette size and density. 11 and 12 declare metadata version 6 |
 | `EccParity` | 16 | Even, 0–64 Reed-Solomon parity bytes per 255-byte codeword |
 | `RecoveryPercent` | 0 | 0–100% extra Cauchy parity images for whole-image loss |
 | `FountainPercent` | 0 | 0–1000% random-linear coded frames; mutually exclusive with recovery parity |
@@ -102,7 +102,10 @@ thread-safe; feed it from one consumer or provide external synchronisation.
 
 Cells at 1 to 8 bits declare metadata version 4. Their minimum channel step is at least 32. A
 9-bit cell declares metadata version 5. Its minimum channel step is 36. A 10-bit cell declares
-metadata version 5. Its minimum channel step is 17.
+metadata version 5. Its minimum channel step is 17. An 11-bit cell declares metadata version 6.
+Its split is 16×16×8, so red and green step by 17 and blue stays at 36. A 12-bit cell declares
+metadata version 6 and steps by 17 on every channel. It needs a calibration strip at least 4096 px
+wide.
 
 Unlike the CLI, Core does not auto-detect a monitor or read CLI `appsettings.json`; the values in
 `QrShardEncodeOptions` are explicit and deterministic. `EncodeFile` encodes one file. Applications
