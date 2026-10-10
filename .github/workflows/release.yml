@@ -399,7 +399,7 @@ jobs:
             }
           cp "$manifest" "qrshard-${{ matrix.rid }}-$ASSET_LABEL.spdx.json"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-${{ matrix.rid }}
           path: |
@@ -437,7 +437,7 @@ jobs:
           export QRSHARD_PACKAGE_VERSION="$(sed -n 's|.*<Version>\([^<]*\)</Version>.*|\1|p' src/QrShard/QrShard.csproj | head -1)"
           tests/verify-package-consumer.sh
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nuget-packages
           path: nupkg/*.nupkg
@@ -610,7 +610,7 @@ jobs:
               echo "::error::Recorder SBOM is missing pinned Vortice.Direct3D11 3.8.3"; exit 1;
             }
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-display-win-x64
           path: |
@@ -619,7 +619,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-recorder-win-x64
           path: |
@@ -742,7 +742,7 @@ jobs:
           }
           cp "$core_manifest" "release-sbom/qrshard-core-$ASSET_LABEL.spdx.json"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-sbom
           path: release-sbom/*.spdx.json
