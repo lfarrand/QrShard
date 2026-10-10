@@ -110,12 +110,13 @@
       },
       "Microsoft.Diagnostics.Runtime": {
         "type": "Direct",
-        "requested": "[4.1.745802, )",
-        "resolved": "4.1.745802",
-        "contentHash": "2rAGwsWz6eX8T9wXzkfBZH8sKOlq+YKLd7HaEIHn9iK/TL0mNn43ial6Li5VmLl8pzC2OATNPhI3q3ZS9mw9vg==",
+        "requested": "[4.2.750101, )",
+        "resolved": "4.2.750101",
+        "contentHash": "EmXKatE8WuD1Xg9IK7f5b/4C1Wk6OGm1Zno9dc4s+cgpP4Gu5Z+DTKbLaeCRwG7kSAs9pmG/ERl6MF9gTzV+OA==",
         "dependencies": {
           "Azure.Identity": "1.21.0",
-          "Microsoft.Diagnostics.NETCore.Client": "0.2.661903"
+          "Microsoft.Diagnostics.NETCore.Client": "0.2.661903",
+          "Microsoft.Security.AntiSSRF": "1.0.0"
         }
       },
       "Microsoft.Diagnostics.Tracing.TraceEvent": {
@@ -298,6 +299,11 @@
         "dependencies": {
           "Microsoft.IdentityModel.Abstractions": "8.14.0"
         }
+      },
+      "Microsoft.Security.AntiSSRF": {
+        "type": "Transitive",
+        "resolved": "1.0.0",
+        "contentHash": "V0AJQt8FC5HXkvFhBqB0WgMADVL+vG+qiMK9p39OHdqfNwYOh1durk8j9rKPklWasBxpk8ifVdzoJmEgUWVoeg=="
       },
       "SixLabors.ImageSharp": {
         "type": "Transitive",
